@@ -5,6 +5,7 @@
 //! discrepancy > tolerance means our Rust diverges from the R reference.
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use faer::Mat;
     use serde::Deserialize;
