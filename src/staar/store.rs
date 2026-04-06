@@ -30,10 +30,6 @@ use crate::ingest::{ColumnContract, ColumnRequirement};
 use crate::output::Output;
 use crate::resource::Resources;
 
-// ---------------------------------------------------------------------------
-// Manifest & ChromInfo
-// ---------------------------------------------------------------------------
-
 #[derive(Serialize, Deserialize)]
 pub struct StoreManifest {
     pub version: u32,
@@ -50,10 +46,6 @@ pub struct ChromInfo {
     pub name: String,
     pub n_variants: usize,
 }
-
-// ---------------------------------------------------------------------------
-// Content fingerprinting
-// ---------------------------------------------------------------------------
 
 /// Content-based file fingerprint: SHA-256 of (first 1MB + last 1MB + file size).
 /// Survives path renames and HPC scratch migrations — only invalidates when
@@ -127,81 +119,34 @@ pub fn compute_key(vcf_path: &Path, annotations_path: &Path) -> Result<String, F
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-// ---------------------------------------------------------------------------
-// Probe: check if a valid store exists
-// ---------------------------------------------------------------------------
-
 pub struct StoreProbe {
-    pub hit: bool,
     pub store_dir: PathBuf,
+    /// `Some` only when a valid, key-matching, fully-materialized store exists.
     pub manifest: Option<StoreManifest>,
 }
 
 pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> StoreProbe {
     let store_dir = store_dir.to_path_buf();
-    let manifest_path = store_dir.join("manifest.json");
+    let miss = || StoreProbe { store_dir: store_dir.clone(), manifest: None };
 
-    let manifest = match fs::read_to_string(&manifest_path) {
-        Ok(s) => match serde_json::from_str::<StoreManifest>(&s) {
-            Ok(m) => m,
-            Err(_) => {
-                return StoreProbe {
-                    hit: false,
-                    store_dir,
-                    manifest: None,
-                }
-            }
-        },
-        Err(_) => {
-            return StoreProbe {
-                hit: false,
-                store_dir,
-                manifest: None,
-            }
-        }
-    };
-
-    let key = match compute_key(vcf_path, annotations_path) {
-        Ok(k) => k,
-        Err(_) => {
-            return StoreProbe {
-                hit: false,
-                store_dir,
-                manifest: None,
-            }
-        }
-    };
+    let Ok(s) = fs::read_to_string(store_dir.join("manifest.json")) else { return miss(); };
+    let Ok(manifest) = serde_json::from_str::<StoreManifest>(&s) else { return miss(); };
+    let Ok(key) = compute_key(vcf_path, annotations_path) else { return miss(); };
 
     if manifest.key != key || manifest.version != 3 {
-        return StoreProbe {
-            hit: false,
-            store_dir,
-            manifest: Some(manifest),
-        };
+        return miss();
     }
 
     for ci in &manifest.chromosomes {
         let sparse_g = store_dir.join(format!("chromosome={}/sparse_g.bin", ci.name));
         let variants = store_dir.join(format!("chromosome={}/variants.parquet", ci.name));
         if !sparse_g.exists() || !variants.exists() {
-            return StoreProbe {
-                hit: false,
-                store_dir,
-                manifest: Some(manifest),
-            };
+            return miss();
         }
     }
 
-    StoreProbe {
-        hit: true,
-        store_dir,
-        manifest: Some(manifest),
-    }
+    StoreProbe { store_dir, manifest: Some(manifest) }
 }
-
-// ---------------------------------------------------------------------------
-// Store builder orchestration
-// ---------------------------------------------------------------------------
 
 pub const STAAR_ANNOTATION_COLUMNS: &[ColumnRequirement] = &[
     ColumnRequirement {
@@ -276,19 +221,13 @@ pub fn build_or_load_store(
     res: &Resources,
     out: &dyn Output,
 ) -> Result<GenoStoreResult, FavorError> {
-    let probe_result = if !rebuild_store {
-        probe(store_dir, genotypes, annotations)
+    let probe_result = if rebuild_store {
+        StoreProbe { store_dir: store_dir.to_path_buf(), manifest: None }
     } else {
-        StoreProbe {
-            hit: false,
-            store_dir: store_dir.to_path_buf(),
-            manifest: None,
-        }
+        probe(store_dir, genotypes, annotations)
     };
 
-    if probe_result.hit {
-        // hit == true guarantees manifest is Some
-        let manifest = probe_result.manifest.unwrap();
+    if let Some(manifest) = probe_result.manifest {
         out.status(&format!(
             "Step 1/4: Using cached genotype store ({} variants x {} samples)",
             manifest.n_variants, manifest.n_samples,
@@ -417,10 +356,6 @@ pub fn run_annotation_join(
 
     Ok(engine)
 }
-
-// ---------------------------------------------------------------------------
-// Build store
-// ---------------------------------------------------------------------------
 
 pub fn build(
     engine: &DfEngine,

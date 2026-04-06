@@ -167,10 +167,6 @@ pub fn build_noncoding_masks(
     build_masks_from_registry(variants, NONCODING_MASKS, min_variants)
 }
 
-// ---------------------------------------------------------------------------
-// SCANG: data-adaptive variable-size scanning windows (formerly scang.rs)
-// ---------------------------------------------------------------------------
-
 /// SCANG parameters: data-adaptive variable-size scanning windows.
 pub struct ScangParams {
     pub lmin: usize,

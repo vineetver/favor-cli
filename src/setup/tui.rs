@@ -686,10 +686,6 @@ fn draw_dir_browser(frame: &mut Frame, state: &mut DirBrowserState) {
     frame.render_widget(verdict, right_layout[2]);
 }
 
-// ---------------------------------------------------------------------------
-// Pack selector
-// ---------------------------------------------------------------------------
-
 /// Interactive multi-select for add-on packs.
 /// `installed` contains pack IDs already present on disk — shown as pre-checked with "(installed)".
 /// Returns list of selected pack IDs, or None if cancelled.
@@ -861,10 +857,6 @@ fn draw_pack_selector(
     frame.render_widget(help, layout[4]);
 }
 
-// ---------------------------------------------------------------------------
-// Environment selector
-// ---------------------------------------------------------------------------
-
 struct EnvOption {
     env: Environment,
     label: &'static str,
@@ -971,10 +963,6 @@ fn draw_environment(frame: &mut Frame, selected: usize) {
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(help, layout[3]);
 }
-
-// ---------------------------------------------------------------------------
-// Memory budget selector
-// ---------------------------------------------------------------------------
 
 struct MemoryPreset {
     label: &'static str,

@@ -6,10 +6,6 @@
 
 use std::io::{self, Write};
 
-// ═══════════════════════════════════════════════════════════════════════
-// sparse_g.bin
-// ═══════════════════════════════════════════════════════════════════════
-
 pub const SPARSE_G_MAGIC: [u8; 8] = *b"FAVORG\x03\0";
 pub const SPARSE_G_VERSION: u16 = 3;
 pub const SPARSE_G_HEADER_SIZE: usize = 64;
@@ -80,12 +76,15 @@ impl SparseGHeader {
         if version != SPARSE_G_VERSION {
             return Err("unsupported sparse_g version");
         }
+        // Header length checked above; all slice→array conversions are infallible.
+        let read_u32 = |off: usize| u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        let read_u64 = |off: usize| u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
         Ok(Self {
-            n_samples: u32::from_le_bytes(bytes[10..14].try_into().unwrap()),
-            n_variants: u32::from_le_bytes(bytes[14..18].try_into().unwrap()),
-            flags: u32::from_le_bytes(bytes[18..22].try_into().unwrap()),
-            total_carriers: u64::from_le_bytes(bytes[22..30].try_into().unwrap()),
-            offsets_start: u64::from_le_bytes(bytes[30..38].try_into().unwrap()),
+            n_samples: read_u32(10),
+            n_variants: read_u32(14),
+            flags: read_u32(18),
+            total_carriers: read_u64(22),
+            offsets_start: read_u64(30),
         })
     }
 }

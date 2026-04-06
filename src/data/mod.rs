@@ -623,10 +623,6 @@ impl AnnotationDb {
     }
 }
 
-// ---------------------------------------------------------------------------
-// AnnotatedSet (was AnnotatedVariantSet — typed annotated output)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnnotatedSetMeta {
     pub source: String,
@@ -716,10 +712,6 @@ impl AnnotatedSet {
     }
 }
 
-// ---------------------------------------------------------------------------
-// EnrichedSet (annotated + tissue overlays)
-// ---------------------------------------------------------------------------
-
 #[allow(dead_code)] // enrichment pipeline (v0.2.0)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrichedSetMeta {
@@ -753,10 +745,6 @@ impl EnrichedSet {
         &self.meta.tissue
     }
 }
-
-// ---------------------------------------------------------------------------
-// TissueTable — typed enrichment table variant
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TissueTable {
@@ -847,10 +835,6 @@ impl TissueTable {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// TissueDb — manages available tissue enrichment tables
-// ---------------------------------------------------------------------------
 
 pub struct TissueDb {
     root: PathBuf,

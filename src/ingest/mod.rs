@@ -396,7 +396,6 @@ pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
     }
 }
 
-// ── Column alias map ────────────────────────────────────────────────────────
 // THE single source of truth for GWAS column name normalization.
 
 /// (lowercased_input_name, canonical_output_name)
@@ -500,7 +499,6 @@ pub fn map_columns(raw_columns: &[String]) -> (Vec<ColumnMapping>, Vec<Ambiguity
     map_columns_with(raw_columns, ALIASES, AMBIGUOUS_ALLELE_COLS)
 }
 
-// ── Column resolver ─────────────────────────────────────────────────────────
 // Structured API over the ALIASES map: resolve input columns to canonical names
 // and report what's missing, ambiguous, or unmapped.
 
@@ -615,7 +613,6 @@ fn map_columns_with(
     (mapped, ambiguous, unmapped)
 }
 
-// ── Column contracts ────────────────────────────────────────────────────────
 // Upfront schema validation: every command checks required columns before compute.
 
 pub struct ColumnRequirement {

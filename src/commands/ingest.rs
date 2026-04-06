@@ -149,10 +149,6 @@ fn run_ingest_dry(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorEr
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Core pipeline
-// ---------------------------------------------------------------------------
-
 /// Core ingest pipeline: detect → validate → ingest → report.
 pub fn run_ingest(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorError> {
     let first = &config.inputs[0];
@@ -169,10 +165,6 @@ pub fn run_ingest(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorEr
     }
     ingest_tabular(config, &analysis, out)
 }
-
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
 
 fn validate_all_same_format(
     inputs: &[PathBuf],
@@ -194,10 +186,6 @@ fn validate_all_same_format(
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// VCF ingestion
-// ---------------------------------------------------------------------------
 
 fn ingest_vcf(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorError> {
     let first = &config.inputs[0];
@@ -269,10 +257,6 @@ fn ingest_vcf(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorError>
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// SQL script emission
-// ---------------------------------------------------------------------------
-
 fn emit_sql_script(
     config: &IngestConfig,
     analysis: &ingest::Analysis,
@@ -306,10 +290,6 @@ fn emit_sql_script(
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Tabular / Parquet ingestion
-// ---------------------------------------------------------------------------
 
 fn ingest_tabular(
     config: &IngestConfig,
@@ -393,10 +373,6 @@ fn register_tabular_inputs(
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn apply_build_override(
     analysis: &mut ingest::Analysis,

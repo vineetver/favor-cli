@@ -8,10 +8,6 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-// ---------------------------------------------------------------------------
-// Chromosome
-// ---------------------------------------------------------------------------
-
 /// Strongly-typed chromosome identifier.
 ///
 /// `Ord` gives natural sort order: 1..22 < X < Y < MT.
@@ -108,10 +104,6 @@ impl<'de> Deserialize<'de> for Chromosome {
     }
 }
 
-// ---------------------------------------------------------------------------
-// AnnotationWeights
-// ---------------------------------------------------------------------------
-
 /// Fixed-size annotation weights for the 11 STAAR channels.
 ///
 /// Replaces `Vec<f64>` annotation_weights, `WEIGHT_COL_START` / `WEIGHT_COL_COUNT`
@@ -160,10 +152,6 @@ impl AnnotationWeights {
         "apc_transcription_factor",
     ];
 }
-
-// ---------------------------------------------------------------------------
-// RegionType
-// ---------------------------------------------------------------------------
 
 /// Strongly-typed GENCODE region type. Eliminates per-variant String allocations
 /// and replaces `.contains()` string matching in mask predicates with integer
@@ -271,10 +259,6 @@ impl RegionType {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Consequence
-// ---------------------------------------------------------------------------
 
 /// Strongly-typed variant consequence. Eliminates per-variant String allocations
 /// and turns mask predicates into integer match arms.
@@ -404,10 +388,6 @@ impl Consequence {
     }
 }
 
-// ---------------------------------------------------------------------------
-// RegulatoryFlags
-// ---------------------------------------------------------------------------
-
 /// Regulatory region flags used by mask predicates.
 ///
 /// Replaces 4 loose `bool` fields repeated in the old AnnotatedVariant and
@@ -419,10 +399,6 @@ pub struct RegulatoryFlags {
     pub ccre_promoter: bool,
     pub ccre_enhancer: bool,
 }
-
-// ---------------------------------------------------------------------------
-// FunctionalAnnotation
-// ---------------------------------------------------------------------------
 
 /// Everything STAAR needs to classify (masks) and weight (score tests) a variant.
 ///
@@ -437,10 +413,6 @@ pub struct FunctionalAnnotation {
     pub regulatory: RegulatoryFlags,
     pub weights: AnnotationWeights,
 }
-
-// ---------------------------------------------------------------------------
-// AnnotatedVariant (canonical)
-// ---------------------------------------------------------------------------
 
 /// Single canonical variant type used by masks, score tests, sumstats export,
 /// result writing, and MetaSTAAR merge.
@@ -457,19 +429,11 @@ pub struct AnnotatedVariant {
     pub annotation: FunctionalAnnotation,
 }
 
-// ---------------------------------------------------------------------------
-// Variant ID
-// ---------------------------------------------------------------------------
-
 /// Format a universal variant ID: "chr-pos-ref-alt" (e.g., "1-1001-A-T").
 /// Single source of truth — all vid construction calls this.
 pub fn format_vid(chrom: &str, position: u32, ref_allele: &str, alt_allele: &str) -> String {
     format!("{chrom}-{position}-{ref_allele}-{alt_allele}")
 }
-
-// ---------------------------------------------------------------------------
-// MetaVariant
-// ---------------------------------------------------------------------------
 
 /// A variant in a meta-analysis context. Composes `AnnotatedVariant` instead
 /// of duplicating its fields.
@@ -483,10 +447,6 @@ pub struct MetaVariant {
     pub n_total: i64,
     pub study_segments: Vec<(usize, i32)>,
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

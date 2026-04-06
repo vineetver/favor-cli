@@ -2,10 +2,6 @@ use std::f64::consts::PI;
 
 use statrs::distribution::{ChiSquared, Continuous, ContinuousCDF, Normal};
 
-// ---------------------------------------------------------------------------
-// Cauchy combination test
-// ---------------------------------------------------------------------------
-
 /// Cauchy combination test (CCT) — equal weights.
 ///
 /// T = (1/K) * sum(tan((0.5 - p_i) * pi))
@@ -85,10 +81,6 @@ pub fn cauchy_combine_weighted(p_values: &[f64], weights: &[f64]) -> f64 {
 
     p.clamp(P_FLOOR, 1.0)
 }
-
-// ---------------------------------------------------------------------------
-// SKAT p-value via Liu et al. (2009) moment-matching
-// ---------------------------------------------------------------------------
 
 /// SKAT p-value via Liu et al. (2009) moment-matching.
 ///
@@ -190,10 +182,6 @@ pub fn mixture_chisq_pvalue(statistic: f64, eigenvalues: &[f64]) -> f64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Saddlepoint approximation (SPA) for binary trait score tests
-// ---------------------------------------------------------------------------
-
 /// Saddlepoint approximation for binary trait score tests.
 ///
 /// Provides calibrated p-values for imbalanced case-control designs where
@@ -218,7 +206,7 @@ pub fn spa_pvalue(score: f64, mu: &[f64], g: &[f64]) -> f64 {
         return 1.0;
     }
 
-    let norm = Normal::new(0.0, 1.0).unwrap();
+    let norm = Normal::new(0.0, 1.0).expect("standard normal params are valid");
 
     // Variance of the centered score S = G'(Y-μ) under H0: Var(S) = Σ μ_i(1-μ_i)g_i²
     let var: f64 = mu
@@ -285,15 +273,11 @@ fn tail_prob(q: f64, mu: &[f64], g: &[f64], norm: &Normal) -> f64 {
     (norm.cdf(-w) + norm.pdf(w) * (1.0 / w - 1.0 / v)).clamp(0.0, 1.0)
 }
 
-// ---------------------------------------------------------------------------
 // Cumulant generating function and derivatives for centered score S = G'(Y-μ)
-//
-// K(t)  = Σ [-t μ_i g_i + log(1 - μ_i + μ_i exp(t g_i))]
-// K'(t) = Σ [-μ_i g_i + μ_i g_i exp(t g_i) / (1 - μ_i + μ_i exp(t g_i))]
-// K''(t)= Σ μ_i(1-μ_i) g_i² exp(t g_i) / (1 - μ_i + μ_i exp(t g_i))²
-//
+//   K(t)  = Σ [-t μ_i g_i + log(1 - μ_i + μ_i exp(t g_i))]
+//   K'(t) = Σ [-μ_i g_i + μ_i g_i exp(t g_i) / (1 - μ_i + μ_i exp(t g_i))]
+//   K''(t)= Σ μ_i(1-μ_i) g_i² exp(t g_i) / (1 - μ_i + μ_i exp(t g_i))²
 // The -t·μ·g centering ensures K'(0) = 0, matching R's K_Binary_SPA.
-// ---------------------------------------------------------------------------
 
 fn cgf(t: f64, mu: &[f64], g: &[f64]) -> f64 {
     mu.iter()

@@ -113,10 +113,6 @@ fn emit_dry_run(config: &AnnotateConfig, out: &dyn Output) -> Result<(), FavorEr
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Core pipeline
-// ---------------------------------------------------------------------------
-
 /// Core annotate pipeline: open → validate → join → report.
 pub fn run_annotate(config: &AnnotateConfig, out: &dyn Output) -> Result<(), FavorError> {
     let input = VariantSet::open(&config.input)?;
@@ -167,10 +163,6 @@ fn validate_input(input: &VariantSet) -> Result<(), FavorError> {
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Annotation join
-// ---------------------------------------------------------------------------
 
 struct AnnotateResult {
     output: VariantSet,
@@ -372,10 +364,6 @@ fn join_via_rsid(
     writer.scan_and_register()?;
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Result reporting and diagnostics
-// ---------------------------------------------------------------------------
 
 fn report_result(
     result: &AnnotateResult,

@@ -45,10 +45,6 @@ const GENE_NAME_LEN: usize = 32;
 /// Layer 3 falls back to carrier store for these genes.
 const MAX_K_VARIANTS: usize = 2000;
 
-// ═══════════════════════════════════════════════════════════════════════
-// Types
-// ═══════════════════════════════════════════════════════════════════════
-
 /// K matrix for one gene, with explicit mapping to chromosome-wide indices.
 pub struct GeneKBlock {
     /// Maps local index 0..m → chromosome-wide VariantIndex position.
@@ -77,10 +73,6 @@ pub struct ChromScoreCache {
     /// Per-gene K blocks with explicit variant linkage.
     pub gene_blocks: HashMap<String, GeneKBlock>,
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// Cache key
-// ═══════════════════════════════════════════════════════════════════════
 
 /// SHA-256 of (store_key, trait_name, sorted covariates, known_loci path).
 /// Invalidated by: new VCF, new annotations, different trait, different covariates,
@@ -114,10 +106,6 @@ pub fn cache_key(
 pub fn cache_dir(store_dir: &Path, key: &str) -> PathBuf {
     store_dir.join("score_cache").join(key)
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// Probe — validate existing cache
-// ═══════════════════════════════════════════════════════════════════════
 
 /// Check if a valid score cache exists for all chromosomes in the manifest.
 /// Validates file existence AND header consistency (not just existence).
@@ -178,10 +166,6 @@ fn validate_header(path: &Path) -> Result<(u32, u32), FavorError> {
 
     Ok((n_variants, n_genes))
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// Build — compute U/K for all genes, write to disk
-// ═══════════════════════════════════════════════════════════════════════
 
 /// Intermediate result from per-gene computation.
 struct GeneComputed {
@@ -359,10 +343,6 @@ pub fn build_chromosome(
     Ok(())
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Load — read cached scores from disk
-// ═══════════════════════════════════════════════════════════════════════
-
 /// Load all cached scores for one chromosome.
 /// Vid strings on disk are resolved to current VariantIndex positions at load time.
 pub fn load_chromosome(
@@ -508,10 +488,6 @@ pub fn load_chromosome(
     Ok(ChromScoreCache { u_all, gene_blocks })
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Window K assembly — for SCANG and sliding windows
-// ═══════════════════════════════════════════════════════════════════════
-
 /// Assemble K matrix for a window spanning potentially multiple genes.
 ///
 /// Returns block-diagonal K: within-gene terms from cached K blocks,
@@ -574,7 +550,6 @@ pub fn slice_window_u(cache: &ChromScoreCache, global_indices: &[usize]) -> Mat<
     })
 }
 
-// ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
     use super::*;

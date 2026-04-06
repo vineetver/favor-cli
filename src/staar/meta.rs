@@ -563,7 +563,6 @@ pub fn meta_score_gene(
     group: &MaskGroup,
     meta_variants: &[MetaVariant],
     studies: &[StudyHandle],
-    _chrom: &str,
     segment_cache: &HashMap<(usize, i32), SegmentCov>,
 ) -> Option<GeneResult> {
     let indices: Vec<usize> = group
@@ -686,10 +685,6 @@ fn parse_study_segments(s: &str) -> Vec<(usize, i32)> {
     }
     result
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Summary statistics export (formerly sumstats.rs)
-// ──────────────────────────────────────────────────────────────────────────────
 
 const SEGMENT_BP: u32 = 500_000;
 const MAX_SEGMENT_VARIANTS: usize = 2000;

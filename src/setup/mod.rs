@@ -116,28 +116,17 @@ fn render_init_template(config: &Config, probe: &DirProbe) -> String {
 }
 
 fn build_pack_list(config: &Config, probe: &DirProbe) -> String {
-    let mut lines = Vec::new();
-    for pack in Pack::all() {
-        if pack.always_installed {
-            continue;
-        }
-        let installed = config.data.packs.contains(&pack.id.to_string())
-            || pack
-                .tables
-                .iter()
-                .any(|t| probe.tissue_tables.contains(&t.to_string()));
-        if installed {
-            lines.push(format!(
-                "- **{}** ({}): {}",
-                pack.id, pack.size_human, pack.description
-            ));
-        }
-    }
+    let lines: Vec<String> = Pack::all()
+        .iter()
+        .filter(|p| !p.always_installed)
+        .filter(|p| {
+            config.data.packs.contains(&p.id.to_string())
+                || p.tables.iter().any(|t| probe.tissue_tables.contains(&t.to_string()))
+        })
+        .map(|p| format!("- **{}** ({}): {}", p.id, p.size_human, p.description))
+        .collect();
     if lines.is_empty() {
-        lines.push(
-            "- No optional packs. Run `favor data pull --pack <id>` then `favor init --force`."
-                .to_string(),
-        );
+        return "- No optional packs. Run `favor data pull --pack <id>` then `favor init --force`.".into();
     }
     lines.join("\n")
 }

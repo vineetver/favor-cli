@@ -409,7 +409,6 @@ pub fn slice_sumstats_flat(
     Mat::from_fn(s, s, |i, j| k_flat[indices[i] * m + indices[j]])
 }
 
-// ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
     use super::*;

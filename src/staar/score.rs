@@ -461,10 +461,6 @@ fn nan_result() -> StaarResult {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Beta density weights
-// ═══════════════════════════════════════════════════════════════════════
-
 /// Beta density weight: dbeta(maf, a1, a2).
 ///
 /// For beta(1,25): upweights ultra-rare variants (MAF near 0).
