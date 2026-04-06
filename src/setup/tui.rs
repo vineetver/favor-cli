@@ -105,7 +105,7 @@ pub fn select_tier() -> io::Result<Option<Tier>> {
             if key.kind != KeyEventKind::Press { continue; }
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if selected > 0 { selected -= 1; }
+                    selected = selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                     if selected < TIERS.len() - 1 { selected += 1; }
@@ -631,7 +631,7 @@ pub fn select_packs(packs: &[&Pack], installed: &[String]) -> io::Result<Option<
             if key.kind != KeyEventKind::Press { continue; }
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if cursor > 0 { cursor -= 1; }
+                    cursor = cursor.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                     if cursor + 1 < packs.len() { cursor += 1; }
@@ -799,7 +799,7 @@ pub fn select_environment() -> io::Result<Option<Environment>> {
             if key.kind != KeyEventKind::Press { continue; }
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if selected > 0 { selected -= 1; }
+                    selected = selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                     if selected < ENV_OPTIONS.len() - 1 { selected += 1; }
@@ -930,7 +930,7 @@ pub fn select_memory_budget(resources: &Resources) -> io::Result<Option<String>>
 
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if selected > 0 { selected -= 1; }
+                    selected = selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                     if selected < custom_idx { selected += 1; }

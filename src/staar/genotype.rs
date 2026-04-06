@@ -62,7 +62,7 @@ pub fn extract_genotypes(
         n_samples, threads, available_memory as f64 / (1024.0 * 1024.0 * 1024.0)));
 
     let bytes_per_variant = (n_samples as u64) * 4 + 200;
-    let batch_size = ((available_memory / 4) / bytes_per_variant).max(1000).min(100_000) as usize;
+    let batch_size = ((available_memory / 4) / bytes_per_variant).clamp(1000, 100_000) as usize;
 
     // Schema: 5 metadata columns + 1 packed dosage list
     let schema = Arc::new(packed_schema(n_samples));
@@ -320,7 +320,7 @@ impl PackedBatchBuilder {
 
 /// Extract GT field from a colon-delimited sample field. Zero allocation.
 #[inline]
-pub fn extract_gt_field<'a>(sample_field: &'a str, gt_index: usize) -> &'a str {
+pub fn extract_gt_field(sample_field: &str, gt_index: usize) -> &str {
     let mut start = 0;
     let mut field_idx = 0;
     let bytes = sample_field.as_bytes();
@@ -355,7 +355,7 @@ pub fn gt_to_dosage(gt: &[u8], alt_index: u8) -> f32 {
 
 fn gt_to_dosage_slow(gt: &[u8], alt_index: u8) -> f32 {
     let mut dose = 0.0f32;
-    for allele in std::str::from_utf8(gt).unwrap_or(".").split(|c: char| c == '/' || c == '|') {
+    for allele in std::str::from_utf8(gt).unwrap_or(".").split(['/', '|']) {
         if allele == "." { return f32::NAN; }
         if let Ok(idx) = allele.parse::<u8>() {
             if idx == alt_index { dose += 1.0; }

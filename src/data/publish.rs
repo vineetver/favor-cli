@@ -188,7 +188,7 @@ fn publish_pack(
 
     let _ = std::fs::remove_file(&tmp_manifest);
 
-    output.status(&format!("  validating uploaded manifest..."));
+    output.status("  validating uploaded manifest...");
     let base = pack.base_url(REMOTE_BASE_URL);
     let url = format!("{base}/packs/{}/manifest.json", pack.id);
     let body = ureq::get(&url).call()

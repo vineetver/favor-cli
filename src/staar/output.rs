@@ -101,6 +101,7 @@ pub fn write_individual_results(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn write_results(
     all_mask_results: &[(MaskType, Vec<GeneResult>)],
     trait_names: &[String],
@@ -540,7 +541,7 @@ fn manhattan_traces(genes: &[PlotGene]) -> String {
     unique.sort_by(|a, b| a.genome_x.partial_cmp(&b.genome_x).unwrap_or(std::cmp::Ordering::Equal));
 
     // Split into even/odd chromosomes for color alternation
-    for color_idx in 0..2 {
+    for (color_idx, color) in colors.iter().enumerate() {
         let subset: Vec<&&PlotGene> = unique.iter()
             .filter(|g| g.chrom_idx % 2 == color_idx)
             .copied()
@@ -562,7 +563,7 @@ fn manhattan_traces(genes: &[PlotGene]) -> String {
             ys = ys.join(","),
             texts = texts.iter().map(|t| format!("'{}'", t.replace('\'', "\\'")))
                 .collect::<Vec<_>>().join(","),
-            color = colors[color_idx],
+            color = color,
         ));
     }
 

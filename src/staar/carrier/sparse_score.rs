@@ -643,10 +643,10 @@ mod tests {
         for i in 0..n { y[(i, 0)] = next_f64(); }
 
         let mut carrier_lists: Vec<Vec<CarrierEntry>> = vec![Vec::new(); m];
-        for j in 0..m {
+        for cl in &mut carrier_lists {
             for i in 0..n {
                 if next_f64() < 0.08 {
-                    carrier_lists[j].push(CarrierEntry { sample_idx: i as u32, dosage: 1 });
+                    cl.push(CarrierEntry { sample_idx: i as u32, dosage: 1 });
                 }
             }
         }
@@ -692,10 +692,10 @@ mod tests {
         for i in 0..n { y[(i, 0)] = next_f64(); }
 
         let mut carrier_lists: Vec<Vec<CarrierEntry>> = vec![Vec::new(); m];
-        for j in 0..m {
+        for cl in &mut carrier_lists {
             for i in 0..n {
                 if next_f64() < 0.06 {
-                    carrier_lists[j].push(CarrierEntry { sample_idx: i as u32, dosage: 1 });
+                    cl.push(CarrierEntry { sample_idx: i as u32, dosage: 1 });
                 }
             }
         }
@@ -804,10 +804,10 @@ mod tests {
         for i in 0..n { y[(i, 0)] = next_f64(); }
 
         let mut carrier_lists: Vec<Vec<CarrierEntry>> = vec![Vec::new(); m];
-        for j in 0..m {
+        for cl in &mut carrier_lists {
             for i in 0..n {
                 if next_f64() < 0.07 {
-                    carrier_lists[j].push(CarrierEntry { sample_idx: i as u32, dosage: 1 });
+                    cl.push(CarrierEntry { sample_idx: i as u32, dosage: 1 });
                 }
             }
         }
@@ -873,7 +873,7 @@ mod tests {
         let cl = CarrierList { entries };
 
         // Single variant
-        let (u_single, _k_single) = score_gene_sparse(&[cl.clone()], &analysis);
+        let (u_single, _k_single) = score_gene_sparse(std::slice::from_ref(&cl), &analysis);
 
         // Triplicated: [v, v, v]
         let (u_triple, k_triple) = score_gene_sparse(

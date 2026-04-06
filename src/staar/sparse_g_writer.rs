@@ -342,6 +342,7 @@ fn write_variants_parquet(
             let key = (pos_arr.value(i), str_val(batch.column(1).as_ref(), i), str_val(batch.column(2).as_ref(), i));
             if meta_map.contains_key(&key) { continue; } // keep first
             let mut w = [0.0f64; 11];
+            #[allow(clippy::needless_range_loop)]
             for ch in 0..11 { w[ch] = float_val(batch.column(13 + ch).as_ref(), i); }
             meta_map.insert(key, MetaRow {
                 maf: float_val(batch.column(3).as_ref(), i),

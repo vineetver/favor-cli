@@ -307,7 +307,7 @@ impl VariantSetWriter {
                 Some(c) if !c.is_empty() => c.to_string(),
                 _ => continue,
             };
-            if !entry.file_type().map_or(false, |t| t.is_dir()) { continue; }
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) { continue; }
 
             let dir = entry.path();
             let mut total_count: u64 = 0;

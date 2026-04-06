@@ -513,7 +513,7 @@ pub fn assemble_window_k(
         .collect();
 
     // Group window variants by gene, extract K submatrices
-    for (_gene_name, block) in &cache.gene_blocks {
+    for block in cache.gene_blocks.values() {
         if !block.has_k() {
             continue;
         }
@@ -686,7 +686,7 @@ mod tests {
         let path = dir.path().join("scores.bin");
 
         // Empty file
-        std::fs::write(&path, &[]).unwrap();
+        std::fs::write(&path, []).unwrap();
         assert!(validate_header(&path).is_err());
 
         // Header only (no U vector)
@@ -694,24 +694,24 @@ mod tests {
         header[0..8].copy_from_slice(MAGIC);
         header[8..10].copy_from_slice(&VERSION.to_le_bytes());
         header[10..14].copy_from_slice(&100u32.to_le_bytes()); // claims 100 variants
-        std::fs::write(&path, &header).unwrap();
+        std::fs::write(&path, header).unwrap();
         assert!(validate_header(&path).is_err(), "should reject: header claims 100 variants but file has no U vector");
 
         // Valid small file
         header[10..14].copy_from_slice(&0u32.to_le_bytes()); // 0 variants
-        std::fs::write(&path, &header).unwrap();
+        std::fs::write(&path, header).unwrap();
         assert!(validate_header(&path).is_ok());
 
         // Wrong magic
         let mut bad = header;
         bad[0..8].copy_from_slice(b"NOTVALID");
-        std::fs::write(&path, &bad).unwrap();
+        std::fs::write(&path, bad).unwrap();
         assert!(validate_header(&path).is_err());
 
         // Wrong version
         let mut bad = header;
         bad[8..10].copy_from_slice(&99u16.to_le_bytes());
-        std::fs::write(&path, &bad).unwrap();
+        std::fs::write(&path, bad).unwrap();
         assert!(validate_header(&path).is_err());
     }
 

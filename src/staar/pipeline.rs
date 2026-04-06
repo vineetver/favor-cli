@@ -294,6 +294,7 @@ impl<'a> StaarPipeline<'a> {
 // Layer 2: Per-phenotype score cache
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn ensure_score_cache(
     store_dir: &Path,
     manifest: &store::StoreManifest,
@@ -661,7 +662,7 @@ fn run_score_tests(
                 );
                 if !window_groups.is_empty() {
                     let r: Vec<GeneResult> = window_groups.iter()
-                        .filter_map(|g| score_window(g)).collect();
+                        .filter_map(score_window).collect();
                     if !r.is_empty() {
                         out.status(&format!("    sliding_window: {} windows", r.len()));
                         all_results[wi].1.extend(r);
@@ -676,7 +677,7 @@ fn run_score_tests(
                 );
                 for (wsize, groups) in &scang_all {
                     let r: Vec<GeneResult> = groups.iter()
-                        .filter_map(|g| score_window(g)).collect();
+                        .filter_map(score_window).collect();
                     if !r.is_empty() {
                         out.status(&format!("    scang L={wsize}: {} windows", r.len()));
                         all_results[si].1.extend(r);

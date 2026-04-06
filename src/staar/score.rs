@@ -236,6 +236,7 @@ pub fn run_staar_from_sumstats(
 
 /// Shared test engine for both single-study and meta-analysis paths.
 /// Computes all 6 base tests, annotation-weighted variants, and omnibus combinations.
+#[allow(clippy::too_many_arguments)]
 fn staar_tests(
     u: &Mat<f64>, k: &Mat<f64>,
     annotation_matrix: &[Vec<f64>], mafs: &[f64],

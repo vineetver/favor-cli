@@ -558,6 +558,7 @@ pub fn emit_sumstats(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_chromosome_sparse(
     sparse_g: &SparseG,
     variant_index: &super::carrier::VariantIndex,
@@ -803,6 +804,7 @@ fn parquet_props() -> WriterProperties {
         .build()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_variants_parquet(
     dir: &Path,
     b_position: &mut Int32Builder,

@@ -271,7 +271,7 @@ mod tests {
 
         let u = vec_to_col(&u_scaled);
         let k = vecs_to_mat(&k_scaled);
-        let ann: Vec<Vec<f64>> = s.annotation_rank.iter().map(|ch| ch.clone()).collect();
+        let ann: Vec<Vec<f64>> = s.annotation_rank.to_vec();
 
         let result = score::run_staar_from_sumstats(&u, &k, &ann, &s.mafs, n);
 

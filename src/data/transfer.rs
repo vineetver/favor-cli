@@ -439,11 +439,11 @@ fn pull(full: bool, dry_run: bool, yes: bool, output: &dyn Output) -> Result<(),
         return Ok(());
     }
 
-    if !yes && total_bytes > 0 && std::io::stdin().is_terminal() {
-        if !confirm_download(total_bytes) {
-            output.warn("Download cancelled.");
-            return Ok(());
-        }
+    if !yes && total_bytes > 0 && std::io::stdin().is_terminal()
+        && !confirm_download(total_bytes)
+    {
+        output.warn("Download cancelled.");
+        return Ok(());
     }
 
     let remote_path = remote_tier_path(state.tier);
@@ -567,11 +567,11 @@ pub fn pull_pack(pack_id: &str, dry_run: bool, yes: bool, output: &dyn Output) -
         return Ok(());
     }
 
-    if !yes && total_bytes > 0 && std::io::stdin().is_terminal() {
-        if !confirm_download(total_bytes) {
-            output.warn("Download cancelled.");
-            return Ok(());
-        }
+    if !yes && total_bytes > 0 && std::io::stdin().is_terminal()
+        && !confirm_download(total_bytes)
+    {
+        output.warn("Download cancelled.");
+        return Ok(());
     }
 
     let show_progress = std::io::stderr().is_terminal();

@@ -55,6 +55,7 @@ pub fn run(
     pipeline.run()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_and_parse(
     genotypes: PathBuf,
     phenotype: PathBuf,

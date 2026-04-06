@@ -13,7 +13,6 @@ use super::stats;
 /// the per-trait test statistics.
 ///
 /// Reference: Li et al. (2023), MultiSTAAR: xihaoli/MultiSTAAR
-
 /// Result for one gene across all traits.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // wired when --traits lands (v0.2.0)
@@ -58,6 +57,7 @@ mod tests {
     use super::*;
     use super::super::model;
 
+    #[allow(clippy::type_complexity)]
     fn make_test_data() -> (Mat<f64>, Vec<Vec<f64>>, Vec<f64>, Mat<f64>, Mat<f64>) {
         let n = 50;
         let m = 5;

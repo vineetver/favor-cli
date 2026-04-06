@@ -1,6 +1,8 @@
 use super::MaskType;
 use crate::types::{AnnotatedVariant, Chromosome, Consequence};
 
+type MaskDef = (MaskType, fn(&AnnotatedVariant) -> bool);
+
 #[derive(Debug)]
 pub struct MaskGroup {
     pub name: String,
@@ -10,7 +12,7 @@ pub struct MaskGroup {
     pub variant_indices: Vec<usize>,
 }
 
-pub const CODING_MASKS: &[(MaskType, fn(&AnnotatedVariant) -> bool)] = &[
+pub const CODING_MASKS: &[MaskDef] = &[
     (MaskType::PLof, is_plof),
     (MaskType::Missense, is_missense),
     (MaskType::DisruptiveMissense, is_disruptive_missense),
@@ -20,7 +22,7 @@ pub const CODING_MASKS: &[(MaskType, fn(&AnnotatedVariant) -> bool)] = &[
     (MaskType::PtvDs, is_ptv_ds),
 ];
 
-pub const NONCODING_MASKS: &[(MaskType, fn(&AnnotatedVariant) -> bool)] = &[
+pub const NONCODING_MASKS: &[MaskDef] = &[
     (MaskType::Upstream, is_upstream),
     (MaskType::Downstream, is_downstream),
     (MaskType::Utr, is_utr),
@@ -103,7 +105,7 @@ fn is_ncrna(v: &AnnotatedVariant) -> bool {
 
 pub fn build_masks_from_registry(
     variants: &[AnnotatedVariant],
-    registry: &[(MaskType, fn(&AnnotatedVariant) -> bool)],
+    registry: &[MaskDef],
     min_variants: usize,
 ) -> Vec<(MaskType, Vec<MaskGroup>)> {
     let mut gene_variants: std::collections::HashMap<String, Vec<usize>> =
@@ -158,7 +160,110 @@ pub fn build_noncoding_masks(
     build_masks_from_registry(variants, NONCODING_MASKS, min_variants)
 }
 
+// ---------------------------------------------------------------------------
+// SCANG: data-adaptive variable-size scanning windows (formerly scang.rs)
+// ---------------------------------------------------------------------------
+
+/// SCANG parameters: data-adaptive variable-size scanning windows.
+pub struct ScangParams {
+    pub lmin: usize,
+    pub lmax: usize,
+    pub step: usize,
+}
+
+impl Default for ScangParams {
+    fn default() -> Self {
+        Self { lmin: 40, lmax: 300, step: 10 }
+    }
+}
+
+/// Build SCANG window groups across multiple variant-count sizes.
+///
+/// Returns `(window_length_variants, groups)` for each tested size.
+/// Windows slide by 1 variant position for maximum resolution.
+pub fn build_scang_windows(
+    variants: &[AnnotatedVariant],
+    chrom_indices: &[usize],
+    chromosome: Chromosome,
+    params: &ScangParams,
+) -> Vec<(u32, Vec<MaskGroup>)> {
+    let n = chrom_indices.len();
+    if n < params.lmin {
+        return Vec::new();
+    }
+
+    let lmax = params.lmax.min(n);
+    let mut result = Vec::new();
+    let chrom_label = chromosome.label();
+
+    let mut wsize = params.lmin;
+    while wsize <= lmax {
+        let mut groups = Vec::new();
+
+        for start in 0..=(n - wsize) {
+            let window_indices: Vec<usize> =
+                chrom_indices[start..start + wsize].to_vec();
+            let first_pos = variants[window_indices[0]].position;
+            let last_pos = variants[*window_indices.last().unwrap()].position;
+
+            groups.push(MaskGroup {
+                name: format!("scang_L{}_{chrom_label}:{first_pos}-{last_pos}", wsize),
+                chromosome,
+                start: first_pos,
+                end: last_pos,
+                variant_indices: window_indices,
+            });
+        }
+
+        result.push((wsize as u32, groups));
+        wsize += params.step;
+    }
+
+    result
+}
+
+pub fn build_sliding_windows(
+    variants: &[AnnotatedVariant],
+    chrom_indices: &[usize],
+    chromosome: Chromosome,
+    window_size: u32,
+    step_size: u32,
+) -> Vec<MaskGroup> {
+    if chrom_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let min_pos = chrom_indices.iter().map(|&i| variants[i].position).min().unwrap_or(0);
+    let max_pos = chrom_indices.iter().map(|&i| variants[i].position).max().unwrap_or(0);
+
+    let chrom_label = chromosome.label();
+    let mut windows = Vec::new();
+    let mut start = min_pos;
+
+    while start <= max_pos {
+        let end = start + window_size;
+        let indices: Vec<usize> = chrom_indices
+            .iter()
+            .copied()
+            .filter(|&i| variants[i].position >= start && variants[i].position < end)
+            .collect();
+
+        if indices.len() >= 2 {
+            windows.push(MaskGroup {
+                name: format!("{chrom_label}:{start}-{end}"),
+                chromosome,
+                start,
+                end,
+                variant_indices: indices,
+            });
+        }
+        start += step_size;
+    }
+    windows
+}
+
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn v(region_type: &str, consequence: &str, cadd: f64, revel: f64,
      cage_prom: bool, cage_enh: bool, ccre_prom: bool, ccre_enh: bool) -> AnnotatedVariant {
     use crate::types::{AnnotationWeights, FunctionalAnnotation, RegionType, RegulatoryFlags, Chromosome};
@@ -453,106 +558,4 @@ mod tests {
         let result = build_scang_windows(&variants, &indices, Chromosome::Autosome(1), &params);
         assert!(result.is_empty());
     }
-}
-
-// ---------------------------------------------------------------------------
-// SCANG: data-adaptive variable-size scanning windows (formerly scang.rs)
-// ---------------------------------------------------------------------------
-
-/// SCANG parameters: data-adaptive variable-size scanning windows.
-pub struct ScangParams {
-    pub lmin: usize,
-    pub lmax: usize,
-    pub step: usize,
-}
-
-impl Default for ScangParams {
-    fn default() -> Self {
-        Self { lmin: 40, lmax: 300, step: 10 }
-    }
-}
-
-/// Build SCANG window groups across multiple variant-count sizes.
-///
-/// Returns `(window_length_variants, groups)` for each tested size.
-/// Windows slide by 1 variant position for maximum resolution.
-pub fn build_scang_windows(
-    variants: &[AnnotatedVariant],
-    chrom_indices: &[usize],
-    chromosome: Chromosome,
-    params: &ScangParams,
-) -> Vec<(u32, Vec<MaskGroup>)> {
-    let n = chrom_indices.len();
-    if n < params.lmin {
-        return Vec::new();
-    }
-
-    let lmax = params.lmax.min(n);
-    let mut result = Vec::new();
-    let chrom_label = chromosome.label();
-
-    let mut wsize = params.lmin;
-    while wsize <= lmax {
-        let mut groups = Vec::new();
-
-        for start in 0..=(n - wsize) {
-            let window_indices: Vec<usize> =
-                chrom_indices[start..start + wsize].to_vec();
-            let first_pos = variants[window_indices[0]].position;
-            let last_pos = variants[*window_indices.last().unwrap()].position;
-
-            groups.push(MaskGroup {
-                name: format!("scang_L{}_{chrom_label}:{first_pos}-{last_pos}", wsize),
-                chromosome,
-                start: first_pos,
-                end: last_pos,
-                variant_indices: window_indices,
-            });
-        }
-
-        result.push((wsize as u32, groups));
-        wsize += params.step;
-    }
-
-    result
-}
-
-pub fn build_sliding_windows(
-    variants: &[AnnotatedVariant],
-    chrom_indices: &[usize],
-    chromosome: Chromosome,
-    window_size: u32,
-    step_size: u32,
-) -> Vec<MaskGroup> {
-    if chrom_indices.is_empty() {
-        return Vec::new();
-    }
-
-    let min_pos = chrom_indices.iter().map(|&i| variants[i].position).min().unwrap_or(0);
-    let max_pos = chrom_indices.iter().map(|&i| variants[i].position).max().unwrap_or(0);
-
-    let chrom_label = chromosome.label();
-    let mut windows = Vec::new();
-    let mut start = min_pos;
-
-    while start <= max_pos {
-        let end = start + window_size;
-        let indices: Vec<usize> = chrom_indices
-            .iter()
-            .copied()
-            .filter(|&i| variants[i].position >= start && variants[i].position < end)
-            .collect();
-
-        if indices.len() >= 2 {
-            windows.push(MaskGroup {
-                name: format!("{chrom_label}:{start}-{end}"),
-                chromosome,
-                start,
-                end,
-                variant_indices: indices,
-            });
-        }
-        start += step_size;
-    }
-    windows
 }

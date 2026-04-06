@@ -174,7 +174,6 @@ pub fn mixture_chisq_pvalue(statistic: f64, eigenvalues: &[f64]) -> f64 {
 ///
 /// Reference: Dey et al. (2017), "A Fast and Accurate Algorithm to Test
 /// for Binary Phenotypes and Its Application to PheWAS"
-
 const P_FILTER: f64 = 0.05;
 const ROOT_TOL: f64 = 1e-9;
 const ROOT_MAX_ITER: usize = 200;
@@ -493,7 +492,7 @@ mod tests {
         let g: Vec<f64> = (0..1000).map(|i| if i < 5 { 1.0 } else { 0.0 }).collect();
         let score = 4.0;
         let p = spa_pvalue(score, &mu, &g);
-        assert!(p >= 0.0 && p <= 1.0, "p must be valid: {p}");
+        assert!((0.0..=1.0).contains(&p), "p must be valid: {p}");
     }
 
     #[test]

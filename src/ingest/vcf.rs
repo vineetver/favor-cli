@@ -51,7 +51,7 @@ const BYTES_PER_VARIANT: u64 = 140;
 /// Floored at 10K (functional minimum), capped at 1M (diminishing returns).
 fn derive_batch_size(memory_budget: u64) -> usize {
     let raw = memory_budget / 2 / BYTES_PER_VARIANT;
-    (raw as usize).max(10_000).min(1_000_000)
+    (raw as usize).clamp(10_000, 1_000_000)
 }
 
 /// Canonical output schema for VCF ingest.
@@ -96,6 +96,7 @@ impl BatchBuilder {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         chrom: &str,
@@ -250,61 +251,6 @@ pub fn parsimony_normalize(ref_allele: &str, alt_allele: &str, pos: i32) -> (Str
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parsimony_normalize;
-
-    #[test]
-    fn snv() {
-        assert_eq!(parsimony_normalize("G", "A", 100), ("G".into(), "A".into(), 100));
-    }
-
-    #[test]
-    fn insertion_with_anchor() {
-        // VCF: REF=A, ALT=ACGT — insertion of CGT after pos 100
-        assert_eq!(parsimony_normalize("A", "ACGT", 100), ("A".into(), "ACGT".into(), 100));
-    }
-
-    #[test]
-    fn deletion_with_anchor() {
-        // VCF: REF=ACGT, ALT=A — deletion of CGT at pos 101-103
-        assert_eq!(parsimony_normalize("ACGT", "A", 100), ("ACGT".into(), "A".into(), 100));
-    }
-
-    #[test]
-    fn redundant_padding_right() {
-        // REF=ACGTG, ALT=AG — common suffix G, then common prefix A
-        // After right-trim: ACGT, A; left-trim: CGT→""? No, keep 1 base.
-        // Right-trim G: ACGT, A (suffix=1, but A is len 1 so max_suffix=0)
-        // Actually: rlen=5, alen=2, max_suffix=min(5,2)-1=1. G==G → suffix_trim=1.
-        // After: ACGT (4 bytes), A (1 byte). max_prefix=min(4,1)-1=0. No prefix trim.
-        assert_eq!(parsimony_normalize("ACGTG", "AG", 100), ("ACGT".into(), "A".into(), 100));
-    }
-
-    #[test]
-    fn redundant_prefix_and_suffix() {
-        // REF=AACG, ALT=AATG — common prefix AA, common suffix G
-        // Right-trim: AAC, AAT (suffix=1). Left-trim: C, T (prefix=2, pos+2)
-        assert_eq!(parsimony_normalize("AACG", "AATG", 100), ("C".into(), "T".into(), 102));
-    }
-
-    #[test]
-    fn complex_mnv_no_trim() {
-        assert_eq!(parsimony_normalize("ACG", "TCA", 100), ("ACG".into(), "TCA".into(), 100));
-    }
-
-    #[test]
-    fn identical_alleles() {
-        assert_eq!(parsimony_normalize("A", "A", 100), ("A".into(), "A".into(), 100));
-    }
-
-    #[test]
-    fn single_base_insertion() {
-        // REF=T, ALT=TC
-        assert_eq!(parsimony_normalize("T", "TC", 100), ("T".into(), "TC".into(), 100));
-    }
-}
-
 /// Ingest result stats.
 pub struct VcfIngestResult {
     pub variant_count: u64,
@@ -423,6 +369,7 @@ fn get_or_create_writer<'a>(
 }
 
 /// Process a single VCF record — split multi-allelics, normalize, route to per-chrom writer.
+#[allow(clippy::too_many_arguments)]
 fn process_record(
     record: &noodles_vcf::Record,
     _header: &noodles_vcf::Header,
@@ -514,4 +461,59 @@ fn process_record(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parsimony_normalize;
+
+    #[test]
+    fn snv() {
+        assert_eq!(parsimony_normalize("G", "A", 100), ("G".into(), "A".into(), 100));
+    }
+
+    #[test]
+    fn insertion_with_anchor() {
+        // VCF: REF=A, ALT=ACGT — insertion of CGT after pos 100
+        assert_eq!(parsimony_normalize("A", "ACGT", 100), ("A".into(), "ACGT".into(), 100));
+    }
+
+    #[test]
+    fn deletion_with_anchor() {
+        // VCF: REF=ACGT, ALT=A — deletion of CGT at pos 101-103
+        assert_eq!(parsimony_normalize("ACGT", "A", 100), ("ACGT".into(), "A".into(), 100));
+    }
+
+    #[test]
+    fn redundant_padding_right() {
+        // REF=ACGTG, ALT=AG — common suffix G, then common prefix A
+        // After right-trim: ACGT, A; left-trim: CGT→""? No, keep 1 base.
+        // Right-trim G: ACGT, A (suffix=1, but A is len 1 so max_suffix=0)
+        // Actually: rlen=5, alen=2, max_suffix=min(5,2)-1=1. G==G → suffix_trim=1.
+        // After: ACGT (4 bytes), A (1 byte). max_prefix=min(4,1)-1=0. No prefix trim.
+        assert_eq!(parsimony_normalize("ACGTG", "AG", 100), ("ACGT".into(), "A".into(), 100));
+    }
+
+    #[test]
+    fn redundant_prefix_and_suffix() {
+        // REF=AACG, ALT=AATG — common prefix AA, common suffix G
+        // Right-trim: AAC, AAT (suffix=1). Left-trim: C, T (prefix=2, pos+2)
+        assert_eq!(parsimony_normalize("AACG", "AATG", 100), ("C".into(), "T".into(), 102));
+    }
+
+    #[test]
+    fn complex_mnv_no_trim() {
+        assert_eq!(parsimony_normalize("ACG", "TCA", 100), ("ACG".into(), "TCA".into(), 100));
+    }
+
+    #[test]
+    fn identical_alleles() {
+        assert_eq!(parsimony_normalize("A", "A", 100), ("A".into(), "A".into(), 100));
+    }
+
+    #[test]
+    fn single_base_insertion() {
+        // REF=T, ALT=TC
+        assert_eq!(parsimony_normalize("T", "TC", 100), ("T".into(), "TC".into(), 100));
+    }
 }

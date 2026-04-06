@@ -61,14 +61,11 @@ pub fn generate_script(
         let _ = writeln!(script, "--   OPTIONS (compression 'zstd(4)');");
     }
 
-    match &analysis.build_guess {
-        BuildGuess::Hg19 { match_rate_hg38, match_rate_hg19 } => {
-            let _ = writeln!(script);
-            let _ = writeln!(script, "-- WARNING: Input appears to be hg19 (hg38 match: {:.0}%, hg19 match: {:.0}%)",
-                match_rate_hg38 * 100.0, match_rate_hg19 * 100.0);
-            let _ = writeln!(script, "-- This data needs liftover to hg38 before annotation.");
-        }
-        _ => {}
+    if let BuildGuess::Hg19 { match_rate_hg38, match_rate_hg19 } = &analysis.build_guess {
+        let _ = writeln!(script);
+        let _ = writeln!(script, "-- WARNING: Input appears to be hg19 (hg38 match: {:.0}%, hg19 match: {:.0}%)",
+            match_rate_hg38 * 100.0, match_rate_hg19 * 100.0);
+        let _ = writeln!(script, "-- This data needs liftover to hg38 before annotation.");
     }
 
     script

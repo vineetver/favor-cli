@@ -12,7 +12,6 @@ use super::stats;
 /// power in multi-ancestry cohorts.
 ///
 /// Reference: Li et al. (2024), AI-STAAR in xihaoli/STAAR
-
 #[allow(dead_code)] // fields read by run_ai_staar when --ancestry-col is used
 /// Per-population allele frequencies and group assignments.
 pub struct AncestryInfo {

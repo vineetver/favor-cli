@@ -319,6 +319,40 @@ fn load_variant_entries(chrom_dir: &Path) -> Result<Vec<VariantIndexEntry>, Favo
     Ok(entries)
 }
 
+fn load_membership(chrom_dir: &Path) -> Result<HashMap<String, Vec<u32>>, FavorError> {
+    use arrow::array::{StringArray, UInt32Array};
+
+    let pq_path = chrom_dir.join("membership.parquet");
+    let file = File::open(&pq_path)
+        .map_err(|e| FavorError::Resource(format!("Open {}: {e}", pq_path.display())))?;
+    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| FavorError::Resource(format!("Parquet open: {e}")))?
+        .build()
+        .map_err(|e| FavorError::Resource(format!("Parquet reader: {e}")))?;
+
+    let mut gene_variants: HashMap<String, Vec<u32>> = HashMap::new();
+
+    for batch_result in reader {
+        let batch = batch_result.map_err(|e| FavorError::Resource(format!("Read: {e}")))?;
+        let vvcf_arr = batch.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+        let gene_arr = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+
+        for i in 0..batch.num_rows() {
+            let gene = gene_arr.value(i).to_string();
+            let vvcf = vvcf_arr.value(i);
+            gene_variants.entry(gene).or_default().push(vvcf);
+        }
+    }
+
+    // Ensure variant_vcfs are sorted per gene
+    for variants in gene_variants.values_mut() {
+        variants.sort_unstable();
+        variants.dedup();
+    }
+
+    Ok(gene_variants)
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Tests — alignment invariants
 // ═══════════════════════════════════════════════════════════════════════
@@ -583,7 +617,7 @@ mod tests {
         let empty: Vec<u32> = (0..vi.len() as u32)
             .filter(|&v| {
                 let pos = vi.get(v).position;
-                pos >= 400 && pos <= 500
+                (400..=500).contains(&pos)
             })
             .collect();
         assert!(empty.is_empty());
@@ -600,38 +634,4 @@ mod tests {
                 "variant_vcf {v}: stored vid '{}' != computed '{computed}'", e.vid);
         }
     }
-}
-
-fn load_membership(chrom_dir: &Path) -> Result<HashMap<String, Vec<u32>>, FavorError> {
-    use arrow::array::{StringArray, UInt32Array};
-
-    let pq_path = chrom_dir.join("membership.parquet");
-    let file = File::open(&pq_path)
-        .map_err(|e| FavorError::Resource(format!("Open {}: {e}", pq_path.display())))?;
-    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| FavorError::Resource(format!("Parquet open: {e}")))?
-        .build()
-        .map_err(|e| FavorError::Resource(format!("Parquet reader: {e}")))?;
-
-    let mut gene_variants: HashMap<String, Vec<u32>> = HashMap::new();
-
-    for batch_result in reader {
-        let batch = batch_result.map_err(|e| FavorError::Resource(format!("Read: {e}")))?;
-        let vvcf_arr = batch.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
-        let gene_arr = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-
-        for i in 0..batch.num_rows() {
-            let gene = gene_arr.value(i).to_string();
-            let vvcf = vvcf_arr.value(i);
-            gene_variants.entry(gene).or_default().push(vvcf);
-        }
-    }
-
-    // Ensure variant_vcfs are sorted per gene
-    for variants in gene_variants.values_mut() {
-        variants.sort_unstable();
-        variants.dedup();
-    }
-
-    Ok(gene_variants)
 }
