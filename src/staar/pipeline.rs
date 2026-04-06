@@ -24,10 +24,6 @@ use crate::staar::{self, GeneResult, MaskCategory, MaskType, TraitType};
 use crate::resource::Resources;
 use crate::types::{AnnotatedVariant, Chromosome};
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
-
 pub struct StaarConfig {
     pub genotypes: PathBuf,
     pub phenotype: PathBuf,
@@ -68,10 +64,6 @@ impl StaarConfig {
 }
 
 pub type ResultSet = Vec<(MaskType, Vec<GeneResult>)>;
-
-// ---------------------------------------------------------------------------
-// Pipeline
-// ---------------------------------------------------------------------------
 
 pub struct StaarPipeline<'a> {
     config: StaarConfig,
@@ -307,10 +299,6 @@ impl<'a> StaarPipeline<'a> {
 
 }
 
-// ---------------------------------------------------------------------------
-// Layer 2: Per-phenotype score cache
-// ---------------------------------------------------------------------------
-
 #[allow(clippy::too_many_arguments)]
 fn ensure_score_cache(
     store_dir: &Path,
@@ -346,10 +334,6 @@ fn ensure_score_cache(
     Ok(dir)
 }
 
-// ---------------------------------------------------------------------------
-// Pipeline (continued)
-// ---------------------------------------------------------------------------
-
 impl<'a> StaarPipeline<'a> {
     fn score_all(
         &self,
@@ -366,10 +350,6 @@ impl<'a> StaarPipeline<'a> {
         )
     }
 }
-
-// ---------------------------------------------------------------------------
-// Variant loading — single path through VariantIndex
-// ---------------------------------------------------------------------------
 
 use crate::staar::carrier::VariantIndex;
 
@@ -392,10 +372,6 @@ fn load_rare_variants(
     }
     Ok(all)
 }
-
-// ---------------------------------------------------------------------------
-// Scoring — sparse G + aligned variant vectors
-// ---------------------------------------------------------------------------
 
 type MaskPredicate = fn(&AnnotatedVariant) -> bool;
 

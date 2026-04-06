@@ -34,12 +34,11 @@ pub fn open_vcf(path: &Path, threads: usize) -> Result<Box<dyn BufRead + Send>, 
         .map_err(|e| FavorError::Input(format!("Cannot open '{}': {e}", path.display())))?;
 
     if is_bgzf {
-        // threads.max(1) is always >= 1, so NonZeroUsize::new cannot fail
-        let workers = NonZeroUsize::new(threads.max(1)).unwrap();
+        let workers = NonZeroUsize::new(threads.max(1))
+            .expect("threads.max(1) >= 1");
         let bgzf = noodles_bgzf::reader::Builder::default()
             .set_worker_count(workers)
             .build_from_reader(file);
-        // noodles_bgzf::Reader implements BufRead — do not double-buffer.
         Ok(Box::new(bgzf))
     } else {
         Ok(Box::new(BufReader::with_capacity(256 * 1024, file)))
@@ -398,25 +397,24 @@ fn get_or_create_writer<'a>(
     batch_size: usize,
     output: &dyn Output,
 ) -> Result<&'a mut ChromWriter, FavorError> {
-    if !writers.contains_key(chrom) {
-        output.status(&format!("  chr{chrom}..."));
-        let path = vs_writer.chrom_path(chrom)?;
-        let f = File::create(&path).map_err(|e| {
-            FavorError::Resource(format!("Cannot create '{}': {e}", path.display()))
-        })?;
-        let w = ArrowWriter::try_new(f, schema.clone(), Some(props.clone()))
-            .map_err(|e| FavorError::Resource(format!("Parquet writer init: {e}")))?;
-        writers.insert(
-            chrom,
-            ChromWriter {
+    use std::collections::hash_map::Entry;
+    match writers.entry(chrom) {
+        Entry::Occupied(e) => Ok(e.into_mut()),
+        Entry::Vacant(e) => {
+            output.status(&format!("  chr{chrom}..."));
+            let path = vs_writer.chrom_path(chrom)?;
+            let f = File::create(&path).map_err(|err| {
+                FavorError::Resource(format!("Cannot create '{}': {err}", path.display()))
+            })?;
+            let w = ArrowWriter::try_new(f, schema.clone(), Some(props.clone()))
+                .map_err(|err| FavorError::Resource(format!("Parquet writer init: {err}")))?;
+            Ok(e.insert(ChromWriter {
                 batch: BatchBuilder::new(batch_size),
                 writer: w,
                 count: 0,
-            },
-        );
+            }))
+        }
     }
-    // Just inserted above if missing, so key is guaranteed present
-    Ok(writers.get_mut(chrom).unwrap())
 }
 
 /// Process a single VCF record — split multi-allelics, normalize, route to per-chrom writer.

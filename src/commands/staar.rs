@@ -215,18 +215,18 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), FavorError
         &config.annotations,
     );
 
-    let cache_status = if probe_result.hit { "hit" } else { "miss" };
-    let store_info = if probe_result.hit {
-        // hit == true guarantees manifest is Some
-        let m = probe_result.manifest.as_ref().unwrap();
-        json!({
-            "store_path": probe_result.store_dir.to_string_lossy(),
-            "store_variants": m.n_variants,
-            "store_samples": m.n_samples,
-            "created_at": m.created_at,
-        })
-    } else {
-        json!(null)
+    let (cache_status, store_info, recommended_bytes) = match &probe_result.manifest {
+        Some(m) => (
+            "hit",
+            json!({
+                "store_path": probe_result.store_dir.to_string_lossy(),
+                "store_variants": m.n_variants,
+                "store_samples": m.n_samples,
+                "created_at": m.created_at,
+            }),
+            16 * GB,
+        ),
+        None => ("miss", json!(null), recommended.max(8 * GB)),
     };
 
     let plan = commands::DryRunPlan {
@@ -245,17 +245,9 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), FavorError
         }),
         memory: commands::MemoryEstimate {
             minimum: "4G".into(),
-            recommended: commands::human_bytes(if probe_result.hit {
-                (16 * GB).max(8 * GB)
-            } else {
-                recommended.max(8 * GB)
-            }),
+            recommended: commands::human_bytes(recommended_bytes),
             minimum_bytes: 4 * GB,
-            recommended_bytes: if probe_result.hit {
-                16 * GB
-            } else {
-                recommended.max(8 * GB)
-            },
+            recommended_bytes,
         },
         output_path: config.output_dir.to_string_lossy().into(),
     };

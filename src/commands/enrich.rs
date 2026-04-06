@@ -88,10 +88,6 @@ fn emit_dry_run(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorErro
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Core pipeline
-// ---------------------------------------------------------------------------
-
 /// Core enrich pipeline: open → validate → resolve tissue → join tables → report.
 pub fn run_enrich(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorError> {
     let annotated = AnnotatedSet::open(&config.input)?;
@@ -143,10 +139,6 @@ pub fn run_enrich(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorEr
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tissue resolution
-// ---------------------------------------------------------------------------
-
 fn resolve_tissue(
     engine: &DfEngine,
     tissue_dir: &std::path::Path,
@@ -180,10 +172,6 @@ fn resolve_tissue(
 
     Ok(resolved)
 }
-
-// ---------------------------------------------------------------------------
-// Enrichment join
-// ---------------------------------------------------------------------------
 
 fn run_enrichment(
     annotated: &AnnotatedSet,
@@ -271,10 +259,6 @@ fn run_enrichment(
 
     Ok(tables_written)
 }
-
-// ---------------------------------------------------------------------------
-// Reporting
-// ---------------------------------------------------------------------------
 
 fn write_meta(
     tables_written: &[(String, i64)],

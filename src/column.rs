@@ -138,8 +138,6 @@ impl std::fmt::Display for Col {
     }
 }
 
-// ── Column groups ───────────────────────────────────────────────────────
-
 /// The 11 STAAR annotation weight columns, in canonical order.
 /// This array is the single source of truth for weight column ordering.
 pub const STAAR_WEIGHTS: [Col; 11] = [
@@ -181,8 +179,6 @@ pub fn store_columns() -> Vec<Col> {
     cols.extend_from_slice(&STAAR_WEIGHTS);
     cols
 }
-
-// ── Annotation join SQL generation (Part 4) ─────────────────────────────
 
 /// A column extracted from FAVOR annotation parquet into the pipeline.
 pub struct AnnotationExtract {
@@ -414,8 +410,6 @@ pub fn gene_count_sql() -> String {
     )
 }
 
-// ── Schema contract types (Part 2) ─────────────────────────────────────
-
 /// Simplified Arrow data type for compile-time schema contracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColType {
@@ -578,8 +572,6 @@ pub static INDIVIDUAL_RESULT_CONTRACT: SchemaContract = SchemaContract {
         (Col::CaddPhred, ColType::Float64),
     ],
 };
-
-// ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

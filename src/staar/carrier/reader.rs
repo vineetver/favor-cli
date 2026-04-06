@@ -243,10 +243,6 @@ impl VariantIndex {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Loaders
-// ═══════════════════════════════════════════════════════════════════════
-
 fn load_variant_entries(chrom_dir: &Path) -> Result<Vec<VariantIndexEntry>, FavorError> {
     use arrow::array::{BooleanArray, Float64Array, Int32Array, StringArray, UInt32Array};
 
@@ -422,10 +418,6 @@ fn load_membership(chrom_dir: &Path) -> Result<HashMap<String, Vec<u32>>, FavorE
 
     Ok(gene_variants)
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// Tests — alignment invariants
-// ═══════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

@@ -101,10 +101,6 @@ fn emit_dry_run(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), FavorE
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Core pipeline
-// ---------------------------------------------------------------------------
-
 /// Core meta-STAAR pipeline: load studies → merge → score → write → report.
 pub fn run_meta_staar(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), FavorError> {
     let studies = staar::meta::load_studies(&config.study_dirs)?;
@@ -164,10 +160,6 @@ fn setup_resources(
     Ok(resources)
 }
 
-// ---------------------------------------------------------------------------
-// Per-chromosome meta-analysis
-// ---------------------------------------------------------------------------
-
 fn run_all_chromosomes(
     studies: &[staar::meta::StudyHandle],
     config: &MetaStaarConfig,
@@ -207,7 +199,6 @@ fn run_all_chromosomes(
                         group,
                         &meta_variants,
                         studies,
-                        chrom,
                         &segment_cache,
                     )
                 })
@@ -306,10 +297,6 @@ fn discover_chromosomes(study_dir: &std::path::Path) -> Vec<String> {
     chroms
 }
 
-// ---------------------------------------------------------------------------
-// Summary report
-// ---------------------------------------------------------------------------
-
 fn generate_summary(
     studies: &[staar::meta::StudyHandle],
     results: &[(MaskType, Vec<GeneResult>)],
@@ -338,10 +325,6 @@ fn generate_summary(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Result writing
-// ---------------------------------------------------------------------------
-
 fn write_meta_results(
     all_mask_results: &[(MaskType, Vec<GeneResult>)],
     output_dir: &std::path::Path,
@@ -350,7 +333,7 @@ fn write_meta_results(
     out.status("Writing MetaSTAAR results...");
     let channels: Vec<&str> = STAAR_WEIGHTS
         .iter()
-        .map(|c| c.weight_display_name().unwrap())
+        .map(|c| c.weight_display_name().expect("STAAR_WEIGHTS entries have display names"))
         .collect();
 
     for (mask_type, results) in all_mask_results {

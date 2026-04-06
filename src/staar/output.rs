@@ -23,10 +23,6 @@ use crate::types::AnnotatedVariant;
 use super::model::NullModel;
 use super::{GeneResult, MaskType, TraitType};
 
-// ===========================================================================
-// Result writing (parquet)
-// ===========================================================================
-
 pub fn write_individual_results(
     pvals: &[(usize, f64)],
     variants: &[AnnotatedVariant],
@@ -133,7 +129,7 @@ pub fn write_results(
 
     let channels: Vec<&str> = STAAR_WEIGHTS
         .iter()
-        .map(|c| c.weight_display_name().unwrap())
+        .map(|c| c.weight_display_name().expect("STAAR_WEIGHTS entries have display names"))
         .collect();
     let n_channels = channels.len();
 
@@ -340,10 +336,6 @@ pub fn write_results(
     out.result_json(&meta);
     Ok(())
 }
-
-// ===========================================================================
-// Interactive HTML summary report (Plotly.js)
-// ===========================================================================
 
 /// Chromosome sizes (hg38, bp) for Manhattan plot layout.
 const CHROMS: &[(&str, u64)] = &[
@@ -557,10 +549,6 @@ function filterTable() {{
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Data collection
-// ---------------------------------------------------------------------------
-
 fn collect_plot_genes(results: &[(MaskType, Vec<GeneResult>)]) -> Vec<PlotGene> {
     let offsets = chrom_offsets();
     let mut genes = Vec::new();
@@ -612,10 +600,6 @@ fn collect_pvalues(results: &[(MaskType, Vec<GeneResult>)]) -> Vec<f64> {
         .filter(|p| p.is_finite() && *p > 0.0 && *p <= 1.0)
         .collect()
 }
-
-// ---------------------------------------------------------------------------
-// Plotly JSON trace generators
-// ---------------------------------------------------------------------------
 
 fn manhattan_traces(genes: &[PlotGene]) -> String {
     // Group by chromosome for alternating colors

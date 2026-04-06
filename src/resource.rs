@@ -85,110 +85,81 @@ impl Resources {
 /// SLURM allocation in bytes. Uses 95% — leaves headroom for slurmstepd + kernel.
 fn slurm_memory() -> Option<u64> {
     let val = std::env::var("SLURM_MEM_PER_NODE").ok()?;
-    let mb = val.trim_end_matches('M').parse::<u64>().ok()?;
+    let mb: u64 = val.trim_end_matches('M').parse().ok()?;
     Some(mb * 1024 * 1024 * 95 / 100)
 }
 
-/// Auto-detect available memory. 90% of detected — leaves room for OS.
-fn detect_memory() -> u64 {
-    if let Some(bytes) = slurm_memory() {
-        return bytes;
-    }
-
-    // cgroup memory limit (login nodes with resource limits)
-    for path in &[
+/// cgroup memory limit, if any. 90% of the limit.
+fn cgroup_memory() -> Option<u64> {
+    const PATHS: &[&str] = &[
         "/sys/fs/cgroup/memory/memory.limit_in_bytes",
         "/sys/fs/cgroup/memory.max",
-    ] {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            let trimmed = content.trim();
-            if trimmed != "max" && trimmed != "9223372036854771712" {
-                if let Ok(bytes) = trimmed.parse::<u64>() {
-                    if bytes < 1024 * 1024 * 1024 * 1024 {
-                        return bytes * 90 / 100;
-                    }
-                }
-            }
+    ];
+    PATHS.iter().find_map(|p| {
+        let content = std::fs::read_to_string(p).ok()?;
+        let trimmed = content.trim();
+        if trimmed == "max" || trimmed == "9223372036854771712" {
+            return None;
         }
-    }
+        let bytes: u64 = trimmed.parse().ok()?;
+        // Reject implausibly large values (1 TiB ceiling on cgroup-reported memory).
+        (bytes < 1024 * 1024 * 1024 * 1024).then_some(bytes * 90 / 100)
+    })
+}
 
-    // /proc/meminfo
-    if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
-        for line in content.lines() {
-            if line.starts_with("MemAvailable:") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if let Some(kb_str) = parts.get(1) {
-                    if let Ok(kb) = kb_str.parse::<u64>() {
-                        return kb * 1024 * 90 / 100;
-                    }
-                }
-            }
-        }
-    }
+/// /proc/meminfo MemAvailable. 90% to leave room for OS.
+fn meminfo_memory() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = content
+        .lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kb * 1024 * 90 / 100)
+}
 
-    4 * 1024 * 1024 * 1024
+fn detect_memory() -> u64 {
+    slurm_memory()
+        .or_else(cgroup_memory)
+        .or_else(meminfo_memory)
+        .unwrap_or(4 * 1024 * 1024 * 1024)
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name).ok()?.parse().ok()
+}
+
+fn cgroup_threads() -> Option<usize> {
+    let q: i64 = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let p: i64 = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    (q > 0 && p > 0).then(|| ((q / p).max(1)) as usize)
 }
 
 fn detect_threads(config_threads: Option<usize>) -> usize {
-    if let Ok(val) = std::env::var("FAVOR_THREADS") {
-        if let Ok(n) = val.parse::<usize>() {
-            return n;
-        }
-    }
-
-    if let Ok(val) = std::env::var("SLURM_CPUS_PER_TASK") {
-        if let Ok(n) = val.parse::<usize>() {
-            return n;
-        }
-    }
-
-    // Config override
-    if let Some(n) = config_threads {
-        return n;
-    }
-
-    // cgroup cpu quota
-    if let Ok(quota) = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") {
-        if let Ok(period) = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us") {
-            if let (Ok(q), Ok(p)) = (quota.trim().parse::<i64>(), period.trim().parse::<i64>()) {
-                if q > 0 && p > 0 {
-                    return (q / p).max(1) as usize;
-                }
-            }
-        }
-    }
-
-    // nproc
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
+    env_usize("FAVOR_THREADS")
+        .or_else(|| env_usize("SLURM_CPUS_PER_TASK"))
+        .or(config_threads)
+        .or_else(cgroup_threads)
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
 }
 
 fn detect_temp(config: Option<&ResourceConfig>) -> PathBuf {
-    // Config override is highest priority
-    if let Some(cfg) = config {
-        if !cfg.temp_dir.is_empty() {
-            let p = PathBuf::from(&cfg.temp_dir);
-            if p.exists() {
-                return p;
-            }
-        }
-    }
+    let existing = |s: &str| (!s.is_empty()).then(|| PathBuf::from(s)).filter(|p| p.exists());
 
-    for var in &["TMPDIR", "SCRATCH", "LOCAL_SCRATCH"] {
-        if let Ok(val) = std::env::var(var) {
-            let p = PathBuf::from(&val);
-            if p.exists() {
-                return p;
-            }
-        }
-    }
-
-    // /scratch if exists
-    let scratch = PathBuf::from("/scratch");
-    if scratch.exists() {
-        return scratch;
-    }
-
-    std::env::temp_dir()
+    config
+        .and_then(|c| existing(&c.temp_dir))
+        .or_else(|| ["TMPDIR", "SCRATCH", "LOCAL_SCRATCH"].iter()
+            .find_map(|v| std::env::var(v).ok().and_then(|s| existing(&s))))
+        .or_else(|| existing("/scratch"))
+        .unwrap_or_else(std::env::temp_dir)
 }

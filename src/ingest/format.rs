@@ -143,10 +143,6 @@ impl FormatHandler for ParquetHandler {
     }
 }
 
-// ---------------------------------------------------------------------------
-// TsvHandler
-// ---------------------------------------------------------------------------
-
 pub struct TsvHandler;
 
 impl FormatHandler for TsvHandler {
@@ -190,10 +186,6 @@ impl FormatHandler for TsvHandler {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CsvHandler
-// ---------------------------------------------------------------------------
-
 pub struct CsvHandler;
 
 impl FormatHandler for CsvHandler {
@@ -233,10 +225,6 @@ impl FormatHandler for CsvHandler {
         Some(Delimiter::Comma)
     }
 }
-
-// ---------------------------------------------------------------------------
-// FormatRegistry
-// ---------------------------------------------------------------------------
 
 pub struct FormatRegistry {
     handlers: Vec<Box<dyn FormatHandler>>,

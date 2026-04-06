@@ -58,13 +58,11 @@ impl SparseG {
             )));
         }
 
-        // Read the offsets table
-        let mut offsets = Vec::with_capacity(n_variants);
-        for i in 0..n_variants {
-            let base = offsets_start + i * 8;
-            let val = u64::from_le_bytes(mmap[base..base + 8].try_into().unwrap());
-            offsets.push(val);
-        }
+        // Length checked above; chunks_exact(8) yields infallible 8-byte slices.
+        let offsets: Vec<u64> = mmap[offsets_start..offsets_start + offsets_bytes]
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
 
         Ok(Self {
             mmap,
@@ -75,12 +73,10 @@ impl SparseG {
         })
     }
 
-    #[allow(dead_code)]
     pub fn n_samples(&self) -> u32 {
         self.n_samples
     }
 
-    #[allow(dead_code)]
     pub fn n_variants(&self) -> u32 {
         self.n_variants
     }
