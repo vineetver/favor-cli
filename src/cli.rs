@@ -33,6 +33,7 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Initialize a project directory with agent context files
     Init {
@@ -171,6 +172,14 @@ pub enum Command {
         /// AI-STAAR: population group column in phenotype file (activates ancestry-informed weights)
         #[arg(long)]
         ancestry_col: Option<String>,
+
+        /// AI-STAAR ensemble base tests B
+        #[arg(long, default_value = "5")]
+        ai_base_tests: usize,
+
+        /// AI-STAAR ensemble weight RNG seed
+        #[arg(long, default_value = "7590")]
+        ai_seed: u64,
 
         /// SCANG minimum variants per window [default: 40]
         #[arg(long, default_value = "40")]

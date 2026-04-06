@@ -133,7 +133,7 @@ These are intentional implementation choices, not bugs:
 |-----------|---------------|-------------|---------|
 | MetaSTAAR cross-study merge | U/K scaling vs R (`meta_staar_validation`) | Cross-study covariance merge in `meta.rs` | Multi-study test setup |
 | SCANG threshold search | Window construction (`masks::tests::scang_*`); R parameter loading | Threshold search vs R | Monte Carlo simulation needed |
-| AI-STAAR | Two-population unit test (`ancestry::tests::ai_staar_two_populations`) | End-to-end vs R | Ancestry-stratified reference data |
+| AI-STAAR | Algorithm mirrors `STAAR/R/AI_STAAR.R` with the weight scheme from `STAARpipeline/R/staar2aistaar_nullmodel.R`. B=0 parity vs two standard STAAR runs Cauchy-combined element-wise; carrier-list vs dense entry point parity; flatten/unflatten round-trip; ensemble-weight determinism. | Numeric match against an R `AI_STAAR` run on the same fixture | R fixture needs pre-populated `pop_weights_1_1`/`pop_weights_1_25` and a shared RNG; R's MT seed isn't bit-exact across languages. |
 | MultiSTAAR joint test | Per-trait STAAR-O matches R; Rust unit tests for combine | Joint omnibus vs R (`multi_staar_o` is NULL in current reference) | Multi-trait reference where R returns non-NULL |
 | SPA (binary traits) | CGF/derivative correctness (`stats::tests::cgf_*`, `k1_at_zero_is_zero`, `k2_at_zero_equals_variance`); pipeline plumbed via `burden_spa`, `acat_v_spa` | Per-variant SPA p-value vs R STAAR_Binary_SPA | Balanced binary reference where R returns non-NULL |
 

@@ -29,6 +29,9 @@ pub fn run(
     window_size: u32,
     individual: bool,
     spa: bool,
+    ancestry_col: Option<String>,
+    ai_base_tests: usize,
+    ai_seed: u64,
     scang_lmin: usize,
     scang_lmax: usize,
     scang_step: usize,
@@ -43,6 +46,7 @@ pub fn run(
     let config = validate_and_parse(
         genotypes, phenotype, trait_names, covariates, annotations, masks,
         maf_cutoff, window_size, individual, spa,
+        ancestry_col, ai_base_tests, ai_seed,
         scang_lmin, scang_lmax, scang_step, known_loci, emit_sumstats,
         rebuild_store, column_map, output_path,
     )?;
@@ -67,6 +71,9 @@ fn validate_and_parse(
     window_size: u32,
     individual: bool,
     spa: bool,
+    ancestry_col: Option<String>,
+    ai_base_tests: usize,
+    ai_seed: u64,
     scang_lmin: usize,
     scang_lmax: usize,
     scang_step: usize,
@@ -157,6 +164,11 @@ fn validate_and_parse(
 
     let store_dir = output_dir.join("store");
 
+    let ancestry_col = ancestry_col.and_then(|s| {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() { None } else { Some(trimmed) }
+    });
+
     Ok(StaarConfig {
         genotypes,
         phenotype,
@@ -168,6 +180,9 @@ fn validate_and_parse(
         window_size,
         individual,
         spa,
+        ancestry_col,
+        ai_base_tests,
+        ai_seed,
         scang_params: staar::masks::ScangParams {
             lmin: scang_lmin,
             lmax: scang_lmax,

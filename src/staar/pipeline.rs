@@ -38,6 +38,11 @@ pub struct StaarConfig {
     pub window_size: u32,
     pub individual: bool,
     pub spa: bool,
+    pub ancestry_col: Option<String>,
+    /// AI-STAAR ensemble base test count B. Adds 2*(B+1) STAAR runs per gene.
+    pub ai_base_tests: usize,
+    /// AI-STAAR ensemble weight RNG seed.
+    pub ai_seed: u64,
     pub scang_params: ScangParams,
     pub known_loci: Option<PathBuf>,
     pub emit_sumstats: bool,
@@ -77,6 +82,7 @@ struct ScoringContext {
     analysis: AnalysisVectors,
     use_spa: bool,
     cache_dir: PathBuf,
+    ancestry: Option<staar::ancestry::AncestryInfo>,
 }
 
 impl<'a> StaarPipeline<'a> {
@@ -146,11 +152,20 @@ impl<'a> StaarPipeline<'a> {
             &self.config.covariates,
             &geno_for_pheno,
             primary_trait,
+            self.config.ancestry_col.as_deref(),
+            self.config.ai_base_tests,
+            self.config.ai_seed,
             &self.config.column_map,
             self.out,
         )?;
-        let (y, mut x, trait_type, n, pheno_mask) =
-            (pheno.y, pheno.x, pheno.trait_type, pheno.n, pheno.pheno_mask);
+        let (y, mut x, trait_type, n, pheno_mask, ancestry) = (
+            pheno.y,
+            pheno.x,
+            pheno.trait_type,
+            pheno.n,
+            pheno.pheno_mask,
+            pheno.ancestry,
+        );
 
         if let Some(ref loci_path) = self.config.known_loci {
             let x_cond = load_known_loci(&store.engine, &geno_for_pheno, loci_path, n, self.out)?;
@@ -219,6 +234,7 @@ impl<'a> StaarPipeline<'a> {
             analysis,
             use_spa,
             cache_dir: sc_dir,
+            ancestry,
         };
 
         // Layer 3: Score tests from cache
@@ -454,6 +470,7 @@ fn run_score_tests(
             let cache = score_cache::load_chromosome(&ctx.cache_dir, chrom_name, &variant_index)?;
             let all_entries = variant_index.all_entries();
             let use_spa = ctx.use_spa;
+            let ancestry = ctx.ancestry.as_ref();
             let n_vcf = analysis.n_vcf_total;
 
             let gene_names: Vec<&String> = cache.gene_blocks.keys().collect();
@@ -503,7 +520,10 @@ fn run_score_tests(
                                 .map(|ch| qualifying.iter().map(|&i| all_entries[gene_vcfs[i] as usize].weights.0[ch]).collect())
                                 .collect();
 
-                            let sr = if use_spa {
+                            let sr = if let Some(ai) = ancestry {
+                                let subset: Vec<_> = qualifying.iter().map(|&i| carriers[i].clone()).collect();
+                                staar::ancestry::run_ai_staar_gene(&subset, analysis, ai, &ann_matrix, use_spa)
+                            } else if use_spa {
                                 let subset: Vec<_> = qualifying.iter().map(|&i| carriers[i].clone()).collect();
                                 sparse_score::run_staar_sparse(&subset, analysis, &ann_matrix, &mafs, true)
                             } else {
@@ -546,7 +566,13 @@ fn run_score_tests(
                                 .collect())
                             .collect();
 
-                        let sr = if use_spa {
+                        let sr = if let Some(ai) = ancestry {
+                            let mask_vcfs: Vec<u32> = qualifying.iter()
+                                .map(|&l| block.variant_offsets[l])
+                                .collect();
+                            let subset = sparse_g.load_variants(&mask_vcfs);
+                            staar::ancestry::run_ai_staar_gene(&subset, analysis, ai, &ann_matrix, use_spa)
+                        } else if use_spa {
                             // SPA: load carriers from SparseG for this mask
                             let mask_vcfs: Vec<u32> = qualifying.iter()
                                 .map(|&l| block.variant_offsets[l])
@@ -615,6 +641,7 @@ fn run_score_tests(
                 &ctx.cache_dir, chrom_name, &variant_index,
             )?;
             let n_vcf = analysis.n_vcf_total;
+            let ancestry = ctx.ancestry.as_ref();
 
             let score_window = |g: &MaskGroup| -> Option<GeneResult> {
                 let m = g.variant_indices.len();
@@ -623,9 +650,6 @@ fn run_score_tests(
                 let win_globals: Vec<usize> = g.variant_indices.iter()
                     .map(|&ci| global_indices[ci])
                     .collect();
-
-                let u_win = score_cache::slice_window_u(&window_cache, &win_globals);
-                let k_win = score_cache::assemble_window_k(&window_cache, &win_globals);
 
                 let mafs: Vec<f64> = g.variant_indices.iter()
                     .map(|&ci| chrom_variants[ci].maf)
@@ -636,9 +660,17 @@ fn run_score_tests(
                         .collect())
                     .collect();
 
-                let sr = score::run_staar_from_sumstats(
-                    &u_win, &k_win, &ann_matrix, &mafs, analysis.n_pheno,
-                );
+                let sr = if let Some(ai) = ancestry {
+                    let win_vcfs: Vec<u32> = win_globals.iter().map(|&i| i as u32).collect();
+                    let carriers = sparse_g.load_variants(&win_vcfs);
+                    staar::ancestry::run_ai_staar_gene(&carriers, analysis, ai, &ann_matrix, ctx.use_spa)
+                } else {
+                    let u_win = score_cache::slice_window_u(&window_cache, &win_globals);
+                    let k_win = score_cache::assemble_window_k(&window_cache, &win_globals);
+                    score::run_staar_from_sumstats(
+                        &u_win, &k_win, &ann_matrix, &mafs, analysis.n_pheno,
+                    )
+                };
                 let cmac: u32 = mafs.iter()
                     .map(|&maf| (2.0 * maf * n_vcf as f64).round() as u32)
                     .sum();

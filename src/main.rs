@@ -76,7 +76,9 @@ fn run(
             window_size,
             individual,
             spa,
-            ancestry_col: _ancestry_col,
+            ancestry_col,
+            ai_base_tests,
+            ai_seed,
             scang_lmin,
             scang_lmax,
             scang_step,
@@ -90,6 +92,7 @@ fn run(
         } => commands::staar::run(
             genotypes, phenotype, trait_name, covariates, annotations,
             masks, maf_cutoff, window_size, individual, spa,
+            ancestry_col, ai_base_tests, ai_seed,
             scang_lmin, scang_lmax, scang_step,
             known_loci, emit_sumstats, rebuild_store,
             column_map, output_path, out, dry_run,

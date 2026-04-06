@@ -289,7 +289,7 @@ pub fn run_staar_sparse(
 
     if use_spa && !analysis.fitted_values.is_empty() {
         let g = carriers_to_dense(carriers, analysis);
-        score::run_staar(&g, annotation_matrix, mafs, &null_model_ref(analysis), use_spa)
+        score::run_staar(&g, annotation_matrix, mafs, &null_model_from_analysis(analysis), use_spa)
     } else {
         let (u, k) = score_gene_sparse(carriers, analysis);
         score::run_staar_from_sumstats(&u, &k, annotation_matrix, mafs, analysis.n_pheno)
@@ -312,9 +312,9 @@ pub fn slice_sumstats(
     (u_sub, k_sub)
 }
 
-/// Convert carrier lists to a dense faer::Mat for SPA path.
+/// Convert carrier lists to a dense faer::Mat for SPA / AI-STAAR paths.
 /// Uses vcf_to_pheno remapping to build n_pheno × m matrix.
-fn carriers_to_dense(carriers: &[CarrierList], analysis: &AnalysisVectors) -> Mat<f64> {
+pub(crate) fn carriers_to_dense(carriers: &[CarrierList], analysis: &AnalysisVectors) -> Mat<f64> {
     let m = carriers.len();
     let mut g = Mat::zeros(analysis.n_pheno, m);
     for (j, clist) in carriers.iter().enumerate() {
@@ -329,9 +329,9 @@ fn carriers_to_dense(carriers: &[CarrierList], analysis: &AnalysisVectors) -> Ma
     g
 }
 
-/// Reconstruct a NullModel reference from AnalysisVectors for the SPA path.
+/// Reconstruct a NullModel from AnalysisVectors for the SPA / AI-STAAR paths.
 /// Uses compact n_pheno-sized arrays.
-fn null_model_ref(analysis: &AnalysisVectors) -> NullModel {
+pub(crate) fn null_model_from_analysis(analysis: &AnalysisVectors) -> NullModel {
     let n = analysis.n_pheno;
     let k = analysis.k;
 

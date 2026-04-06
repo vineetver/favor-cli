@@ -21,6 +21,9 @@ pub struct PhenotypeData {
     /// True for VCF samples that have phenotype data. Length = n_total VCF samples.
     /// Used to expand null model residuals back to VCF-indexed arrays.
     pub pheno_mask: Vec<bool>,
+    /// Per-sample population labels and ensemble weights, when `--ancestry-col`
+    /// is set. Same row order as `y` / `x`.
+    pub ancestry: Option<staar::ancestry::AncestryInfo>,
 }
 
 /// Common aliases for the sample ID column.
@@ -105,12 +108,16 @@ fn arrow_f64(col: &dyn Array, row: usize) -> f64 {
         .unwrap_or(f64::NAN)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn load_phenotype(
     engine: &DfEngine,
     phenotype: &Path,
     covariates: &[String],
     geno: &GenotypeResult,
     trait_name: &str,
+    ancestry_col: Option<&str>,
+    ai_base_tests: usize,
+    ai_seed: u64,
     column_map: &HashMap<String, String>,
     out: &dyn Output,
 ) -> Result<PhenotypeData, FavorError> {
@@ -150,12 +157,21 @@ pub fn load_phenotype(
             .map(|c| format!("CAST(p.\"{c}\" AS DOUBLE)"))
             .collect::<Vec<_>>().join(", ")) };
 
+    let resolved_ancestry: Option<String> = match ancestry_col {
+        Some(name) => Some(resolve_column(name, &pheno_cols, column_map, "Ancestry")?),
+        None => None,
+    };
+    let ancestry_select = match resolved_ancestry.as_deref() {
+        Some(c) => format!(", CAST(p.\"{c}\" AS VARCHAR)"),
+        None => String::new(),
+    };
+
     let sample_list = geno.sample_names.iter()
         .map(|s| format!("'{s}'")).collect::<Vec<_>>().join(",");
 
     // Include ID column — we reorder rows to match genotype sample order below.
     let pheno_sql = format!(
-        "SELECT p.\"{id_col}\", CAST(p.\"{trait_col}\" AS DOUBLE) {cov_select} \
+        "SELECT p.\"{id_col}\", CAST(p.\"{trait_col}\" AS DOUBLE) {cov_select} {ancestry_select} \
          FROM _pheno p \
          WHERE p.\"{id_col}\" IN ({sample_list}) AND p.\"{trait_col}\" IS NOT NULL"
     );
@@ -163,7 +179,8 @@ pub fn load_phenotype(
     let batches = engine.collect(&pheno_sql)?;
 
     // Collect phenotype keyed by sample ID — SQL row order is irrelevant.
-    let mut pheno_map: HashMap<String, (f64, Vec<f64>)> = HashMap::new();
+    let ancestry_col_idx = 2 + n_cov;
+    let mut pheno_map: HashMap<String, (f64, Vec<f64>, Option<String>)> = HashMap::new();
     for batch in &batches {
         for row in 0..batch.num_rows() {
             let id = arrow_str(batch.column(0).as_ref(), row);
@@ -171,7 +188,13 @@ pub fn load_phenotype(
             let covs: Vec<f64> = (0..n_cov)
                 .map(|j| arrow_f64(batch.column(2 + j).as_ref(), row))
                 .collect();
-            pheno_map.insert(id, (y_val, covs));
+            let pop_label = if resolved_ancestry.is_some() {
+                let raw = arrow_str(batch.column(ancestry_col_idx).as_ref(), row);
+                if raw.is_empty() { None } else { Some(raw) }
+            } else {
+                None
+            };
+            pheno_map.insert(id, (y_val, covs, pop_label));
         }
     }
 
@@ -184,14 +207,18 @@ pub fn load_phenotype(
     let mut y_vec = Vec::with_capacity(n_total);
     let mut x_vecs: Vec<Vec<f64>> = vec![Vec::with_capacity(n_total); n_cov];
     let mut pheno_mask = Vec::with_capacity(n_total);
+    let mut pop_labels: Vec<Option<String>> = Vec::with_capacity(n_total);
     for name in &geno.sample_names {
         match pheno_map.get(name.as_str()) {
-            Some((y_val, covs)) => {
+            Some((y_val, covs, pop_label)) => {
                 y_vec.push(*y_val);
                 for (j, c) in covs.iter().enumerate() {
                     x_vecs[j].push(*c);
                 }
                 pheno_mask.push(true);
+                if resolved_ancestry.is_some() {
+                    pop_labels.push(pop_label.clone());
+                }
             }
             None => {
                 pheno_mask.push(false);
@@ -245,7 +272,47 @@ pub fn load_phenotype(
         }
     }
 
-    Ok(PhenotypeData { y, x, trait_type, n, pheno_mask })
+    let ancestry = match resolved_ancestry.as_deref() {
+        None => None,
+        Some(col) => {
+            let missing = pop_labels.iter().filter(|p| p.is_none()).count();
+            if missing > 0 {
+                return Err(FavorError::Input(format!(
+                    "{missing} samples have missing values for ancestry column '{col}'. \
+                     Remove or impute before running --ancestry-col."
+                )));
+            }
+            let mut order: Vec<String> = Vec::new();
+            let mut group: Vec<usize> = Vec::with_capacity(n);
+            for label in pop_labels.iter().flatten() {
+                let idx = order.iter().position(|l| l == label).unwrap_or_else(|| {
+                    order.push(label.clone());
+                    order.len() - 1
+                });
+                group.push(idx);
+            }
+            if order.len() < 2 {
+                return Err(FavorError::Input(format!(
+                    "Ancestry column '{col}' has only {} distinct value(s); \
+                     --ancestry-col needs at least 2 populations.",
+                    order.len()
+                )));
+            }
+            out.status(&format!(
+                "  Ancestry: {} populations ({}), AI-STAAR B={ai_base_tests}",
+                order.len(),
+                order.join(", "),
+            ));
+            Some(staar::ancestry::AncestryInfo::new(
+                group,
+                order.len(),
+                ai_base_tests,
+                ai_seed,
+            ))
+        }
+    };
+
+    Ok(PhenotypeData { y, x, trait_type, n, pheno_mask, ancestry })
 }
 
 pub fn load_known_loci(
