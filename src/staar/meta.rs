@@ -570,7 +570,6 @@ fn emit_chromosome_sparse(
     out: &dyn Output,
 ) -> Result<(), FavorError> {
     let n = analysis.n_pheno;
-    let inv_s2 = 1.0 / analysis.sigma2;
 
     // Build position-based segments (same binning as v1 for output compat)
     let mut coarse: std::collections::BTreeMap<i32, Vec<usize>> =
@@ -659,8 +658,8 @@ fn emit_chromosome_sparse(
             b_maf.append_value(v.maf);
             b_mac.append_value((2.0 * v.maf * n as f64).round() as i32);
             b_n_obs.append_value(n as i32);
-            b_u_stat.append_value(u[(j, 0)] * inv_s2);
-            b_v_stat.append_value(k[(j, j)] * inv_s2);
+            b_u_stat.append_value(u[(j, 0)]);
+            b_v_stat.append_value(k[(j, j)]);
             b_segment_id.append_value(seg_id);
             b_gene.append_value(&v.gene_name);
             b_region.append_value(v.annotation.region_type.as_str());
@@ -700,7 +699,7 @@ fn emit_chromosome_sparse(
         let cov_builder = s_cov_lower.values();
         for i in 0..m {
             for j in 0..=i {
-                cov_builder.append_value(k[(i, j)] * inv_s2);
+                cov_builder.append_value(k[(i, j)]);
             }
         }
         s_cov_lower.append(true);

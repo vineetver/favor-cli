@@ -34,18 +34,18 @@ If R says `Burden(1,25) = 0.4155`, our Rust must produce the same value.
 
 ## R validation results
 
-| Test | R Package | Tolerance | Status |
-|------|-----------|-----------|--------|
-| CCT (Cauchy combination) | STAAR 0.9.8 | 1e-4 | pass |
-| Beta density weights | STAAR 0.9.8 | 1e-8 | pass |
-| PHRED-to-rank conversion | STAAR 0.9.8 | 1e-8 | pass |
-| Null model (continuous) | STAAR 0.9.8 | 1e-8 | pass |
-| Null model (binary/IRLS) | STAAR 0.9.8 | 1e-3 | pass |
-| Burden(1,25), Burden(1,1) | STAAR 0.9.8 | 1e-4 | pass |
-| SKAT(1,25), SKAT(1,1) | STAAR 0.9.8 | 2e-3 | pass |
-| MultiSTAAR per-trait | MultiSTAAR 0.9.7.1 | -- | pass |
-| SCANG parameters | SCANG 1.0.4 | -- | pass |
-| MetaSTAAR U/K scaling | STAAR 0.9.8 | 1e-8 | pass |
+| Test | R Package | R Source | Tolerance | Status |
+|------|-----------|----------|-----------|--------|
+| CCT (Cauchy combination) | STAAR 0.9.8 | `STAAR/R/CCT.R` | 1e-4 | pass |
+| Beta density weights | STAAR 0.9.8 | `STAAR/R/STAAR.R::Beta_Weight` | 1e-8 | pass |
+| PHRED-to-rank conversion | STAAR 0.9.8 | `STAAR/R/Annotation_Rank.R` | 1e-8 | pass |
+| Null model (continuous) | STAAR 0.9.8 | `STAAR/R/fit_null_glm.R` | 1e-8 | pass |
+| Null model (binary/IRLS) | STAAR 0.9.8 | `STAAR/R/fit_null_glm.R` | 1e-3 | pass |
+| Burden(1,25), Burden(1,1) | STAAR 0.9.8 | `STAAR/R/STAAR.R` | 1e-4 | pass |
+| SKAT(1,25), SKAT(1,1) | STAAR 0.9.8 | `STAAR/R/STAAR.R` | 2e-3 | pass |
+| MultiSTAAR per-trait | MultiSTAAR 0.9.7.1 | `MultiSTAAR/R/MultiSTAAR.R` | -- | pass |
+| SCANG parameters | SCANG 1.0.4 | `SCANG/R/SCANG.R` | -- | pass |
+| MetaSTAAR U/K scaling | MetaSTAAR 0.9.6.3 | `MetaSTAAR/R/MetaSTAAR_worker_sumstat.R` | 1e-8 | pass |
 
 ## Internal invariant tests
 
@@ -60,6 +60,10 @@ The carrier-indexed sparse scoring path (O(total_MAC)) must produce identical U 
 | U: sparse == dense (binary) | 1e-10 | `sparse_dense_parity_binary` |
 | K: sparse == dense (continuous) | 1e-10 | `sparse_dense_parity_continuous` |
 | K: sparse == dense (binary) | 1e-10 | `sparse_dense_parity_binary` |
+| Burden/SKAT/ACAT-V/STAAR-O: raw G == U/K oracle | 1e-9, SKAT 1e-6 | `raw_path_matches_oracle` |
+| Burden/SKAT/ACAT-V/STAAR-O: sparse == U/K oracle | 1e-9, SKAT 1e-6 | `sparse_path_matches_oracle` |
+
+The U/K oracle entry point is `score::run_staar_from_sumstats`, which is directly compared to R STAAR's `STAAR()` by `staar_continuous_matches_r`. The two parity tests above extend that anchor to the raw and sparse scoring paths, covering every Burden/SKAT/ACAT-V variant including the STAAR-O omnibus.
 
 ### Algebraic properties
 These catch index alignment bugs, hidden reorderings, and accumulation errors.
@@ -125,13 +129,13 @@ These are intentional implementation choices, not bugs:
 
 ## Not yet validated against R
 
-| Component | Status | Blocker |
-|-----------|--------|---------|
-| MetaSTAAR cross-study merge | Implemented, R validation pending | Requires multi-study test setup |
-| SCANG threshold search | Window construction tested | Monte Carlo simulation needed |
-| AI-STAAR | Implemented, unit tested | R comparison requires ancestry-stratified test data |
-| MultiSTAAR joint test | Implemented, unit tested | R comparison requires multi-trait test data |
-| SPA (binary traits) | CGF formula validated | Needs balanced binary test case where R returns non-NULL |
+| Component | What is tested | What is not | Blocker |
+|-----------|---------------|-------------|---------|
+| MetaSTAAR cross-study merge | U/K scaling vs R (`meta_staar_validation`) | Cross-study covariance merge in `meta.rs` | Multi-study test setup |
+| SCANG threshold search | Window construction (`masks::tests::scang_*`); R parameter loading | Threshold search vs R | Monte Carlo simulation needed |
+| AI-STAAR | Two-population unit test (`ancestry::tests::ai_staar_two_populations`) | End-to-end vs R | Ancestry-stratified reference data |
+| MultiSTAAR joint test | Per-trait STAAR-O matches R; Rust unit tests for combine | Joint omnibus vs R (`multi_staar_o` is NULL in current reference) | Multi-trait reference where R returns non-NULL |
+| SPA (binary traits) | CGF/derivative correctness (`stats::tests::cgf_*`, `k1_at_zero_is_zero`, `k2_at_zero_equals_variance`); pipeline plumbed via `burden_spa`, `acat_v_spa` | Per-variant SPA p-value vs R STAAR_Binary_SPA | Balanced binary reference where R returns non-NULL |
 
 ## Reproducing validation
 

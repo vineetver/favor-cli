@@ -120,10 +120,10 @@ impl AnalysisVectors {
 
 /// Score one gene using sparse carrier-indexed computation.
 ///
-/// Returns the U vector (score statistics) and K matrix (kernel/covariance)
-/// as faer::Mat for compatibility with the existing STAAR test engine.
+/// Returns (U/σ², K/σ²) — pre-scaled to the MetaSTAAR sumstats convention so
+/// callers can hand them directly to `score::run_staar_from_sumstats`. For
+/// binary traits σ² is 1 and the scaling is a no-op.
 ///
-/// Accepts carrier lists directly.
 /// For typical rare-variant genes (20 variants × MAC=5 × k=6 covariates),
 /// total work is ~3,300 multiply-adds vs ~27,000,000 for the dense path.
 pub fn score_gene_sparse(
@@ -257,9 +257,10 @@ pub fn score_gene_sparse(
         }
     }
 
-    // Convert to faer::Mat for compatibility with existing test engine
-    let u_mat = Mat::from_fn(m, 1, |i, _| u[i]);
-    let k_mat = Mat::from_fn(m, m, |i, j| kernel_flat[i * m + j]);
+    // Scale to MetaSTAAR sumstats convention: U/σ², K/σ².
+    let inv_s2 = 1.0 / analysis.sigma2;
+    let u_mat = Mat::from_fn(m, 1, |i, _| u[i] * inv_s2);
+    let k_mat = Mat::from_fn(m, m, |i, j| kernel_flat[i * m + j] * inv_s2);
 
     (u_mat, k_mat)
 }
@@ -372,8 +373,8 @@ fn null_model_ref(analysis: &AnalysisVectors) -> NullModel {
     }
 }
 
-/// Compute only U = G'r from carrier lists (Phase 1 of score_gene_sparse).
-/// O(total_MAC) — no K computation. Used for genes exceeding MAX_K_VARIANTS.
+/// Compute U/σ² from carrier lists (Phase 1 of score_gene_sparse).
+/// O(total_MAC), no K. Used for genes exceeding MAX_K_VARIANTS.
 pub fn compute_u_only(
     carriers: &[CarrierList],
     analysis: &AnalysisVectors,
@@ -389,6 +390,10 @@ pub fn compute_u_only(
                 u[j] += dosage as f64 * analysis.residuals[pi as usize];
             }
         }
+    }
+    let inv_s2 = 1.0 / analysis.sigma2;
+    for v in &mut u {
+        *v *= inv_s2;
     }
     u
 }
@@ -460,11 +465,10 @@ mod tests {
         // Fit null model
         let null = model::fit_glm(&y, &x);
 
-        // Dense path
+        let inv_s2 = 1.0 / null.sigma2;
         let u_dense = g_dense.transpose() * &null.residuals;
         let k_dense = null.compute_kernel(&g_dense);
 
-        // Sparse path
         let analysis = AnalysisVectors::from_null_model(&null, &vec![true; null.n_samples]);
         let carriers: Vec<CarrierList> = carrier_lists
             .into_iter()
@@ -472,25 +476,16 @@ mod tests {
             .collect();
         let (u_sparse, k_sparse) = score_gene_sparse(&carriers, &analysis);
 
-        // Check parity
         for j in 0..m {
-            let diff = (u_dense[(j, 0)] - u_sparse[(j, 0)]).abs();
-            assert!(
-                diff < 1e-10,
-                "U[{j}] mismatch: dense={} sparse={} diff={diff}",
-                u_dense[(j, 0)],
-                u_sparse[(j, 0)]
-            );
+            let expected = u_dense[(j, 0)] * inv_s2;
+            let diff = (expected - u_sparse[(j, 0)]).abs();
+            assert!(diff < 1e-10, "U[{j}]: expected={expected} got={} diff={diff}", u_sparse[(j, 0)]);
         }
         for i in 0..m {
             for j in 0..m {
-                let diff = (k_dense[(i, j)] - k_sparse[(i, j)]).abs();
-                assert!(
-                    diff < 1e-10,
-                    "K[{i},{j}] mismatch: dense={} sparse={} diff={diff}",
-                    k_dense[(i, j)],
-                    k_sparse[(i, j)]
-                );
+                let expected = k_dense[(i, j)] * inv_s2;
+                let diff = (expected - k_sparse[(i, j)]).abs();
+                assert!(diff < 1e-10, "K[{i},{j}]: expected={expected} got={} diff={diff}", k_sparse[(i, j)]);
             }
         }
     }
@@ -566,6 +561,139 @@ mod tests {
         }
     }
 
+    /// Deterministic synthetic dataset shared by the e2e p-value parity tests.
+    /// LCG keeps the build reproducible without pulling in an rng dependency.
+    struct SyntheticContinuous {
+        g: Mat<f64>,
+        carriers: Vec<CarrierList>,
+        y: Mat<f64>,
+        x: Mat<f64>,
+        mafs: Vec<f64>,
+        ann: Vec<Vec<f64>>,
+    }
+
+    fn synthetic_continuous() -> SyntheticContinuous {
+        let n: usize = 200;
+        let m: usize = 6;
+        let k: usize = 3;
+        let mut state = 0xdeadbeefu64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 33) as f64) / ((1u64 << 31) as f64)
+        };
+
+        let mut x = Mat::zeros(n, k);
+        for i in 0..n {
+            x[(i, 0)] = 1.0;
+            x[(i, 1)] = next() * 2.0 - 1.0;
+            x[(i, 2)] = next() * 2.0 - 1.0;
+        }
+
+        let mut g = Mat::zeros(n, m);
+        let mut carriers: Vec<CarrierList> =
+            (0..m).map(|_| CarrierList { entries: Vec::new() }).collect();
+        let mut mac = vec![0u32; m];
+        for j in 0..m {
+            for i in 0..n {
+                if next() < 0.05 {
+                    let dosage: u8 = if next() < 0.9 { 1 } else { 2 };
+                    g[(i, j)] = dosage as f64;
+                    carriers[j].entries.push(CarrierEntry { sample_idx: i as u32, dosage });
+                    mac[j] += dosage as u32;
+                }
+            }
+            // Guarantee >=2 carriers so beta-weight masks aren't degenerate.
+            if carriers[j].entries.len() < 2 {
+                let i = (j * 7) % n;
+                if g[(i, j)] == 0.0 {
+                    g[(i, j)] = 1.0;
+                    carriers[j].entries.push(CarrierEntry { sample_idx: i as u32, dosage: 1 });
+                    mac[j] += 1;
+                }
+            }
+        }
+        let mafs: Vec<f64> = mac.iter().map(|&c| c as f64 / (2.0 * n as f64)).collect();
+
+        let mut y = Mat::zeros(n, 1);
+        for i in 0..n {
+            y[(i, 0)] = 0.7 * x[(i, 1)] - 0.3 * x[(i, 2)] + (next() - 0.5) * 0.4;
+        }
+
+        let ann: Vec<Vec<f64>> = (0..2).map(|_| (0..m).map(|_| next()).collect()).collect();
+        SyntheticContinuous { g, carriers, y, x, mafs, ann }
+    }
+
+    fn assert_staar_eq(actual: &StaarResult, expected: &StaarResult) {
+        const TOL: f64 = 1e-9;
+        const TOL_SKAT: f64 = 1e-6;
+        let pairs = [
+            ("burden_1_25", actual.burden_1_25, expected.burden_1_25, TOL),
+            ("burden_1_1", actual.burden_1_1, expected.burden_1_1, TOL),
+            ("skat_1_25", actual.skat_1_25, expected.skat_1_25, TOL_SKAT),
+            ("skat_1_1", actual.skat_1_1, expected.skat_1_1, TOL_SKAT),
+            ("acat_v_1_25", actual.acat_v_1_25, expected.acat_v_1_25, TOL),
+            ("acat_v_1_1", actual.acat_v_1_1, expected.acat_v_1_1, TOL),
+            ("acat_o", actual.acat_o, expected.acat_o, TOL),
+            ("staar_o", actual.staar_o, expected.staar_o, TOL_SKAT),
+            ("staar_b_1_25", actual.staar_b_1_25, expected.staar_b_1_25, TOL),
+            ("staar_b_1_1", actual.staar_b_1_1, expected.staar_b_1_1, TOL),
+            ("staar_s_1_25", actual.staar_s_1_25, expected.staar_s_1_25, TOL_SKAT),
+            ("staar_s_1_1", actual.staar_s_1_1, expected.staar_s_1_1, TOL_SKAT),
+            ("staar_a_1_25", actual.staar_a_1_25, expected.staar_a_1_25, TOL),
+            ("staar_a_1_1", actual.staar_a_1_1, expected.staar_a_1_1, TOL),
+        ];
+        for (name, a, e, tol) in pairs {
+            assert!((a - e).abs() < tol, "{name}: actual={a:e} expected={e:e}");
+        }
+        assert_eq!(actual.per_annotation.len(), expected.per_annotation.len());
+        for (ci, (a_ann, e_ann)) in actual.per_annotation.iter().zip(&expected.per_annotation).enumerate() {
+            for (ti, (&a, &e)) in a_ann.iter().zip(e_ann).enumerate() {
+                let tol = if ti == 2 || ti == 3 { TOL_SKAT } else { TOL };
+                assert!((a - e).abs() < tol, "per_annotation[{ci}][{ti}]: actual={a:e} expected={e:e}");
+            }
+        }
+    }
+
+    /// Build the U/K oracle by hand: U=G'r and K=G'(I-H)G scaled by 1/σ², then
+    /// fed to run_staar_from_sumstats. This entry point is the path validated
+    /// against R STAAR by `staar_continuous_matches_r`.
+    fn oracle(
+        g: &Mat<f64>, null: &crate::staar::model::NullModel,
+        ann: &[Vec<f64>], mafs: &[f64],
+    ) -> StaarResult {
+        let inv_s2 = 1.0 / null.sigma2;
+        let m = mafs.len();
+        let u = g.transpose() * &null.residuals;
+        let k = null.compute_kernel(g);
+        let u_scaled = Mat::from_fn(m, 1, |i, _| u[(i, 0)] * inv_s2);
+        let k_scaled = Mat::from_fn(m, m, |i, j| k[(i, j)] * inv_s2);
+        score::run_staar_from_sumstats(&u_scaled, &k_scaled, ann, mafs, null.n_samples)
+    }
+
+    /// Raw genotype path (`score::run_staar`) must produce identical p-values
+    /// to the U/K oracle for every Burden/SKAT/ACAT-V/omnibus statistic.
+    #[test]
+    fn raw_path_matches_oracle() {
+        let d = synthetic_continuous();
+        let null = model::fit_glm(&d.y, &d.x);
+        let raw = score::run_staar(&d.g, &d.ann, &d.mafs, &null, false);
+        let expected = oracle(&d.g, &null, &d.ann, &d.mafs);
+        assert_staar_eq(&raw, &expected);
+    }
+
+    /// Sparse carrier-list path (`run_staar_sparse`) must produce identical
+    /// p-values to the U/K oracle. Extends sparse-dense parity from U/K to
+    /// the full set of test statistics, including the STAAR-O omnibus.
+    #[test]
+    fn sparse_path_matches_oracle() {
+        let d = synthetic_continuous();
+        let null = model::fit_glm(&d.y, &d.x);
+        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; null.n_samples]);
+        let sparse = run_staar_sparse(&d.carriers, &analysis, &d.ann, &d.mafs, false);
+        let expected = oracle(&d.g, &null, &d.ann, &d.mafs);
+        assert_staar_eq(&sparse, &expected);
+    }
+
     #[test]
     fn singleton_variant() {
         let n = 50;
@@ -598,9 +726,8 @@ mod tests {
         assert_eq!(u.nrows(), 2);
         assert_eq!(k.nrows(), 2);
         assert_eq!(k.ncols(), 2);
-        // U should equal the residual at that sample
-        let diff = (u[(0, 0)] - analysis.residuals[10]).abs();
-        assert!(diff < 1e-10, "Singleton U should equal residual at carrier");
+        let expected = analysis.residuals[10] / analysis.sigma2;
+        assert!((u[(0, 0)] - expected).abs() < 1e-10);
     }
 
     #[test]
@@ -765,6 +892,7 @@ mod tests {
         }
 
         let null = model::fit_glm(&y, &x);
+        let inv_s2 = 1.0 / null.sigma2;
         let u_dense = g_dense.transpose() * &null.residuals;
         let k_dense = null.compute_kernel(&g_dense);
 
@@ -774,12 +902,12 @@ mod tests {
         let (u_sparse, k_sparse) = score_gene_sparse(&carriers, &analysis);
 
         for j in 0..2 {
-            let diff = (u_dense[(j, 0)] - u_sparse[(j, 0)]).abs();
+            let diff = (u_dense[(j, 0)] * inv_s2 - u_sparse[(j, 0)]).abs();
             assert!(diff < 1e-10, "Dense carrier U[{j}] diff={diff}");
         }
         for i in 0..2 {
             for j in 0..2 {
-                let diff = (k_dense[(i, j)] - k_sparse[(i, j)]).abs();
+                let diff = (k_dense[(i, j)] * inv_s2 - k_sparse[(i, j)]).abs();
                 assert!(diff < 1e-10, "Dense carrier K[{i},{j}] diff={diff}");
             }
         }

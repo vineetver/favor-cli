@@ -16,6 +16,15 @@ pub fn cauchy_combine(p_values: &[f64]) -> f64 {
     cauchy_combine_weighted(p_values, &[])
 }
 
+/// Smallest positive f64 (denormal). Floor for combined p-values so the
+/// omnibus never underflows to exactly 0 (which becomes -log10(p) = +inf
+/// in summary reports).
+const P_FLOOR: f64 = f64::MIN_POSITIVE * f64::EPSILON; // 5e-324
+
+/// Threshold above which `atan(T)/π` saturates at 0.5 in f64. Past this we
+/// switch to the upper-tail asymptotic `1/(π·T)` (STAAR/R/CCT.R).
+const T_ASYMP: f64 = 1.0e15;
+
 /// Weighted Cauchy combination.
 ///
 /// T = sum(w_i * tan((0.5 - p_i) * pi)) / sum(w_i)
@@ -33,13 +42,12 @@ pub fn cauchy_combine_weighted(p_values: &[f64], weights: &[f64]) -> f64 {
     let mut count = 0;
 
     for (i, &p) in p_values.iter().enumerate() {
-        if !p.is_finite() || p <= 0.0 || p >= 1.0 {
-            // Clamp valid p-values; skip truly invalid ones
-            if p.is_nan() {
-                continue;
-            }
+        if p.is_nan() {
+            continue;
         }
-        let p_clamped = p.clamp(1e-300, 1.0 - 1e-15);
+        // Clamp into (0, 1). The lower bound is the smallest positive double
+        // so the small-p branch still represents fully underflowed inputs.
+        let p_clamped = p.clamp(P_FLOOR, 1.0 - 1e-15);
         let w = if use_weights { weights[i].max(0.0) } else { 1.0 };
         if w == 0.0 {
             continue;
@@ -60,8 +68,18 @@ pub fn cauchy_combine_weighted(p_values: &[f64], weights: &[f64]) -> f64 {
     }
 
     let t = t_sum / w_sum;
-    let p = 0.5 - t.atan() / PI;
-    p.clamp(0.0, 1.0)
+
+    // |T| > T_ASYMP: atan(T)/π saturates at 0.5 in f64. Switch to the
+    // upper-tail asymptotic 1/(π·T) (STAAR/R/CCT.R).
+    let p = if t > T_ASYMP {
+        1.0 / (PI * t)
+    } else if t < -T_ASYMP {
+        1.0 - 1.0 / (PI * -t)
+    } else {
+        0.5 - t.atan() / PI
+    };
+
+    p.clamp(P_FLOOR, 1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +391,48 @@ mod tests {
         let equal = cauchy_combine(&pvals);
         let weighted = cauchy_combine_weighted(&pvals, &[1.0, 1.0, 1.0]);
         assert!((equal - weighted).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_cauchy_combine_extreme_underflow() {
+        // Many ultra-small p-values: naive formula returns 0.0 because
+        // atan(T)/π saturates at 0.5 in f64. Asymptotic branch must return
+        // a positive denormal that respects the harmonic-mean asymptotic.
+        let pvals = vec![1e-200; 6];
+        let p = cauchy_combine(&pvals);
+        assert!(p > 0.0, "must not underflow to zero: {p:e}");
+        assert!(p.is_finite(), "must be finite: {p:e}");
+        // For equal weights and p_i = p0, asymptotic gives p ≈ p0 (harmonic
+        // mean of K identical values is the value itself).
+        assert!((p - 1e-200).abs() < 1e-205, "expected ~1e-200, got {p:e}");
+    }
+
+    #[test]
+    fn test_cauchy_combine_monotone_in_tail() {
+        // Combining smaller p-values must yield a smaller (or equal) result.
+        let p_a = cauchy_combine(&[1e-100, 1e-100, 1e-100]);
+        let p_b = cauchy_combine(&[1e-200, 1e-200, 1e-200]);
+        assert!(p_b < p_a, "smaller inputs must give smaller p: {p_a:e} vs {p_b:e}");
+    }
+
+    #[test]
+    fn test_cauchy_combine_floors_at_denormal() {
+        // Even at absolute floor (one input is 0.0), result must be positive
+        // and at least the smallest representable positive double.
+        let p = cauchy_combine(&[0.0, 0.5, 0.5]);
+        assert!(p > 0.0, "must floor to >0: {p:e}");
+        assert!(p >= f64::MIN_POSITIVE * f64::EPSILON);
+    }
+
+    #[test]
+    fn test_cauchy_combine_harmonic_asymptotic() {
+        // Mixed extreme p-values: result should approximate harmonic-mean
+        // form K / sum(1/p_i) when all inputs are << 1e-16.
+        let pvals = [1e-50, 2e-80, 3e-100];
+        let p = cauchy_combine(&pvals);
+        let expected = pvals.len() as f64 / pvals.iter().map(|p| 1.0 / p).sum::<f64>();
+        let rel_err = (p - expected).abs() / expected;
+        assert!(rel_err < 1e-3, "p={p:e} expected={expected:e} rel_err={rel_err:e}");
     }
 
     #[test]
