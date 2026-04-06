@@ -25,6 +25,10 @@ fn main() {
     let mode = OutputMode::detect(&cli.format);
     let out = output::create(&mode);
 
+    if let Some(t) = cli.threads {
+        std::env::set_var("FAVOR_THREADS", t.to_string());
+    }
+
     let dry_run = cli.dry_run;
     let result = run(cli.command, &*out, &mode, dry_run);
 

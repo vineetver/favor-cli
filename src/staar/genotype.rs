@@ -93,6 +93,7 @@ pub fn extract_genotypes(
         chromosomes: Vec::new(),
     };
 
+    let pb = output.progress(0, "extracting genotypes");
     for result in vcf_reader.records() {
         let record = result.map_err(|e| {
             FavorError::Analysis(format!("VCF parse error in '{}': {e}", vcf_path.display()))
@@ -100,7 +101,9 @@ pub fn extract_genotypes(
         process_record(
             &record, n_samples, &mut state, &schema, &props, &geno_dir, output,
         )?;
+        pb.inc(1);
     }
+    pb.finish(&format!("{} variants extracted", state.total_variants));
 
     flush(&mut state, &schema)?;
     if let Some(w) = state.writer.take() {
@@ -260,9 +263,6 @@ fn process_record(
 
         if state.batch.is_full() {
             flush(state, schema)?;
-            if state.total_variants % 500_000 == 0 {
-                output.status(&format!("  {} variants...", state.total_variants));
-            }
         }
     }
 

@@ -26,6 +26,7 @@ use std::io::{BufReader, BufWriter, Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
 use faer::Mat;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::error::FavorError;
@@ -206,62 +207,55 @@ pub fn build_chromosome(
 ) -> Result<(), FavorError> {
     let n_variants = variant_index.len();
 
-    // Compute U/K per gene, scatter into chromosome-wide U vector
-    let mut u_all = vec![0.0f64; n_variants];
-    let mut gene_computed: Vec<GeneComputed> = Vec::with_capacity(variant_index.n_genes());
-
     let gene_names: Vec<String> = variant_index.gene_names().map(|s| s.to_string()).collect();
 
-    for gene_name in &gene_names {
-        let gene_vcfs = variant_index.gene_variant_vcfs(gene_name);
-        let m = gene_vcfs.len();
-        if m == 0 {
-            continue;
-        }
-
-        // Load carrier data once for all variants in this gene
-        let carriers = sparse_g.load_variants(gene_vcfs);
-        let variant_offsets: Vec<u32> = gene_vcfs.to_vec();
-        let variant_vids: Vec<Box<str>> = gene_vcfs
-            .iter()
-            .map(|&v| variant_index.get(v).vid.clone())
-            .collect();
-
-        let gc = if m > MAX_K_VARIANTS {
-            let u_values = sparse_score::compute_u_only(&carriers, analysis);
-            GeneComputed {
-                gene_name: gene_name.clone(),
-                variant_vids,
-                variant_offsets,
-                u_values,
-                k_flat: Vec::new(),
+    let mut gene_computed: Vec<GeneComputed> = gene_names
+        .par_iter()
+        .filter_map(|gene_name| {
+            let gene_vcfs = variant_index.gene_variant_vcfs(gene_name);
+            let m = gene_vcfs.len();
+            if m == 0 {
+                return None;
             }
-        } else {
-            let (u_mat, k_mat) = sparse_score::score_gene_sparse(&carriers, analysis);
-            let u_values: Vec<f64> = (0..m).map(|i| u_mat[(i, 0)]).collect();
-            let mut k_flat = vec![0.0f64; m * m];
-            for r in 0..m {
-                for c in 0..m {
-                    k_flat[r * m + c] = k_mat[(r, c)];
+            let carriers = sparse_g.load_variants(gene_vcfs);
+            let variant_offsets: Vec<u32> = gene_vcfs.to_vec();
+            let variant_vids: Vec<Box<str>> = gene_vcfs
+                .iter()
+                .map(|&v| variant_index.get(v).vid.clone())
+                .collect();
+            let (u_values, k_flat) = if m > MAX_K_VARIANTS {
+                (sparse_score::compute_u_only(&carriers, analysis), Vec::new())
+            } else {
+                let (u_mat, k_mat) = sparse_score::score_gene_sparse(&carriers, analysis);
+                let u: Vec<f64> = (0..m).map(|i| u_mat[(i, 0)]).collect();
+                let mut k = vec![0.0f64; m * m];
+                for r in 0..m {
+                    for c in 0..m {
+                        k[r * m + c] = k_mat[(r, c)];
+                    }
                 }
-            }
-            GeneComputed {
+                (u, k)
+            };
+            Some(GeneComputed {
                 gene_name: gene_name.clone(),
                 variant_vids,
                 variant_offsets,
                 u_values,
                 k_flat,
-            }
-        };
+            })
+        })
+        .collect();
 
-        // Scatter U values into chromosome-wide vector
+    // U[i] depends only on variant i, not gene context, so the many-to-many
+    // membership overlaps in this scatter are idempotent.
+    let mut u_all = vec![0.0f64; n_variants];
+    for gc in &gene_computed {
         for (local, &global) in gc.variant_offsets.iter().enumerate() {
             let gi = global as usize;
             if gi < n_variants {
                 u_all[gi] = gc.u_values[local];
             }
         }
-        gene_computed.push(gc);
     }
 
     gene_computed.sort_by(|a, b| a.gene_name.cmp(&b.gene_name));

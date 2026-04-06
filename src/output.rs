@@ -1,6 +1,8 @@
 //! Output trait + implementations. All commands use this — never write stdout directly.
 
 use std::io::IsTerminal;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::ValueEnum;
 use serde_json::json;
@@ -43,6 +45,24 @@ impl OutputMode {
     }
 }
 
+#[derive(Clone)]
+pub struct Progress(Option<Arc<indicatif::ProgressBar>>);
+
+impl Progress {
+    #[inline]
+    pub fn inc(&self, n: u64) {
+        if let Some(p) = &self.0 {
+            p.inc(n);
+        }
+    }
+
+    pub fn finish(&self, msg: &str) {
+        if let Some(p) = &self.0 {
+            p.finish_with_message(msg.to_string());
+        }
+    }
+}
+
 /// All commands use this trait for output — never write stdout directly.
 pub trait Output {
     fn status(&self, msg: &str);
@@ -51,6 +71,8 @@ pub trait Output {
     fn error(&self, err: &FavorError);
     fn result_json(&self, data: &serde_json::Value);
     fn table(&self, headers: &[&str], rows: &[Vec<String>]);
+    /// `total == 0` is a spinner (unknown length). Machine mode is a no-op.
+    fn progress(&self, total: u64, label: &str) -> Progress;
 }
 
 pub fn create(mode: &OutputMode) -> Box<dyn Output> {
@@ -83,6 +105,28 @@ impl Output for HumanOutput {
         if let Ok(json) = serde_json::to_string_pretty(data) {
             println!("{json}");
         }
+    }
+
+    fn progress(&self, total: u64, label: &str) -> Progress {
+        let pb = if total == 0 {
+            indicatif::ProgressBar::new_spinner()
+        } else {
+            indicatif::ProgressBar::new(total)
+        };
+        let style = if total == 0 {
+            indicatif::ProgressStyle::default_spinner()
+                .template("  {spinner} {msg} {pos} ({per_sec})")
+                .unwrap()
+        } else {
+            indicatif::ProgressStyle::default_bar()
+                .template("  {msg:<28} [{bar:30}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("=> ")
+        };
+        pb.set_style(style);
+        pb.set_message(label.to_string());
+        pb.enable_steady_tick(Duration::from_millis(120));
+        Progress(Some(Arc::new(pb)))
     }
 
     fn table(&self, headers: &[&str], rows: &[Vec<String>]) {
@@ -148,6 +192,10 @@ impl Output for MachineOutput {
         if let Ok(json) = serde_json::to_string(data) {
             println!("{json}");
         }
+    }
+
+    fn progress(&self, _total: u64, _label: &str) -> Progress {
+        Progress(None)
     }
 
     fn table(&self, headers: &[&str], rows: &[Vec<String>]) {

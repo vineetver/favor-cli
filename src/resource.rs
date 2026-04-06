@@ -130,7 +130,12 @@ fn detect_memory() -> u64 {
 }
 
 fn detect_threads(config_threads: Option<usize>) -> usize {
-    // SLURM_CPUS_PER_TASK overrides everything
+    if let Ok(val) = std::env::var("FAVOR_THREADS") {
+        if let Ok(n) = val.parse::<usize>() {
+            return n;
+        }
+    }
+
     if let Ok(val) = std::env::var("SLURM_CPUS_PER_TASK") {
         if let Ok(n) = val.parse::<usize>() {
             return n;

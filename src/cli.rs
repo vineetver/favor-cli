@@ -30,6 +30,10 @@ pub struct Cli {
     /// Validate inputs and emit a JSON execution plan without doing real work
     #[arg(long, global = true, default_value_t = false)]
     pub dry_run: bool,
+
+    /// Override auto-detected thread count (otherwise SLURM/cgroup/nproc)
+    #[arg(long, global = true)]
+    pub threads: Option<usize>,
 }
 
 #[derive(Subcommand)]

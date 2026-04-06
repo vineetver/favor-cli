@@ -323,13 +323,26 @@ pub fn ingest_vcfs(
 
         let reader = open_vcf(input_path, threads)?;
         let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
-        let header = vcf_reader.read_header().map_err(|e| {
-            FavorError::Input(format!(
-                "Invalid VCF header in {}: {e}",
-                input_path.display()
-            ))
-        })?;
+        {
+            let mut hr = vcf_reader.header_reader();
+            std::io::copy(&mut hr, &mut std::io::sink()).map_err(|e| {
+                FavorError::Input(format!(
+                    "Skip VCF header in {}: {e}",
+                    input_path.display()
+                ))
+            })?;
+        }
 
+        let pb = output.progress(
+            0,
+            &format!(
+                "ingesting {}",
+                input_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
+        );
         for result in vcf_reader.records() {
             let record = result.map_err(|e| {
                 FavorError::Analysis(format!("VCF parse error in {}: {e}", input_path.display()))
@@ -337,7 +350,6 @@ pub fn ingest_vcfs(
 
             process_record(
                 &record,
-                &header,
                 &mut writers,
                 vs_writer,
                 &schema,
@@ -348,7 +360,9 @@ pub fn ingest_vcfs(
                 &mut multiallelic_split,
                 output,
             )?;
+            pb.inc(1);
         }
+        pb.finish(&format!("{variant_count} variants ingested"));
     }
 
     // Flush and close all writers
@@ -409,7 +423,6 @@ fn get_or_create_writer<'a>(
 #[allow(clippy::too_many_arguments)]
 fn process_record(
     record: &noodles_vcf::Record,
-    _header: &noodles_vcf::Header,
     writers: &mut HashMap<&'static str, ChromWriter>,
     vs_writer: &VariantSetWriter,
     schema: &Arc<Schema>,
@@ -498,10 +511,6 @@ fn process_record(
             cw.writer
                 .write(&rb)
                 .map_err(|e| FavorError::Resource(format!("Parquet write error: {e}")))?;
-
-            if *variant_count % 1_000_000 == 0 {
-                output.status(&format!("  {} variants processed...", variant_count));
-            }
         }
     }
     Ok(())

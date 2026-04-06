@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use faer::Mat;
+use rayon::prelude::*;
 
 use crate::column::STAAR_WEIGHTS;
 use crate::data::{AnnotatedSet, VariantSet, VariantSetKind};
@@ -475,7 +476,7 @@ fn run_score_tests(
 
             let gene_names: Vec<&String> = cache.gene_blocks.keys().collect();
             let per_gene_results: Vec<Vec<(usize, GeneResult)>> = gene_names
-                .iter()
+                .par_iter()
                 .filter_map(|gene_name| {
                     let block = cache.gene_blocks.get(*gene_name)?;
                     if block.m() < 2 { return None; }
