@@ -98,12 +98,7 @@ impl DfEngine {
         Ok(Self { ctx, rt })
     }
 
-    pub fn register_csv(
-        &self,
-        name: &str,
-        path: &Path,
-        delimiter: u8,
-    ) -> Result<(), FavorError> {
+    pub fn register_csv(&self, name: &str, path: &Path, delimiter: u8) -> Result<(), FavorError> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("csv");
         self.rt.block_on(async {
             let opts = CsvReadOptions::new()
@@ -117,11 +112,7 @@ impl DfEngine {
         })
     }
 
-    pub fn register_parquet_file(
-        &self,
-        name: &str,
-        path: &Path,
-    ) -> Result<(), FavorError> {
+    pub fn register_parquet_file(&self, name: &str, path: &Path) -> Result<(), FavorError> {
         self.rt.block_on(async {
             self.ctx
                 .register_parquet(name, &path.to_string_lossy(), ParquetReadOptions::default())
@@ -130,11 +121,7 @@ impl DfEngine {
         })
     }
 
-    pub fn register_parquet_dir(
-        &self,
-        name: &str,
-        path: &Path,
-    ) -> Result<(), FavorError> {
+    pub fn register_parquet_dir(&self, name: &str, path: &Path) -> Result<(), FavorError> {
         let url = format!("file://{}", path.display());
         self.rt.block_on(async {
             let table_path = ListingTableUrl::parse(&url)
@@ -144,9 +131,12 @@ impl DfEngine {
             let schema = opts
                 .infer_schema(&self.ctx.state(), &table_path)
                 .await
-                .map_err(|e| FavorError::Resource(format!(
-                    "Cannot read parquet schema at {}: {e}", path.display()
-                )))?;
+                .map_err(|e| {
+                    FavorError::Resource(format!(
+                        "Cannot read parquet schema at {}: {e}",
+                        path.display()
+                    ))
+                })?;
             let listing = ListingTable::try_new(
                 ListingTableConfig::new(table_path)
                     .with_listing_options(opts)
@@ -175,12 +165,10 @@ impl DfEngine {
             let table_path = ListingTableUrl::parse(&url)
                 .map_err(|e| FavorError::Resource(format!("Invalid path '{url}': {e}")))?;
 
-            let sort_order: Vec<Vec<SortExpr>> = vec![
-                sort_columns
-                    .iter()
-                    .map(|c| col(*c).sort(true, false))
-                    .collect(),
-            ];
+            let sort_order: Vec<Vec<SortExpr>> = vec![sort_columns
+                .iter()
+                .map(|c| col(*c).sort(true, false))
+                .collect()];
 
             let mut opts = ListingOptions::new(Arc::new(ParquetFormat::default()))
                 .with_file_sort_order(sort_order);
@@ -191,9 +179,12 @@ impl DfEngine {
             let schema = opts
                 .infer_schema(&self.ctx.state(), &table_path)
                 .await
-                .map_err(|e| FavorError::Resource(format!(
-                    "Cannot read parquet schema at {}: {e}", path.display()
-                )))?;
+                .map_err(|e| {
+                    FavorError::Resource(format!(
+                        "Cannot read parquet schema at {}: {e}",
+                        path.display()
+                    ))
+                })?;
             let listing = ListingTable::try_new(
                 ListingTableConfig::new(table_path)
                     .with_listing_options(opts)
@@ -210,9 +201,17 @@ impl DfEngine {
     /// Column names from a registered table's Arrow schema — no query needed.
     pub fn table_columns(&self, table_name: &str) -> Result<Vec<String>, FavorError> {
         self.rt.block_on(async {
-            let provider = self.ctx.table_provider(table_name).await
+            let provider = self
+                .ctx
+                .table_provider(table_name)
+                .await
                 .map_err(|e| FavorError::Resource(format!("Table '{table_name}': {e}")))?;
-            Ok(provider.schema().fields().iter().map(|f| f.name().clone()).collect())
+            Ok(provider
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect())
         })
     }
 
@@ -223,10 +222,12 @@ impl DfEngine {
             sql.to_string()
         };
         self.rt.block_on(async {
-            let df = self.ctx.sql(sql).await
-                .map_err(|e| FavorError::Analysis(format!("SQL parse failed: {e}\n  SQL: {sql_preview}")))?;
-            df.collect().await
-                .map_err(|e| FavorError::Analysis(format!("Query execution failed: {e}\n  SQL: {sql_preview}")))
+            let df = self.ctx.sql(sql).await.map_err(|e| {
+                FavorError::Analysis(format!("SQL parse failed: {e}\n  SQL: {sql_preview}"))
+            })?;
+            df.collect().await.map_err(|e| {
+                FavorError::Analysis(format!("Query execution failed: {e}\n  SQL: {sql_preview}"))
+            })
         })
     }
 
@@ -240,9 +241,15 @@ impl DfEngine {
         let batches = self.collect(&format!("EXPLAIN {sql}"))?;
         let mut lines = Vec::new();
         for batch in &batches {
-            if let Some(a) = batch.column(1).as_any().downcast_ref::<array::StringArray>() {
+            if let Some(a) = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<array::StringArray>()
+            {
                 for i in 0..a.len() {
-                    if !a.is_null(i) { lines.push(a.value(i).to_string()); }
+                    if !a.is_null(i) {
+                        lines.push(a.value(i).to_string());
+                    }
                 }
             }
         }
@@ -253,7 +260,9 @@ impl DfEngine {
     pub fn query_scalar(&self, sql: &str) -> Result<i64, FavorError> {
         let batches = self.collect(sql)?;
         for batch in &batches {
-            if batch.num_rows() == 0 { continue; }
+            if batch.num_rows() == 0 {
+                continue;
+            }
             let col = batch.column(0);
             if let Some(a) = col.as_any().downcast_ref::<array::Int64Array>() {
                 return Ok(a.value(0));
@@ -276,11 +285,15 @@ impl DfEngine {
             // DataFusion 53 uses Utf8View for VARCHAR — handle both.
             if let Some(a) = col.as_any().downcast_ref::<array::StringArray>() {
                 for i in 0..a.len() {
-                    if !a.is_null(i) { result.push(a.value(i).to_string()); }
+                    if !a.is_null(i) {
+                        result.push(a.value(i).to_string());
+                    }
                 }
             } else if let Some(a) = col.as_any().downcast_ref::<array::StringViewArray>() {
                 for i in 0..a.len() {
-                    if !a.is_null(i) { result.push(a.value(i).to_string()); }
+                    if !a.is_null(i) {
+                        result.push(a.value(i).to_string());
+                    }
                 }
             }
         }

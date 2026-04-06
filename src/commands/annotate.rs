@@ -2,21 +2,37 @@ use std::path::PathBuf;
 
 use serde_json::json;
 
-use crate::data::{parquet_column_names, parquet_row_count, AnnotationDb};
 use crate::commands::{self, AnnotateConfig};
 use crate::config::{Config, Tier};
+use crate::data::{parquet_column_names, parquet_row_count, AnnotationDb};
+use crate::data::{VariantSet, VariantSetKind, VariantSetWriter};
 use crate::engine::DfEngine;
 use crate::error::FavorError;
 use crate::ingest::{ColumnContract, ColumnRequirement, JoinKey};
 use crate::output::Output;
 use crate::resource::Resources;
-use crate::data::{VariantSet, VariantSetKind, VariantSetWriter};
 
 const ANNOTATE_JOIN_COLUMNS: &[ColumnRequirement] = &[
-    ColumnRequirement { name: "chromosome", source: "ingested variant set", used_by: "annotation join" },
-    ColumnRequirement { name: "position", source: "ingested variant set", used_by: "annotation join" },
-    ColumnRequirement { name: "ref", source: "ingested variant set", used_by: "annotation join (allele match)" },
-    ColumnRequirement { name: "alt", source: "ingested variant set", used_by: "annotation join (allele match)" },
+    ColumnRequirement {
+        name: "chromosome",
+        source: "ingested variant set",
+        used_by: "annotation join",
+    },
+    ColumnRequirement {
+        name: "position",
+        source: "ingested variant set",
+        used_by: "annotation join",
+    },
+    ColumnRequirement {
+        name: "ref",
+        source: "ingested variant set",
+        used_by: "annotation join (allele match)",
+    },
+    ColumnRequirement {
+        name: "alt",
+        source: "ingested variant set",
+        used_by: "annotation join (allele match)",
+    },
 ];
 
 const JOIN_KEY_COLUMNS: &[&str] = &["chromosome", "position", "ref", "alt"];
@@ -37,13 +53,22 @@ pub fn handle(
     }
 
     let global_config = Config::load_configured()?;
-    let tier = if full { Tier::Full } else { global_config.data.tier };
+    let tier = if full {
+        Tier::Full
+    } else {
+        global_config.data.tier
+    };
 
     let output = output_path.unwrap_or_else(|| {
         let name = input.file_name().unwrap_or_default().to_string_lossy();
-        let stem = name.strip_suffix(".ingested").or_else(|| name.strip_suffix("/"))
+        let stem = name
+            .strip_suffix(".ingested")
+            .or_else(|| name.strip_suffix("/"))
             .unwrap_or(&name);
-        input.parent().unwrap_or(&input).join(format!("{stem}.annotated"))
+        input
+            .parent()
+            .unwrap_or(&input)
+            .join(format!("{stem}.annotated"))
     });
 
     let config = AnnotateConfig {
@@ -100,10 +125,22 @@ pub fn run_annotate(config: &AnnotateConfig, out: &dyn Output) -> Result<(), Fav
     let resources = Resources::detect_configured();
     let engine = DfEngine::new(&resources)?;
 
-    out.status(&format!("Input: {} variants, join key: {:?}", input.count(), input.join_key()));
-    out.status(&format!("Resources: {}, {} threads ({})",
-        resources.memory_human(), resources.threads, resources.environment()));
-    out.status(&format!("Annotating against favor-{} ({})...", config.tier, config.tier.size_human()));
+    out.status(&format!(
+        "Input: {} variants, join key: {:?}",
+        input.count(),
+        input.join_key()
+    ));
+    out.status(&format!(
+        "Resources: {}, {} threads ({})",
+        resources.memory_human(),
+        resources.threads,
+        resources.environment()
+    ));
+    out.status(&format!(
+        "Annotating against favor-{} ({})...",
+        config.tier,
+        config.tier.size_human()
+    ));
 
     let result = annotate_join(&input, &db, &engine, &config.output, out)?;
     report_result(&result, config, &engine, &input, &db, out)
@@ -151,14 +188,16 @@ fn annotate_join(
     let join_key = input.join_key();
     let input_count = input.count() as i64;
 
-    let input_struct_cols: Vec<&str> = input.columns().iter()
+    let input_struct_cols: Vec<&str> = input
+        .columns()
+        .iter()
         .map(|s| s.as_str())
         .filter(|c| !JOIN_KEY_COLUMNS.contains(c))
         .collect();
     let input_struct_expr = build_struct_expr(&input_struct_cols);
 
-    let mut writer = VariantSetWriter::new(output_path, join_key,
-        &input.root().display().to_string())?;
+    let mut writer =
+        VariantSetWriter::new(output_path, join_key, &input.root().display().to_string())?;
     writer.set_kind(VariantSetKind::Annotated { tier: db.tier() });
 
     match join_key {
@@ -166,20 +205,33 @@ fn annotate_join(
             join_per_chromosome(input, db, engine, &input_struct_expr, &mut writer, out)?;
         }
         JoinKey::Rsid => {
-            join_via_rsid(input, db, engine, &input_struct_expr, output_path, &mut writer, out)?;
+            join_via_rsid(
+                input,
+                db,
+                engine,
+                &input_struct_expr,
+                output_path,
+                &mut writer,
+                out,
+            )?;
         }
     }
 
     let output = writer.finish()?;
     let output_count = output.count() as i64;
-    Ok(AnnotateResult { output, input_count, output_count })
+    Ok(AnnotateResult {
+        output,
+        input_count,
+        output_count,
+    })
 }
 
 fn build_struct_expr(non_join_cols: &[&str]) -> String {
     if non_join_cols.is_empty() {
         return String::new();
     }
-    let args: Vec<String> = non_join_cols.iter()
+    let args: Vec<String> = non_join_cols
+        .iter()
         .map(|c| format!("'{c}', u.\"{c}\""))
         .collect();
     format!("named_struct({})", args.join(", "))
@@ -244,7 +296,11 @@ fn join_per_chromosome(
             out_path = out_path.display(),
         ))?;
 
-        let count = if out_path.exists() { parquet_row_count(&out_path)? } else { 0 };
+        let count = if out_path.exists() {
+            parquet_row_count(&out_path)?
+        } else {
+            0
+        };
         let size = std::fs::metadata(&out_path).map_or(0, |m| m.len());
         if count > 0 {
             writer.register_chrom(chrom, count, size);
@@ -275,7 +331,9 @@ fn join_via_rsid(
 
     engine.register_parquet_dir("_user", input.root())?;
 
-    let lookup_dir = db.root().parent()
+    let lookup_dir = db
+        .root()
+        .parent()
         .unwrap_or(db.root())
         .join("lookup/rsid_lookup");
     engine.register_parquet_dir("_rsid_lookup", &lookup_dir)?;
@@ -292,7 +350,7 @@ fn join_via_rsid(
          SELECT u.*, lk.chromosome AS _chr, lk.position AS _pos, \
                 lk.ref_vcf AS _ref, lk.alt_vcf AS _alt \
          FROM _user u \
-         INNER JOIN _rsid_lookup lk ON u.rsid = lk.rsid"
+         INNER JOIN _rsid_lookup lk ON u.rsid = lk.rsid",
     )?;
 
     engine.execute(&format!(
@@ -344,16 +402,20 @@ fn report_result(
             "diagnostic": diagnostic.message,
             "suggested_fix": diagnostic.suggested_fix,
         }));
-        return Err(FavorError::Analysis(
-            format!("0 variants matched annotations. {}", diagnostic.message)
-        ));
+        return Err(FavorError::Analysis(format!(
+            "0 variants matched annotations. {}",
+            diagnostic.message
+        )));
     }
 
     if match_rate < 0.05 {
         let diagnostic = diagnose_zero_matches(engine, input, db.root())?;
         out.warn(&format!(
             "Low match rate: {}/{} ({:.1}%). {}",
-            result.output_count, result.input_count, match_rate * 100.0, diagnostic.message,
+            result.output_count,
+            result.input_count,
+            match_rate * 100.0,
+            diagnostic.message,
         ));
         out.result_json(&json!({
             "status": "low_match_rate",
@@ -370,7 +432,9 @@ fn report_result(
     let unmatched = result.input_count - result.output_count;
     out.success(&format!(
         "Annotated {}/{} variants ({:.1}%) -> {}",
-        result.output_count, result.input_count, match_rate * 100.0,
+        result.output_count,
+        result.input_count,
+        match_rate * 100.0,
         result.output.root().display(),
     ));
     if unmatched > 0 {
@@ -410,49 +474,61 @@ fn diagnose_zero_matches(
     engine.register_parquet_dir("_diag_input", input_vs.root())?;
     engine.register_parquet_file("_diag_ann", &chr1_path)?;
 
-    let chroms = engine.query_strings(
-        "SELECT DISTINCT chromosome FROM _diag_input LIMIT 5"
-    ).unwrap_or_default();
+    let chroms = engine
+        .query_strings("SELECT DISTINCT chromosome FROM _diag_input LIMIT 5")
+        .unwrap_or_default();
 
     if chroms.iter().any(|c| c.starts_with("chr")) {
         return Ok(Diagnostic {
-            message: "Chromosome names have 'chr' prefix — annotations use bare numbers. Re-ingest.".into(),
+            message:
+                "Chromosome names have 'chr' prefix — annotations use bare numbers. Re-ingest."
+                    .into(),
             suggested_fix: "favor ingest <original_file>".into(),
         });
     }
 
-    let position_hits = engine.query_scalar(
-        "SELECT COUNT(*) FROM (\
+    let position_hits = engine
+        .query_scalar(
+            "SELECT COUNT(*) FROM (\
             SELECT position FROM _diag_input WHERE chromosome = '1' LIMIT 10\
         ) s \
-        WHERE EXISTS (SELECT 1 FROM _diag_ann a WHERE a.position = s.position)"
-    ).unwrap_or(0);
+        WHERE EXISTS (SELECT 1 FROM _diag_ann a WHERE a.position = s.position)",
+        )
+        .unwrap_or(0);
 
     if position_hits == 0 {
         return Ok(Diagnostic {
-            message: "No positions match hg38 annotations. Input may be hg19 or different build.".into(),
+            message: "No positions match hg38 annotations. Input may be hg19 or different build."
+                .into(),
             suggested_fix: "favor ingest <original_file> --build hg19 --emit-sql".into(),
         });
     }
 
-    let mismatch_samples = engine.collect(
-        "SELECT u.position, u.\"ref\" AS in_ref, u.alt AS in_alt, \
+    let mismatch_samples = engine
+        .collect(
+            "SELECT u.position, u.\"ref\" AS in_ref, u.alt AS in_alt, \
                 a.ref_vcf AS ann_ref, a.alt_vcf AS ann_alt \
          FROM _diag_input u \
          INNER JOIN _diag_ann a ON u.position = a.position \
          WHERE u.chromosome = '1' \
            AND (u.\"ref\" != a.ref_vcf OR u.alt != a.alt_vcf) \
-         LIMIT 5"
-    ).unwrap_or_default();
+         LIMIT 5",
+        )
+        .unwrap_or_default();
 
     let mut examples = Vec::new();
     for batch in &mismatch_samples {
         for row in 0..batch.num_rows() {
-            let pos = arrow::util::display::array_value_to_string(batch.column(0), row).unwrap_or_default();
-            let in_ref = arrow::util::display::array_value_to_string(batch.column(1), row).unwrap_or_default();
-            let in_alt = arrow::util::display::array_value_to_string(batch.column(2), row).unwrap_or_default();
-            let ann_ref = arrow::util::display::array_value_to_string(batch.column(3), row).unwrap_or_default();
-            let ann_alt = arrow::util::display::array_value_to_string(batch.column(4), row).unwrap_or_default();
+            let pos = arrow::util::display::array_value_to_string(batch.column(0), row)
+                .unwrap_or_default();
+            let in_ref = arrow::util::display::array_value_to_string(batch.column(1), row)
+                .unwrap_or_default();
+            let in_alt = arrow::util::display::array_value_to_string(batch.column(2), row)
+                .unwrap_or_default();
+            let ann_ref = arrow::util::display::array_value_to_string(batch.column(3), row)
+                .unwrap_or_default();
+            let ann_alt = arrow::util::display::array_value_to_string(batch.column(4), row)
+                .unwrap_or_default();
             examples.push(format!(
                 "  pos {pos}: input {in_ref}/{in_alt}, annotation {ann_ref}/{ann_alt}"
             ));

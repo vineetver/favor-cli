@@ -64,7 +64,8 @@ fn file_content_fingerprint(path: &Path) -> Result<Vec<u8>, FavorError> {
 
     let mut f = File::open(path)
         .map_err(|e| FavorError::Resource(format!("open {}: {e}", path.display())))?;
-    let size = f.metadata()
+    let size = f
+        .metadata()
         .map_err(|e| FavorError::Resource(format!("stat {}: {e}", path.display())))?
         .len();
 
@@ -102,8 +103,12 @@ fn dir_fingerprint(path: &Path) -> Result<Vec<u8>, FavorError> {
     // Fallback: hash the directory's own mtime+size (stat only)
     let meta = fs::metadata(path)
         .map_err(|e| FavorError::Resource(format!("stat {}: {e}", path.display())))?;
-    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)
-        .duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let mtime = meta
+        .modified()
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let mut hasher = Sha256::new();
     hasher.update(mtime.to_le_bytes());
     Ok(hasher.finalize().to_vec())
@@ -139,29 +144,59 @@ pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> Stor
     let manifest = match fs::read_to_string(&manifest_path) {
         Ok(s) => match serde_json::from_str::<StoreManifest>(&s) {
             Ok(m) => m,
-            Err(_) => return StoreProbe { hit: false, store_dir, manifest: None },
+            Err(_) => {
+                return StoreProbe {
+                    hit: false,
+                    store_dir,
+                    manifest: None,
+                }
+            }
         },
-        Err(_) => return StoreProbe { hit: false, store_dir, manifest: None },
+        Err(_) => {
+            return StoreProbe {
+                hit: false,
+                store_dir,
+                manifest: None,
+            }
+        }
     };
 
     let key = match compute_key(vcf_path, annotations_path) {
         Ok(k) => k,
-        Err(_) => return StoreProbe { hit: false, store_dir, manifest: None },
+        Err(_) => {
+            return StoreProbe {
+                hit: false,
+                store_dir,
+                manifest: None,
+            }
+        }
     };
 
     if manifest.key != key || manifest.version != 3 {
-        return StoreProbe { hit: false, store_dir, manifest: Some(manifest) };
+        return StoreProbe {
+            hit: false,
+            store_dir,
+            manifest: Some(manifest),
+        };
     }
 
     for ci in &manifest.chromosomes {
         let sparse_g = store_dir.join(format!("chromosome={}/sparse_g.bin", ci.name));
         let variants = store_dir.join(format!("chromosome={}/variants.parquet", ci.name));
         if !sparse_g.exists() || !variants.exists() {
-            return StoreProbe { hit: false, store_dir, manifest: Some(manifest) };
+            return StoreProbe {
+                hit: false,
+                store_dir,
+                manifest: Some(manifest),
+            };
         }
     }
 
-    StoreProbe { hit: true, store_dir, manifest: Some(manifest) }
+    StoreProbe {
+        hit: true,
+        store_dir,
+        manifest: Some(manifest),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -169,14 +204,46 @@ pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> Stor
 // ---------------------------------------------------------------------------
 
 pub const STAAR_ANNOTATION_COLUMNS: &[ColumnRequirement] = &[
-    ColumnRequirement { name: "gencode", source: "FAVOR full annotations", used_by: "gene/region/consequence extraction" },
-    ColumnRequirement { name: "main", source: "FAVOR full annotations", used_by: "CADD score extraction" },
-    ColumnRequirement { name: "cage", source: "FAVOR full annotations", used_by: "regulatory mask predicates" },
-    ColumnRequirement { name: "apc", source: "FAVOR full annotations", used_by: "11 annotation weight channels" },
-    ColumnRequirement { name: "dbnsfp", source: "FAVOR full annotations", used_by: "REVEL score for masks" },
-    ColumnRequirement { name: "ccre", source: "FAVOR full annotations", used_by: "cCRE regulatory masks" },
-    ColumnRequirement { name: "linsight", source: "FAVOR full annotations", used_by: "LINSIGHT annotation weight" },
-    ColumnRequirement { name: "fathmm_xf", source: "FAVOR full annotations", used_by: "FATHMM-XF annotation weight" },
+    ColumnRequirement {
+        name: "gencode",
+        source: "FAVOR full annotations",
+        used_by: "gene/region/consequence extraction",
+    },
+    ColumnRequirement {
+        name: "main",
+        source: "FAVOR full annotations",
+        used_by: "CADD score extraction",
+    },
+    ColumnRequirement {
+        name: "cage",
+        source: "FAVOR full annotations",
+        used_by: "regulatory mask predicates",
+    },
+    ColumnRequirement {
+        name: "apc",
+        source: "FAVOR full annotations",
+        used_by: "11 annotation weight channels",
+    },
+    ColumnRequirement {
+        name: "dbnsfp",
+        source: "FAVOR full annotations",
+        used_by: "REVEL score for masks",
+    },
+    ColumnRequirement {
+        name: "ccre",
+        source: "FAVOR full annotations",
+        used_by: "cCRE regulatory masks",
+    },
+    ColumnRequirement {
+        name: "linsight",
+        source: "FAVOR full annotations",
+        used_by: "LINSIGHT annotation weight",
+    },
+    ColumnRequirement {
+        name: "fathmm_xf",
+        source: "FAVOR full annotations",
+        used_by: "FATHMM-XF annotation weight",
+    },
 ];
 
 pub struct GenoStoreResult {
@@ -256,7 +323,9 @@ pub fn build_or_load_store(
     // Deduplicate: same (chromosome, position, ref, alt) from multi-allelic splits or overlapping VCFs.
     let dup_count = engine.query_scalar(&column::dedup_count_sql())?;
     if dup_count > 0 {
-        out.warn(&format!("  {dup_count} duplicate variants found — keeping first occurrence."));
+        out.warn(&format!(
+            "  {dup_count} duplicate variants found — keeping first occurrence."
+        ));
         engine.execute(&column::dedup_sql())?;
         engine.execute("DROP TABLE _rare_all")?;
         engine.execute("ALTER TABLE _rare_dedup RENAME TO _rare_all")?;
@@ -264,19 +333,21 @@ pub fn build_or_load_store(
 
     let n_all = engine.query_scalar("SELECT COUNT(*) FROM _rare_all")?;
     let n_genes = engine.query_scalar(&column::gene_count_sql())?;
-    out.status(&format!("  {} annotated variants, {} genes", n_all, n_genes));
+    out.status(&format!(
+        "  {} annotated variants, {} genes",
+        n_all, n_genes
+    ));
 
     if n_all == 0 {
         return Err(FavorError::Analysis(format!(
             "No variants found after joining genotypes ({}) with annotations ({}). \
              Check that both use the same genome build and allele normalization.",
-            genotypes.display(), annotations.display(),
+            genotypes.display(),
+            annotations.display(),
         )));
     }
 
-    let manifest = build(
-        &engine, &geno, store_dir, genotypes, annotations, out,
-    )?;
+    let manifest = build(&engine, &geno, store_dir, genotypes, annotations, out)?;
 
     Ok(GenoStoreResult {
         sample_names: geno.sample_names.clone(),
@@ -319,9 +390,9 @@ pub fn run_annotation_join(
     let missing = contract.check(&ann_cols);
     if !missing.is_empty() {
         let tier_hint = match ann_vs.kind() {
-            Some(VariantSetKind::Annotated { tier: crate::config::Tier::Base }) => {
-                " Your data was annotated with base tier. Re-run: `favor annotate --full`."
-            }
+            Some(VariantSetKind::Annotated {
+                tier: crate::config::Tier::Base,
+            }) => " Your data was annotated with base tier. Re-run: `favor annotate --full`.",
             _ => " Re-run: `favor annotate --full`.",
         };
         return Err(FavorError::DataMissing(format!(
@@ -334,17 +405,14 @@ pub fn run_annotation_join(
     }
 
     let geno_dir = &geno.output_dir;
+    engine.register_parquet_sorted("_genotypes", geno_dir, &["position", "ref", "alt"])?;
     engine.register_parquet_sorted(
-        "_genotypes", geno_dir, &["position", "ref", "alt"],
-    )?;
-    engine.register_parquet_sorted(
-        "_annotations", ann_vs.root(), &["position", "ref_vcf", "alt_vcf"],
+        "_annotations",
+        ann_vs.root(),
+        &["position", "ref_vcf", "alt_vcf"],
     )?;
 
-    // _rare_all: NO MAF upper-bound — store holds everything, MAF filter at read time.
-    // SQL is generated from typed column definitions in column.rs — no string
-    // literal column names here. Weight formulas, extraction expressions, and
-    // join keys all derive from the Col enum and static formula arrays.
+    // The store keeps all variants; MAF filtering happens at read time.
     engine.execute(&column::annotation_join_sql())?;
 
     Ok(engine)
@@ -366,15 +434,17 @@ pub fn build(
         fs::remove_dir_all(store_dir)
             .map_err(|e| FavorError::Resource(format!("Clean store dir: {e}")))?;
     }
-    fs::create_dir_all(store_dir)
-        .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", store_dir.display())))?;
+    fs::create_dir_all(store_dir).map_err(|e| {
+        FavorError::Resource(format!("Cannot create '{}': {e}", store_dir.display()))
+    })?;
 
     let key = compute_key(vcf_path, annotations_path)?;
     let n_samples = geno_result.sample_names.len();
 
     let samples_path = store_dir.join("samples.txt");
-    fs::write(&samples_path, geno_result.sample_names.join("\n"))
-        .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", samples_path.display())))?;
+    fs::write(&samples_path, geno_result.sample_names.join("\n")).map_err(|e| {
+        FavorError::Resource(format!("Cannot write '{}': {e}", samples_path.display()))
+    })?;
 
     let chroms = engine.query_strings(&column::distinct_chroms_sql())?;
 
@@ -387,20 +457,16 @@ pub fn build(
         out.status(&format!("  Building sparse genotype store chr{chrom}..."));
 
         let chrom_dir = store_dir.join(format!("chromosome={chrom}"));
-        fs::create_dir_all(&chrom_dir)
-            .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", chrom_dir.display())))?;
+        fs::create_dir_all(&chrom_dir).map_err(|e| {
+            FavorError::Resource(format!("Cannot create '{}': {e}", chrom_dir.display()))
+        })?;
 
         let geno_path = format!(
             "{}/chromosome={chrom}/data.parquet",
             geno_result.output_dir.display()
         );
         let stats = crate::staar::sparse_g_writer::build_chromosome(
-            engine,
-            &geno_path,
-            chrom,
-            &chrom_dir,
-            n_samples,
-            out,
+            engine, &geno_path, chrom, &chrom_dir, n_samples, out,
         )?;
 
         if stats.n_variants == 0 {

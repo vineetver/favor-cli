@@ -137,7 +137,8 @@ pub fn probe(store_dir: &Path, manifest: &StoreManifest, key: &str) -> bool {
 fn validate_header(path: &Path) -> Result<(u32, u32), FavorError> {
     let file = std::fs::File::open(path)
         .map_err(|e| FavorError::Resource(format!("Open {}: {e}", path.display())))?;
-    let file_len = file.metadata()
+    let file_len = file
+        .metadata()
         .map_err(|e| FavorError::Resource(format!("Stat {}: {e}", path.display())))?
         .len();
     if file_len < HEADER_SIZE as u64 {
@@ -149,7 +150,8 @@ fn validate_header(path: &Path) -> Result<(u32, u32), FavorError> {
 
     let mut reader = BufReader::new(file);
     let mut header = [0u8; HEADER_SIZE];
-    reader.read_exact(&mut header)
+    reader
+        .read_exact(&mut header)
         .map_err(|e| FavorError::Resource(format!("Read header: {e}")))?;
 
     if &header[0..8] != MAGIC {
@@ -157,7 +159,9 @@ fn validate_header(path: &Path) -> Result<(u32, u32), FavorError> {
     }
     let version = u16::from_le_bytes([header[8], header[9]]);
     if version != VERSION {
-        return Err(FavorError::Resource(format!("scores.bin: version {version} != {VERSION}")));
+        return Err(FavorError::Resource(format!(
+            "scores.bin: version {version} != {VERSION}"
+        )));
     }
     let n_variants = u32::from_le_bytes(header[10..14].try_into().unwrap());
     let n_genes = u32::from_le_bytes(header[14..18].try_into().unwrap());
@@ -211,12 +215,15 @@ pub fn build_chromosome(
     for gene_name in &gene_names {
         let gene_vcfs = variant_index.gene_variant_vcfs(gene_name);
         let m = gene_vcfs.len();
-        if m == 0 { continue; }
+        if m == 0 {
+            continue;
+        }
 
         // Load carrier data once for all variants in this gene
         let carriers = sparse_g.load_variants(gene_vcfs);
         let variant_offsets: Vec<u32> = gene_vcfs.to_vec();
-        let variant_vids: Vec<Box<str>> = gene_vcfs.iter()
+        let variant_vids: Vec<Box<str>> = gene_vcfs
+            .iter()
             .map(|&v| variant_index.get(v).vid.clone())
             .collect();
 
@@ -330,24 +337,29 @@ pub fn build_chromosome(
         }
     }
 
-    w.flush().map_err(|e| FavorError::Resource(format!("Flush: {e}")))?;
+    w.flush()
+        .map_err(|e| FavorError::Resource(format!("Flush: {e}")))?;
     // fsync before rename to ensure data is durable
     w.into_inner()
         .map_err(|e| FavorError::Resource(format!("BufWriter finish: {e}")))?
         .sync_all()
         .map_err(|e| FavorError::Resource(format!("fsync {}: {e}", tmp_path.display())))?;
-    std::fs::rename(&tmp_path, &final_path)
-        .map_err(|e| FavorError::Resource(format!(
-            "Rename {} -> {}: {e}", tmp_path.display(), final_path.display()
-        )))?;
+    std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+        FavorError::Resource(format!(
+            "Rename {} -> {}: {e}",
+            tmp_path.display(),
+            final_path.display()
+        ))
+    })?;
 
-    let n_cached = gene_computed.iter().filter(|g| !g.k_flat.is_empty()).count();
+    let n_cached = gene_computed
+        .iter()
+        .filter(|g| !g.k_flat.is_empty())
+        .count();
     let n_large = gene_computed.len() - n_cached;
     out.status(&format!(
         "  chr{chrom}: cached U for {} variants, K for {} genes ({} large genes U-only)",
-        n_variants,
-        n_cached,
-        n_large,
+        n_variants, n_cached, n_large,
     ));
 
     Ok(())
@@ -391,7 +403,9 @@ pub fn load_chromosome(
 
     for _ in 0..n_variants_on_disk {
         if pos + 2 > data.len() {
-            return Err(FavorError::Resource("scores.bin: U section truncated".into()));
+            return Err(FavorError::Resource(
+                "scores.bin: U section truncated".into(),
+            ));
         }
         let vid_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
         pos += 2;
@@ -417,10 +431,15 @@ pub fn load_chromosome(
         // Gene name (GENE_NAME_LEN) + m (4 bytes) + has_k (1 byte)
         let gene_header_size = GENE_NAME_LEN + 4 + 1;
         if pos + gene_header_size > data.len() {
-            return Err(FavorError::Resource("scores.bin: gene block truncated".into()));
+            return Err(FavorError::Resource(
+                "scores.bin: gene block truncated".into(),
+            ));
         }
         let name_raw = &data[pos..pos + GENE_NAME_LEN];
-        let name_end = name_raw.iter().position(|&b| b == 0).unwrap_or(GENE_NAME_LEN);
+        let name_end = name_raw
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(GENE_NAME_LEN);
         let gene_name = String::from_utf8_lossy(&name_raw[..name_end]).into_owned();
         pos += GENE_NAME_LEN;
 
@@ -452,7 +471,10 @@ pub fn load_chromosome(
 
             match variant_index.resolve_vid(vid) {
                 Some(vcf_id) => variant_offsets.push(vcf_id),
-                None => { all_resolved = false; break; }
+                None => {
+                    all_resolved = false;
+                    break;
+                }
             }
         }
 
@@ -479,7 +501,13 @@ pub fn load_chromosome(
 
         // Only insert gene if all vids resolved successfully
         if all_resolved && variant_offsets.len() == m {
-            gene_blocks.insert(gene_name, GeneKBlock { variant_offsets, k_flat });
+            gene_blocks.insert(
+                gene_name,
+                GeneKBlock {
+                    variant_offsets,
+                    k_flat,
+                },
+            );
         }
     }
 
@@ -498,10 +526,7 @@ pub fn load_chromosome(
 ///
 /// `window_global_indices`: chromosome-wide VariantIndex positions for
 /// the variants in this window.
-pub fn assemble_window_k(
-    cache: &ChromScoreCache,
-    window_global_indices: &[usize],
-) -> Mat<f64> {
+pub fn assemble_window_k(cache: &ChromScoreCache, window_global_indices: &[usize]) -> Mat<f64> {
     let wm = window_global_indices.len();
     let mut k = Mat::zeros(wm, wm);
 
@@ -576,14 +601,16 @@ mod tests {
         let chrom_dir = dir.path().join("chromosome=test");
         std::fs::create_dir_all(&chrom_dir).unwrap();
 
-        let vids = ["1-100-A-T", "1-200-G-C", "1-300-A-G", "1-400-T-C", "1-500-G-A"];
+        let vids = [
+            "1-100-A-T",
+            "1-200-G-C",
+            "1-300-A-G",
+            "1-400-T-C",
+            "1-500-G-A",
+        ];
         let u_vals: [f64; 5] = [0.1, 0.2, 0.3, 0.4, 0.5];
         let gene_a_vids = ["1-100-A-T", "1-200-G-C", "1-300-A-G"]; // first 3
-        let gene_a_k: Vec<f64> = vec![
-            1.0, 0.1, 0.2,
-            0.1, 1.0, 0.3,
-            0.2, 0.3, 1.0,
-        ];
+        let gene_a_k: Vec<f64> = vec![1.0, 0.1, 0.2, 0.1, 1.0, 0.3, 0.2, 0.3, 1.0];
 
         let path = chrom_dir.join("scores.bin");
         {
@@ -695,7 +722,10 @@ mod tests {
         header[8..10].copy_from_slice(&VERSION.to_le_bytes());
         header[10..14].copy_from_slice(&100u32.to_le_bytes()); // claims 100 variants
         std::fs::write(&path, header).unwrap();
-        assert!(validate_header(&path).is_err(), "should reject: header claims 100 variants but file has no U vector");
+        assert!(
+            validate_header(&path).is_err(),
+            "should reject: header claims 100 variants but file has no U vector"
+        );
 
         // Valid small file
         header[10..14].copy_from_slice(&0u32.to_le_bytes()); // 0 variants
@@ -720,21 +750,20 @@ mod tests {
     fn assemble_window_k_multi_gene() {
         // Two genes: A (variants at global 0,1,2) and B (variants at global 5,6)
         let mut gene_blocks = HashMap::new();
-        gene_blocks.insert("GENEA".to_string(), GeneKBlock {
-            variant_offsets: vec![0, 1, 2],
-            k_flat: vec![
-                1.0, 0.1, 0.2,
-                0.1, 2.0, 0.3,
-                0.2, 0.3, 3.0,
-            ],
-        });
-        gene_blocks.insert("GENEB".to_string(), GeneKBlock {
-            variant_offsets: vec![5, 6],
-            k_flat: vec![
-                4.0, 0.5,
-                0.5, 5.0,
-            ],
-        });
+        gene_blocks.insert(
+            "GENEA".to_string(),
+            GeneKBlock {
+                variant_offsets: vec![0, 1, 2],
+                k_flat: vec![1.0, 0.1, 0.2, 0.1, 2.0, 0.3, 0.2, 0.3, 3.0],
+            },
+        );
+        gene_blocks.insert(
+            "GENEB".to_string(),
+            GeneKBlock {
+                variant_offsets: vec![5, 6],
+                k_flat: vec![4.0, 0.5, 0.5, 5.0],
+            },
+        );
 
         let cache = ChromScoreCache {
             u_all: vec![0.0; 10],

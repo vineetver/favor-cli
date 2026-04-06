@@ -21,9 +21,7 @@ impl Resources {
     /// Load config and detect resources in one call.
     /// If config doesn't exist or can't be read, falls back to auto-detect.
     pub fn detect_configured() -> Self {
-        let config_resources = Config::load()
-            .map(|c| c.resources)
-            .unwrap_or_default();
+        let config_resources = Config::load().map(|c| c.resources).unwrap_or_default();
         Self::detect_with_config(&config_resources)
     }
 
@@ -82,7 +80,6 @@ impl Resources {
         }
         "local"
     }
-
 }
 
 /// SLURM allocation in bytes. Uses 95% — leaves headroom for slurmstepd + kernel.
@@ -148,10 +145,7 @@ fn detect_threads(config_threads: Option<usize>) -> usize {
     // cgroup cpu quota
     if let Ok(quota) = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") {
         if let Ok(period) = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us") {
-            if let (Ok(q), Ok(p)) = (
-                quota.trim().parse::<i64>(),
-                period.trim().parse::<i64>(),
-            ) {
+            if let (Ok(q), Ok(p)) = (quota.trim().parse::<i64>(), period.trim().parse::<i64>()) {
                 if q > 0 && p > 0 {
                     return (q / p).max(1) as usize;
                 }

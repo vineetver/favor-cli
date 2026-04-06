@@ -15,7 +15,7 @@ use super::stats;
 /// Reference: Li et al. (2023), MultiSTAAR: xihaoli/MultiSTAAR
 /// Result for one gene across all traits.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // wired when --traits lands (v0.2.0)
+#[allow(dead_code)]
 pub struct MultiStaarResult {
     /// Per-trait STAAR results (one per phenotype).
     pub per_trait: Vec<StaarResult>,
@@ -29,7 +29,7 @@ pub struct MultiStaarResult {
 ///
 /// `null_models`: one per trait, fit independently.
 /// Returns per-trait STAAR results plus cross-trait omnibus p-values.
-#[allow(dead_code)] // wired when --traits lands (v0.2.0)
+#[allow(dead_code)]
 pub fn run_multi_staar(
     g: &Mat<f64>,
     annotation_matrix: &[Vec<f64>],
@@ -54,8 +54,8 @@ pub fn run_multi_staar(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::model;
+    use super::*;
 
     #[allow(clippy::type_complexity)]
     fn make_test_data() -> (Mat<f64>, Vec<Vec<f64>>, Vec<f64>, Mat<f64>, Mat<f64>) {
@@ -87,7 +87,9 @@ mod tests {
         let n = y1.nrows();
         let x = {
             let mut x = Mat::zeros(n, 1);
-            for i in 0..n { x[(i, 0)] = 1.0; }
+            for i in 0..n {
+                x[(i, 0)] = 1.0;
+            }
             x
         };
 
@@ -108,7 +110,9 @@ mod tests {
         let n = y1.nrows();
         let x = {
             let mut x = Mat::zeros(n, 1);
-            for i in 0..n { x[(i, 0)] = 1.0; }
+            for i in 0..n {
+                x[(i, 0)] = 1.0;
+            }
             x
         };
 

@@ -190,7 +190,10 @@ pub enum RegionType {
 
 impl RegionType {
     pub fn contains_splicing(self) -> bool {
-        matches!(self, Self::Splicing | Self::NcrnaSplicing | Self::NcrnaExonicSplicing)
+        matches!(
+            self,
+            Self::Splicing | Self::NcrnaSplicing | Self::NcrnaExonicSplicing
+        )
     }
     pub fn contains_upstream(self) -> bool {
         matches!(self, Self::Upstream | Self::UpstreamDownstream)
@@ -202,7 +205,13 @@ impl RegionType {
         matches!(self, Self::Utr3 | Self::Utr5 | Self::Utr5Utr3)
     }
     pub fn contains_ncrna(self) -> bool {
-        matches!(self, Self::NcrnaExonic | Self::NcrnaIntronic | Self::NcrnaSplicing | Self::NcrnaExonicSplicing)
+        matches!(
+            self,
+            Self::NcrnaExonic
+                | Self::NcrnaIntronic
+                | Self::NcrnaSplicing
+                | Self::NcrnaExonicSplicing
+        )
     }
     pub fn as_str(self) -> &'static str {
         match self {
@@ -299,21 +308,38 @@ pub enum Consequence {
 
 impl Consequence {
     pub fn is_plof(self) -> bool {
-        matches!(self,
-            Self::Stopgain | Self::StopGained | Self::Stoploss | Self::StopLost
-            | Self::FrameshiftInsertion | Self::FrameshiftDeletion
-            | Self::FrameshiftSubstitution | Self::FrameshiftVariant
-            | Self::Splicing | Self::SpliceDonorVariant | Self::SpliceAcceptorVariant
-            | Self::StartLost)
+        matches!(
+            self,
+            Self::Stopgain
+                | Self::StopGained
+                | Self::Stoploss
+                | Self::StopLost
+                | Self::FrameshiftInsertion
+                | Self::FrameshiftDeletion
+                | Self::FrameshiftSubstitution
+                | Self::FrameshiftVariant
+                | Self::Splicing
+                | Self::SpliceDonorVariant
+                | Self::SpliceAcceptorVariant
+                | Self::StartLost
+        )
     }
     pub fn is_ptv(self) -> bool {
-        matches!(self,
-            Self::Stopgain | Self::StopGained
-            | Self::FrameshiftInsertion | Self::FrameshiftDeletion
-            | Self::FrameshiftSubstitution | Self::FrameshiftVariant)
+        matches!(
+            self,
+            Self::Stopgain
+                | Self::StopGained
+                | Self::FrameshiftInsertion
+                | Self::FrameshiftDeletion
+                | Self::FrameshiftSubstitution
+                | Self::FrameshiftVariant
+        )
     }
     pub fn is_splice(self) -> bool {
-        matches!(self, Self::Splicing | Self::SpliceDonorVariant | Self::SpliceAcceptorVariant)
+        matches!(
+            self,
+            Self::Splicing | Self::SpliceDonorVariant | Self::SpliceAcceptorVariant
+        )
     }
     pub fn is_missense(self) -> bool {
         matches!(self, Self::MissenseVariant | Self::NonsynonymousSNV)
@@ -470,9 +496,18 @@ mod tests {
 
     #[test]
     fn parse_autosomes() {
-        assert_eq!("chr1".parse::<Chromosome>().unwrap(), Chromosome::Autosome(1));
-        assert_eq!("22".parse::<Chromosome>().unwrap(), Chromosome::Autosome(22));
-        assert_eq!("chr10".parse::<Chromosome>().unwrap(), Chromosome::Autosome(10));
+        assert_eq!(
+            "chr1".parse::<Chromosome>().unwrap(),
+            Chromosome::Autosome(1)
+        );
+        assert_eq!(
+            "22".parse::<Chromosome>().unwrap(),
+            Chromosome::Autosome(22)
+        );
+        assert_eq!(
+            "chr10".parse::<Chromosome>().unwrap(),
+            Chromosome::Autosome(10)
+        );
     }
 
     #[test]
@@ -539,7 +574,6 @@ mod tests {
         assert_eq!(AnnotationWeights::NAMES.len(), 11);
         assert_eq!(AnnotationWeights::DISPLAY_NAMES.len(), 11);
     }
-
 
     // -- Display names match existing ANNOTATION_CHANNELS -------------------
 

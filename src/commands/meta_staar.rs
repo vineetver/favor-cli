@@ -75,7 +75,15 @@ pub fn run(
     out: &dyn Output,
     dry_run: bool,
 ) -> Result<(), FavorError> {
-    handle(studies, masks, maf_cutoff, window_size, output_path, out, dry_run)
+    handle(
+        studies,
+        masks,
+        maf_cutoff,
+        window_size,
+        output_path,
+        out,
+        dry_run,
+    )
 }
 
 fn emit_dry_run(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), FavorError> {
@@ -104,14 +112,20 @@ pub fn run_meta_staar(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), 
     let engine = DfEngine::new(&resources)?;
 
     std::fs::create_dir_all(&config.output_dir).map_err(|e| {
-        FavorError::Resource(format!("Cannot create '{}': {e}", config.output_dir.display()))
+        FavorError::Resource(format!(
+            "Cannot create '{}': {e}",
+            config.output_dir.display()
+        ))
     })?;
 
     let results = run_all_chromosomes(&studies, config, &engine, out)?;
     write_meta_results(&results, &config.output_dir, out)?;
     generate_summary(&studies, &results, config, out);
 
-    out.success(&format!("MetaSTAAR complete -> {}", config.output_dir.display()));
+    out.success(&format!(
+        "MetaSTAAR complete -> {}",
+        config.output_dir.display()
+    ));
     let k = studies.len();
     let total_n: usize = studies.iter().map(|s| s.meta.n_samples).sum();
     out.result_json(&json!({ "command": "meta-staar", "n_studies": k, "total_samples": total_n }));
@@ -129,7 +143,9 @@ fn setup_resources(
     for (i, s) in studies.iter().enumerate() {
         out.status(&format!(
             "  [{i}] {} — N={}, trait={}",
-            s.path.display(), s.meta.n_samples, s.meta.trait_name
+            s.path.display(),
+            s.meta.n_samples,
+            s.meta.trait_name
         ));
     }
 
@@ -141,7 +157,8 @@ fn setup_resources(
 
     out.status(&format!(
         "MetaSTAAR: {} memory, {} threads",
-        resources.memory_human(), resources.threads
+        resources.memory_human(),
+        resources.threads
     ));
 
     Ok(resources)
@@ -162,7 +179,9 @@ fn run_all_chromosomes(
     let mut all_results: Vec<(MaskType, Vec<GeneResult>)> = Vec::new();
 
     for chrom in &chromosomes {
-        out.status(&format!("  chr{chrom}: merging variants across {k} studies..."));
+        out.status(&format!(
+            "  chr{chrom}: merging variants across {k} studies..."
+        ));
 
         let meta_variants =
             staar::meta::merge_chromosome(engine, studies, chrom, config.maf_cutoff)?;
@@ -185,7 +204,11 @@ fn run_all_chromosomes(
                 .par_iter()
                 .filter_map(|group| {
                     staar::meta::meta_score_gene(
-                        group, &meta_variants, studies, chrom, &segment_cache,
+                        group,
+                        &meta_variants,
+                        studies,
+                        chrom,
+                        &segment_cache,
                     )
                 })
                 .collect();
@@ -193,7 +216,9 @@ fn run_all_chromosomes(
             if !results.is_empty() {
                 out.status(&format!(
                     "    {}: {} groups, {} with results",
-                    mask_type.file_stem(), groups.len(), results.len()
+                    mask_type.file_stem(),
+                    groups.len(),
+                    results.len()
                 ));
                 if let Some(existing) = all_results.iter_mut().find(|(mt, _)| mt == mask_type) {
                     existing.1.extend(results);
@@ -225,8 +250,11 @@ fn build_chrom_masks(
             }
             MaskCategory::SlidingWindow => {
                 let windows = staar::masks::build_sliding_windows(
-                    annotated, chrom_indices, chrom_parsed,
-                    config.window_size, config.window_size / 2,
+                    annotated,
+                    chrom_indices,
+                    chrom_parsed,
+                    config.window_size,
+                    config.window_size / 2,
                 );
                 if !windows.is_empty() {
                     masks.push((MaskType::SlidingWindow, windows));
@@ -295,7 +323,12 @@ fn generate_summary(
     let title = format!("MetaSTAAR Meta-Analysis ({k} studies, N={total_n})");
 
     match staar::output::generate_report(
-        results, &trait_names, total_n, n_rare, &config.output_dir, &title,
+        results,
+        &trait_names,
+        total_n,
+        n_rare,
+        &config.output_dir,
+        &title,
     ) {
         Ok(()) => out.success(&format!(
             "  summary.html -> {}",
@@ -321,7 +354,9 @@ fn write_meta_results(
         .collect();
 
     for (mask_type, results) in all_mask_results {
-        if results.is_empty() { continue; }
+        if results.is_empty() {
+            continue;
+        }
         write_mask_results(mask_type, results, &channels, output_dir, out)?;
     }
     Ok(())
@@ -339,7 +374,9 @@ fn write_mask_results(
 
     let mut sorted: Vec<&GeneResult> = results.iter().collect();
     sorted.sort_by(|a, b| {
-        a.staar.staar_o.partial_cmp(&b.staar.staar_o)
+        a.staar
+            .staar_o
+            .partial_cmp(&b.staar.staar_o)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -352,15 +389,19 @@ fn write_mask_results(
         .build();
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))
         .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
-    writer.write(&batch)
+    writer
+        .write(&batch)
         .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
-    writer.close()
+    writer
+        .close()
         .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
 
     let n_sig = results.iter().filter(|r| r.staar.staar_o < 2.5e-6).count();
     out.success(&format!(
         "  {} -> {} genes, {} significant",
-        mask_type.file_stem(), results.len(), n_sig
+        mask_type.file_stem(),
+        results.len(),
+        n_sig
     ));
 
     Ok(())
@@ -396,7 +437,14 @@ fn build_result_batch(
         b_cmac.append_value(r.cumulative_mac);
 
         let mut pi = 0;
-        for p in [s.burden_1_25, s.burden_1_1, s.skat_1_25, s.skat_1_1, s.acat_v_1_25, s.acat_v_1_1] {
+        for p in [
+            s.burden_1_25,
+            s.burden_1_1,
+            s.skat_1_25,
+            s.skat_1_1,
+            s.acat_v_1_25,
+            s.acat_v_1_1,
+        ] {
             pval_builders[pi].append_value(p);
             pi += 1;
         }
@@ -410,14 +458,29 @@ fn build_result_batch(
             pval_builders[pi].append_value(f64::NAN);
             pi += 1;
         }
-        for p in [s.staar_b_1_25, s.staar_b_1_1, s.staar_s_1_25, s.staar_s_1_1,
-                   s.staar_a_1_25, s.staar_a_1_1, s.acat_o, s.staar_o] {
+        for p in [
+            s.staar_b_1_25,
+            s.staar_b_1_1,
+            s.staar_s_1_25,
+            s.staar_s_1_1,
+            s.staar_a_1_25,
+            s.staar_a_1_1,
+            s.acat_o,
+            s.staar_o,
+        ] {
             pval_builders[pi].append_value(p);
             pi += 1;
         }
     }
 
-    let test_names = ["Burden(1,25)", "Burden(1,1)", "SKAT(1,25)", "SKAT(1,1)", "ACAT-V(1,25)", "ACAT-V(1,1)"];
+    let test_names = [
+        "Burden(1,25)",
+        "Burden(1,1)",
+        "SKAT(1,25)",
+        "SKAT(1,1)",
+        "ACAT-V(1,25)",
+        "ACAT-V(1,1)",
+    ];
     let mut fields = vec![
         Field::new("ensembl_id", DataType::Utf8, false),
         Field::new("gene_symbol", DataType::Utf8, false),
@@ -435,8 +498,16 @@ fn build_result_batch(
             fields.push(Field::new(format!("{test}-{ch}"), DataType::Float64, true));
         }
     }
-    for name in ["STAAR-B(1,25)", "STAAR-B(1,1)", "STAAR-S(1,25)", "STAAR-S(1,1)",
-                  "STAAR-A(1,25)", "STAAR-A(1,1)", "ACAT-O", "STAAR-O"] {
+    for name in [
+        "STAAR-B(1,25)",
+        "STAAR-B(1,1)",
+        "STAAR-S(1,25)",
+        "STAAR-S(1,1)",
+        "STAAR-A(1,25)",
+        "STAAR-A(1,1)",
+        "ACAT-O",
+        "STAAR-O",
+    ] {
         fields.push(Field::new(name, DataType::Float64, true));
     }
     let schema = Arc::new(Schema::new(fields));

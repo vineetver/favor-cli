@@ -5,7 +5,9 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float32Builder, Float64Builder, Int32Builder, StringBuilder, UInt32Builder};
+use arrow::array::{
+    ArrayRef, Float32Builder, Float64Builder, Int32Builder, StringBuilder, UInt32Builder,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -76,28 +78,41 @@ pub fn write_individual_results(
         Field::new("pvalue", DataType::Float64, false),
     ]));
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(b_chrom.finish()), Arc::new(b_pos.finish()),
-        Arc::new(b_ref.finish()), Arc::new(b_alt.finish()),
-        Arc::new(b_maf.finish()), Arc::new(b_gene.finish()),
-        Arc::new(b_region.finish()), Arc::new(b_consequence.finish()),
-        Arc::new(b_cadd.finish()), Arc::new(b_pvalue.finish()),
+        Arc::new(b_chrom.finish()),
+        Arc::new(b_pos.finish()),
+        Arc::new(b_ref.finish()),
+        Arc::new(b_alt.finish()),
+        Arc::new(b_maf.finish()),
+        Arc::new(b_gene.finish()),
+        Arc::new(b_region.finish()),
+        Arc::new(b_consequence.finish()),
+        Arc::new(b_cadd.finish()),
+        Arc::new(b_pvalue.finish()),
     ];
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
 
-    let file = File::create(&out_path)
-        .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", out_path.display())))?;
+    let file = File::create(&out_path).map_err(|e| {
+        FavorError::Resource(format!("Cannot create '{}': {e}", out_path.display()))
+    })?;
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
         .build();
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))
         .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
-    writer.write(&batch).map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
-    writer.close().map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+    writer
+        .write(&batch)
+        .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+    writer
+        .close()
+        .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
 
     let n_sig = pvals.iter().filter(|(_, p)| *p < 5e-8).count();
-    out.success(&format!("  individual -> {} variants, {} genome-wide significant",
-        pvals.len(), n_sig));
+    out.success(&format!(
+        "  individual -> {} variants, {} genome-wide significant",
+        pvals.len(),
+        n_sig
+    ));
     Ok(())
 }
 
@@ -116,13 +131,16 @@ pub fn write_results(
     out.status("Step 4/4: Writing results...");
     let mut significant_genes: Vec<serde_json::Value> = Vec::new();
 
-    let channels: Vec<&str> = STAAR_WEIGHTS.iter()
+    let channels: Vec<&str> = STAAR_WEIGHTS
+        .iter()
         .map(|c| c.weight_display_name().unwrap())
         .collect();
     let n_channels = channels.len();
 
     for (mask_type, results) in all_mask_results {
-        if results.is_empty() { continue; }
+        if results.is_empty() {
+            continue;
+        }
         let out_path = output_dir.join(format!("{}.parquet", mask_type.file_stem()));
 
         let nan_pvals = results.iter().filter(|r| r.staar.staar_o.is_nan()).count();
@@ -135,7 +153,12 @@ pub fn write_results(
 
         // Sort by STAAR-O p-value
         let mut sorted_results: Vec<&GeneResult> = results.iter().collect();
-        sorted_results.sort_by(|a, b| a.staar.staar_o.partial_cmp(&b.staar.staar_o).unwrap_or(std::cmp::Ordering::Equal));
+        sorted_results.sort_by(|a, b| {
+            a.staar
+                .staar_o
+                .partial_cmp(&b.staar.staar_o)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let nr = sorted_results.len();
         let mut b_ensembl = StringBuilder::with_capacity(nr, nr * 16);
@@ -165,7 +188,14 @@ pub fn write_results(
             b_cmac.append_value(r.cumulative_mac);
 
             let mut pi = 0;
-            for p in [s.burden_1_25, s.burden_1_1, s.skat_1_25, s.skat_1_1, s.acat_v_1_25, s.acat_v_1_1] {
+            for p in [
+                s.burden_1_25,
+                s.burden_1_1,
+                s.skat_1_25,
+                s.skat_1_1,
+                s.acat_v_1_25,
+                s.acat_v_1_1,
+            ] {
                 f32_builders[pi].append_value(p as f32);
                 pi += 1;
             }
@@ -179,7 +209,14 @@ pub fn write_results(
                 f32_builders[pi].append_value(f32::NAN);
                 pi += 1;
             }
-            for p in [s.staar_b_1_25, s.staar_b_1_1, s.staar_s_1_25, s.staar_s_1_1, s.staar_a_1_25, s.staar_a_1_1] {
+            for p in [
+                s.staar_b_1_25,
+                s.staar_b_1_1,
+                s.staar_s_1_25,
+                s.staar_s_1_1,
+                s.staar_a_1_25,
+                s.staar_a_1_1,
+            ] {
                 f32_builders[pi].append_value(p as f32);
                 pi += 1;
             }
@@ -188,7 +225,14 @@ pub fn write_results(
         }
 
         // Build schema: 78 Float32 p-value columns + ACAT-O(Float64) + STAAR-O(Float64)
-        let test_names = ["Burden(1,25)", "Burden(1,1)", "SKAT(1,25)", "SKAT(1,1)", "ACAT-V(1,25)", "ACAT-V(1,1)"];
+        let test_names = [
+            "Burden(1,25)",
+            "Burden(1,1)",
+            "SKAT(1,25)",
+            "SKAT(1,1)",
+            "ACAT-V(1,25)",
+            "ACAT-V(1,1)",
+        ];
         let mut fields = vec![
             Field::new("ensembl_id", DataType::Utf8, false),
             Field::new("gene_symbol", DataType::Utf8, false),
@@ -206,7 +250,14 @@ pub fn write_results(
                 fields.push(Field::new(format!("{test}-{ch}"), DataType::Float32, true));
             }
         }
-        for name in ["STAAR-B(1,25)", "STAAR-B(1,1)", "STAAR-S(1,25)", "STAAR-S(1,1)", "STAAR-A(1,25)", "STAAR-A(1,1)"] {
+        for name in [
+            "STAAR-B(1,25)",
+            "STAAR-B(1,1)",
+            "STAAR-S(1,25)",
+            "STAAR-S(1,1)",
+            "STAAR-A(1,25)",
+            "STAAR-A(1,1)",
+        ] {
             fields.push(Field::new(name, DataType::Float32, true));
         }
         fields.push(Field::new("ACAT-O", DataType::Float64, true));
@@ -214,9 +265,12 @@ pub fn write_results(
         let schema = Arc::new(Schema::new(fields));
 
         let mut columns: Vec<ArrayRef> = vec![
-            Arc::new(b_ensembl.finish()), Arc::new(b_symbol.finish()),
-            Arc::new(b_chrom.finish()), Arc::new(b_start.finish()),
-            Arc::new(b_end.finish()), Arc::new(b_nvariants.finish()),
+            Arc::new(b_ensembl.finish()),
+            Arc::new(b_symbol.finish()),
+            Arc::new(b_chrom.finish()),
+            Arc::new(b_start.finish()),
+            Arc::new(b_end.finish()),
+            Arc::new(b_nvariants.finish()),
             Arc::new(b_cmac.finish()),
         ];
         for b in &mut f32_builders {
@@ -234,8 +288,12 @@ pub fn write_results(
             .build();
         let mut writer = ArrowWriter::try_new(file, schema, Some(props))
             .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
-        writer.write(&batch).map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
-        writer.close().map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+        writer
+            .write(&batch)
+            .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+        writer
+            .close()
+            .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
 
         let n_sig = results.iter().filter(|r| r.staar.staar_o < 2.5e-6).count();
         for r in results.iter().filter(|r| r.staar.staar_o < 2.5e-6) {
@@ -244,8 +302,12 @@ pub fn write_results(
                 "STAAR-O": r.staar.staar_o, "n_variants": r.n_variants,
             }));
         }
-        out.success(&format!("  {} -> {} genes, {} significant",
-            mask_type.file_stem(), results.len(), n_sig));
+        out.success(&format!(
+            "  {} -> {} genes, {} significant",
+            mask_type.file_stem(),
+            results.len(),
+            n_sig
+        ));
     }
 
     let meta = json!({
@@ -254,11 +316,23 @@ pub fn write_results(
         "n_samples": n, "n_rare_variants": n_rare, "maf_cutoff": maf_cutoff,
         "sigma2": null_model.sigma2, "significant_genes": significant_genes,
     });
-    let _ = std::fs::write(output_dir.join("staar.meta.json"),
-        serde_json::to_string_pretty(&meta).unwrap_or_default());
+    let _ = std::fs::write(
+        output_dir.join("staar.meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap_or_default(),
+    );
 
-    match generate_report(all_mask_results, trait_names, n, n_rare, output_dir, "STAAR Rare Variant Association") {
-        Ok(()) => out.success(&format!("  summary.html -> {}", output_dir.join("summary.html").display())),
+    match generate_report(
+        all_mask_results,
+        trait_names,
+        n,
+        n_rare,
+        output_dir,
+        "STAAR Rare Variant Association",
+    ) {
+        Ok(()) => out.success(&format!(
+            "  summary.html -> {}",
+            output_dir.join("summary.html").display()
+        )),
         Err(e) => out.warn(&format!("  Summary report failed: {e}")),
     }
 
@@ -273,14 +347,30 @@ pub fn write_results(
 
 /// Chromosome sizes (hg38, bp) for Manhattan plot layout.
 const CHROMS: &[(&str, u64)] = &[
-    ("1", 249_000_000), ("2", 243_000_000), ("3", 198_000_000),
-    ("4", 190_000_000), ("5", 182_000_000), ("6", 171_000_000),
-    ("7", 159_000_000), ("8", 145_000_000), ("9", 138_000_000),
-    ("10", 134_000_000), ("11", 135_000_000), ("12", 133_000_000),
-    ("13", 114_000_000), ("14", 107_000_000), ("15", 102_000_000),
-    ("16", 90_000_000), ("17", 84_000_000), ("18", 80_000_000),
-    ("19", 59_000_000), ("20", 65_000_000), ("21", 47_000_000),
-    ("22", 51_000_000), ("X", 156_000_000), ("Y", 57_000_000),
+    ("1", 249_000_000),
+    ("2", 243_000_000),
+    ("3", 198_000_000),
+    ("4", 190_000_000),
+    ("5", 182_000_000),
+    ("6", 171_000_000),
+    ("7", 159_000_000),
+    ("8", 145_000_000),
+    ("9", 138_000_000),
+    ("10", 134_000_000),
+    ("11", 135_000_000),
+    ("12", 133_000_000),
+    ("13", 114_000_000),
+    ("14", 107_000_000),
+    ("15", 102_000_000),
+    ("16", 90_000_000),
+    ("17", 84_000_000),
+    ("18", 80_000_000),
+    ("19", 59_000_000),
+    ("20", 65_000_000),
+    ("21", 47_000_000),
+    ("22", 51_000_000),
+    ("X", 156_000_000),
+    ("Y", 57_000_000),
 ];
 
 const SIGNIFICANCE: f64 = 2.5e-6;
@@ -312,7 +402,8 @@ pub fn generate_report(
     let pvals = collect_pvalues(results);
     let n_genes: usize = results.iter().map(|(_, r)| r.len()).sum();
     let n_sig = genes.iter().filter(|g| g.staar_o < SIGNIFICANCE).count();
-    let masks: Vec<String> = results.iter()
+    let masks: Vec<String> = results
+        .iter()
         .filter(|(_, r)| !r.is_empty())
         .map(|(m, _)| m.file_stem())
         .collect();
@@ -476,7 +567,9 @@ fn collect_plot_genes(results: &[(MaskType, Vec<GeneResult>)]) -> Vec<PlotGene> 
     for (mask, gene_results) in results {
         for g in gene_results {
             let p = g.staar.staar_o;
-            if !p.is_finite() || p <= 0.0 || p > 1.0 { continue; }
+            if !p.is_finite() || p <= 0.0 || p > 1.0 {
+                continue;
+            }
             let chrom_label = g.chromosome.label();
             let (idx, offset) = match offsets.get(&chrom_label) {
                 Some(v) => *v,
@@ -513,7 +606,8 @@ fn chrom_offsets() -> HashMap<String, (usize, u64)> {
 }
 
 fn collect_pvalues(results: &[(MaskType, Vec<GeneResult>)]) -> Vec<f64> {
-    results.iter()
+    results
+        .iter()
         .flat_map(|(_, genes)| genes.iter().map(|g| g.staar.staar_o))
         .filter(|p| p.is_finite() && *p > 0.0 && *p <= 1.0)
         .collect()
@@ -534,26 +628,46 @@ fn manhattan_traces(genes: &[PlotGene]) -> String {
         let key = format!("{}:{}", g.gene, g.chromosome);
         match best.get(&key) {
             Some(existing) if existing.staar_o <= g.staar_o => {}
-            _ => { best.insert(key, g); }
+            _ => {
+                best.insert(key, g);
+            }
         }
     }
     let mut unique: Vec<&&PlotGene> = best.values().collect();
-    unique.sort_by(|a, b| a.genome_x.partial_cmp(&b.genome_x).unwrap_or(std::cmp::Ordering::Equal));
+    unique.sort_by(|a, b| {
+        a.genome_x
+            .partial_cmp(&b.genome_x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Split into even/odd chromosomes for color alternation
     for (color_idx, color) in colors.iter().enumerate() {
-        let subset: Vec<&&PlotGene> = unique.iter()
+        let subset: Vec<&&PlotGene> = unique
+            .iter()
             .filter(|g| g.chrom_idx % 2 == color_idx)
             .copied()
             .collect();
-        if subset.is_empty() { continue; }
+        if subset.is_empty() {
+            continue;
+        }
 
-        let xs: Vec<String> = subset.iter().map(|g| format!("{:.0}", g.genome_x)).collect();
-        let ys: Vec<String> = subset.iter().map(|g| format!("{:.4}", g.neg_log_p)).collect();
-        let texts: Vec<String> = subset.iter().map(|g| {
-            format!("{}<br>chr{}<br>p={:.2e}<br>mask: {}<br>variants: {}<br>cMAC: {}",
-                g.gene, g.chromosome, g.staar_o, g.mask, g.n_variants, g.cmac)
-        }).collect();
+        let xs: Vec<String> = subset
+            .iter()
+            .map(|g| format!("{:.0}", g.genome_x))
+            .collect();
+        let ys: Vec<String> = subset
+            .iter()
+            .map(|g| format!("{:.4}", g.neg_log_p))
+            .collect();
+        let texts: Vec<String> = subset
+            .iter()
+            .map(|g| {
+                format!(
+                    "{}<br>chr{}<br>p={:.2e}<br>mask: {}<br>variants: {}<br>cMAC: {}",
+                    g.gene, g.chromosome, g.staar_o, g.mask, g.n_variants, g.cmac
+                )
+            })
+            .collect();
 
         traces.push(format!(
             "{{x:[{xs}],y:[{ys}],text:[{texts}],mode:'markers',type:'scatter',\
@@ -561,8 +675,11 @@ fn manhattan_traces(genes: &[PlotGene]) -> String {
              hoverinfo:'text',showlegend:false}}",
             xs = xs.join(","),
             ys = ys.join(","),
-            texts = texts.iter().map(|t| format!("'{}'", t.replace('\'', "\\'")))
-                .collect::<Vec<_>>().join(","),
+            texts = texts
+                .iter()
+                .map(|t| format!("'{}'", t.replace('\'', "\\'")))
+                .collect::<Vec<_>>()
+                .join(","),
             color = color,
         ));
     }
@@ -587,7 +704,8 @@ fn manhattan_traces(genes: &[PlotGene]) -> String {
 }
 
 fn qq_trace(pvalues: &[f64]) -> String {
-    let mut valid: Vec<f64> = pvalues.iter()
+    let mut valid: Vec<f64> = pvalues
+        .iter()
         .filter(|p| p.is_finite() && **p > 0.0 && **p <= 1.0)
         .copied()
         .collect();
@@ -599,9 +717,15 @@ fn qq_trace(pvalues: &[f64]) -> String {
 
     let n = valid.len();
     let observed: Vec<f64> = valid.iter().map(|p| -p.log10()).collect();
-    let expected: Vec<f64> = (0..n).map(|i| -((i as f64 + 0.5) / n as f64).log10()).collect();
-    let axis_max = observed.last().copied().unwrap_or(1.0)
-        .max(*expected.last().unwrap_or(&1.0)) + 0.5;
+    let expected: Vec<f64> = (0..n)
+        .map(|i| -((i as f64 + 0.5) / n as f64).log10())
+        .collect();
+    let axis_max = observed
+        .last()
+        .copied()
+        .unwrap_or(1.0)
+        .max(*expected.last().unwrap_or(&1.0))
+        + 0.5;
 
     // Subsample for performance, keep tail
     let step = if n > 3000 { n / 3000 } else { 1 };
@@ -634,38 +758,69 @@ fn volcano_trace(genes: &[PlotGene]) -> String {
         let key = format!("{}:{}", g.gene, g.chromosome);
         match best.get(&key) {
             Some(existing) if existing.staar_o <= g.staar_o => {}
-            _ => { best.insert(key, g); }
+            _ => {
+                best.insert(key, g);
+            }
         }
     }
 
-    let xs: Vec<String> = best.values().map(|g| format!("{}", g.cmac.max(1))).collect();
-    let ys: Vec<String> = best.values().map(|g| format!("{:.4}", g.neg_log_p)).collect();
-    let texts: Vec<String> = best.values().map(|g| {
-        format!("{}<br>chr{}<br>p={:.2e}<br>cMAC: {}<br>variants: {}",
-            g.gene, g.chromosome, g.staar_o, g.cmac, g.n_variants)
-    }).collect();
-    let colors: Vec<String> = best.values().map(|g| {
-        if g.staar_o < SIGNIFICANCE { "'#c62828'".into() } else { "'#4361ee'".into() }
-    }).collect();
+    let xs: Vec<String> = best
+        .values()
+        .map(|g| format!("{}", g.cmac.max(1)))
+        .collect();
+    let ys: Vec<String> = best
+        .values()
+        .map(|g| format!("{:.4}", g.neg_log_p))
+        .collect();
+    let texts: Vec<String> = best
+        .values()
+        .map(|g| {
+            format!(
+                "{}<br>chr{}<br>p={:.2e}<br>cMAC: {}<br>variants: {}",
+                g.gene, g.chromosome, g.staar_o, g.cmac, g.n_variants
+            )
+        })
+        .collect();
+    let colors: Vec<String> = best
+        .values()
+        .map(|g| {
+            if g.staar_o < SIGNIFICANCE {
+                "'#c62828'".into()
+            } else {
+                "'#4361ee'".into()
+            }
+        })
+        .collect();
 
     format!(
         "var traces=[{{x:[{xs}],y:[{ys}],text:[{texts}],mode:'markers',type:'scatter',\
          marker:{{color:[{colors}],size:5,opacity:0.6}},hoverinfo:'text',showlegend:false}}];",
         xs = xs.join(","),
         ys = ys.join(","),
-        texts = texts.iter().map(|t| format!("'{}'", t.replace('\'', "\\'")))
-            .collect::<Vec<_>>().join(","),
+        texts = texts
+            .iter()
+            .map(|t| format!("'{}'", t.replace('\'', "\\'")))
+            .collect::<Vec<_>>()
+            .join(","),
         colors = colors.join(","),
     )
 }
 
 fn table_json(genes: &[PlotGene]) -> String {
     let mut sorted: Vec<&PlotGene> = genes.iter().collect();
-    sorted.sort_by(|a, b| a.staar_o.partial_cmp(&b.staar_o).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.staar_o
+            .partial_cmp(&b.staar_o)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut html = String::new();
     for g in &sorted {
-        let sig_class = if g.staar_o < SIGNIFICANCE { " class='sig'" } else { "" };
+        let sig_class = if g.staar_o < SIGNIFICANCE {
+            " class='sig'"
+        } else {
+            ""
+        };
         html.push_str(&format!(
             "<tr><td><b>{gene}</b></td><td>{mask}</td><td>{chr}</td>\
              <td data-v='{nv}'>{nv}</td><td data-v='{cmac}'>{cmac}</td>\
@@ -673,28 +828,39 @@ fn table_json(genes: &[PlotGene]) -> String {
              <td data-v='{b_raw}'><span class='p'>{b}</span></td>\
              <td data-v='{sk_raw}'><span class='p'>{sk}</span></td>\
              <td data-v='{av_raw}'><span class='p'>{av}</span></td></tr>",
-            gene = g.gene, mask = g.mask, chr = g.chromosome,
-            nv = g.n_variants, cmac = g.cmac,
+            gene = g.gene,
+            mask = g.mask,
+            chr = g.chromosome,
+            nv = g.n_variants,
+            cmac = g.cmac,
             sig = sig_class,
-            so_raw = g.staar_o, so = fmt_p(g.staar_o),
-            b_raw = g.burden, b = fmt_p(g.burden),
-            sk_raw = g.skat, sk = fmt_p(g.skat),
-            av_raw = g.acat_v, av = fmt_p(g.acat_v),
+            so_raw = g.staar_o,
+            so = fmt_p(g.staar_o),
+            b_raw = g.burden,
+            b = fmt_p(g.burden),
+            sk_raw = g.skat,
+            sk = fmt_p(g.skat),
+            av_raw = g.acat_v,
+            av = fmt_p(g.acat_v),
         ));
     }
     html
 }
 
 fn fmt_p(p: f64) -> String {
-    if p.is_nan() { "NaN".into() }
-    else if p < 1e-300 { "<1e-300".into() }
-    else { format!("{:.2e}", p) }
+    if p.is_nan() {
+        "NaN".into()
+    } else if p < 1e-300 {
+        "<1e-300".into()
+    } else {
+        format!("{:.2e}", p)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::score::StaarResult;
+    use super::*;
     use crate::types::Chromosome;
 
     fn gene(chr: &str, start: u32, p: f64) -> GeneResult {
@@ -707,27 +873,35 @@ mod tests {
             n_variants: 5,
             cumulative_mac: 10,
             staar: StaarResult {
-                burden_1_25: p * 2.0, burden_1_1: p * 3.0,
-                skat_1_25: p * 1.5, skat_1_1: p * 2.5,
-                acat_v_1_25: p * 1.2, acat_v_1_1: p * 2.0,
+                burden_1_25: p * 2.0,
+                burden_1_1: p * 3.0,
+                skat_1_25: p * 1.5,
+                skat_1_1: p * 2.5,
+                acat_v_1_25: p * 1.2,
+                acat_v_1_1: p * 2.0,
                 per_annotation: Vec::new(),
-                staar_b_1_25: p, staar_b_1_1: p,
-                staar_s_1_25: p, staar_s_1_1: p,
-                staar_a_1_25: p, staar_a_1_1: p,
-                acat_o: p, staar_o: p,
+                staar_b_1_25: p,
+                staar_b_1_1: p,
+                staar_s_1_25: p,
+                staar_s_1_1: p,
+                staar_a_1_25: p,
+                staar_a_1_1: p,
+                acat_o: p,
+                staar_o: p,
             },
         }
     }
 
     #[test]
     fn report_generates_plotly_html() {
-        let results = vec![
-            (MaskType::PLof, vec![
+        let results = vec![(
+            MaskType::PLof,
+            vec![
                 gene("1", 50_000_000, 1e-8),
                 gene("2", 100_000_000, 0.05),
                 gene("22", 30_000_000, 1e-3),
-            ]),
-        ];
+            ],
+        )];
         let dir = std::env::temp_dir().join("favor_test_report");
         let _ = std::fs::create_dir_all(&dir);
         generate_report(&results, &["BMI".into()], 1000, 500, &dir, "Test").unwrap();
@@ -742,12 +916,10 @@ mod tests {
 
     #[test]
     fn top_genes_filters_significant() {
-        let results = vec![
-            (MaskType::PLof, vec![
-                gene("1", 100, 1e-8),
-                gene("1", 200, 0.5),
-            ]),
-        ];
+        let results = vec![(
+            MaskType::PLof,
+            vec![gene("1", 100, 1e-8), gene("1", 200, 0.5)],
+        )];
         let genes = collect_plot_genes(&results);
         let sig: Vec<_> = genes.iter().filter(|g| g.staar_o < SIGNIFICANCE).collect();
         assert_eq!(sig.len(), 1);

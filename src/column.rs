@@ -159,10 +159,19 @@ pub const STAAR_WEIGHTS: [Col; 11] = [
 /// Metadata columns in the variant store parquet, in schema order.
 /// This defines the positional column layout for read/write operations.
 pub const STORE_METADATA_COLS: [Col; 13] = [
-    Col::Position, Col::RefAllele, Col::AltAllele, Col::Maf,
-    Col::GeneName, Col::RegionType, Col::Consequence,
-    Col::CaddPhred, Col::Revel,
-    Col::IsCagePromoter, Col::IsCageEnhancer, Col::IsCcrePromoter, Col::IsCcreEnhancer,
+    Col::Position,
+    Col::RefAllele,
+    Col::AltAllele,
+    Col::Maf,
+    Col::GeneName,
+    Col::RegionType,
+    Col::Consequence,
+    Col::CaddPhred,
+    Col::Revel,
+    Col::IsCagePromoter,
+    Col::IsCageEnhancer,
+    Col::IsCcrePromoter,
+    Col::IsCcreEnhancer,
 ];
 
 /// All columns in the variant store parquet, in schema order.
@@ -184,15 +193,42 @@ pub struct AnnotationExtract {
 /// Metadata columns extracted from FAVOR annotations via SQL expressions.
 /// Each entry maps a FAVOR annotation access path to a canonical pipeline column.
 pub static ANNOTATION_EXTRACTS: &[AnnotationExtract] = &[
-    AnnotationExtract { output: Col::GeneName, sql: "COALESCE(a.gencode.genes[1], '')" },
-    AnnotationExtract { output: Col::RegionType, sql: "COALESCE(a.gencode.region_type, '')" },
-    AnnotationExtract { output: Col::Consequence, sql: "COALESCE(a.gencode.consequence, '')" },
-    AnnotationExtract { output: Col::CaddPhred, sql: "COALESCE(a.main.cadd.phred, 0)" },
-    AnnotationExtract { output: Col::Revel, sql: "COALESCE(a.dbnsfp.revel, 0)" },
-    AnnotationExtract { output: Col::IsCagePromoter, sql: "a.cage.cage_promoter IS NOT NULL" },
-    AnnotationExtract { output: Col::IsCageEnhancer, sql: "a.cage.cage_enhancer IS NOT NULL" },
-    AnnotationExtract { output: Col::IsCcrePromoter, sql: "COALESCE(CAST(a.ccre.annotations AS VARCHAR) LIKE '%PLS%', false)" },
-    AnnotationExtract { output: Col::IsCcreEnhancer, sql: "COALESCE(CAST(a.ccre.annotations AS VARCHAR) LIKE '%ELS%', false)" },
+    AnnotationExtract {
+        output: Col::GeneName,
+        sql: "COALESCE(a.gencode.genes[1], '')",
+    },
+    AnnotationExtract {
+        output: Col::RegionType,
+        sql: "COALESCE(a.gencode.region_type, '')",
+    },
+    AnnotationExtract {
+        output: Col::Consequence,
+        sql: "COALESCE(a.gencode.consequence, '')",
+    },
+    AnnotationExtract {
+        output: Col::CaddPhred,
+        sql: "COALESCE(a.main.cadd.phred, 0)",
+    },
+    AnnotationExtract {
+        output: Col::Revel,
+        sql: "COALESCE(a.dbnsfp.revel, 0)",
+    },
+    AnnotationExtract {
+        output: Col::IsCagePromoter,
+        sql: "a.cage.cage_promoter IS NOT NULL",
+    },
+    AnnotationExtract {
+        output: Col::IsCageEnhancer,
+        sql: "a.cage.cage_enhancer IS NOT NULL",
+    },
+    AnnotationExtract {
+        output: Col::IsCcrePromoter,
+        sql: "COALESCE(CAST(a.ccre.annotations AS VARCHAR) LIKE '%PLS%', false)",
+    },
+    AnnotationExtract {
+        output: Col::IsCcreEnhancer,
+        sql: "COALESCE(CAST(a.ccre.annotations AS VARCHAR) LIKE '%ELS%', false)",
+    },
 ];
 
 /// A STAAR annotation weight formula: annotation source → pipeline weight.
@@ -212,16 +248,46 @@ pub static WEIGHT_FORMULAS: &[WeightFormula] = &[
               THEN 1.0 - POW(10.0, -a.main.cadd.phred / 10.0) \
               ELSE 0.0 END",
     },
-    WeightFormula { output: Col::WLinsight, sql: "COALESCE(a.linsight, 0)::DOUBLE" },
-    WeightFormula { output: Col::WFathmmXf, sql: "COALESCE(a.fathmm_xf, 0)::DOUBLE" },
-    WeightFormula { output: Col::WApcEpiActive, sql: "COALESCE(a.apc.epigenetics_active, 0)::DOUBLE" },
-    WeightFormula { output: Col::WApcEpiRepressed, sql: "COALESCE(a.apc.epigenetics_repressed, 0)::DOUBLE" },
-    WeightFormula { output: Col::WApcEpiTranscription, sql: "COALESCE(a.apc.epigenetics_transcription, 0)::DOUBLE" },
-    WeightFormula { output: Col::WApcConservation, sql: "COALESCE(a.apc.conservation_v2, 0)::DOUBLE" },
-    WeightFormula { output: Col::WApcProteinFunction, sql: "COALESCE(a.apc.protein_function_v3, 0)::DOUBLE" },
-    WeightFormula { output: Col::WApcLocalNd, sql: "COALESCE(a.apc.local_nucleotide_diversity_v3, 0)::DOUBLE" },
-    WeightFormula { output: Col::WApcMutationDensity, sql: "COALESCE(a.apc.mutation_density, 0)::DOUBLE" },
-    WeightFormula { output: Col::WApcTf, sql: "COALESCE(a.apc.transcription_factor, 0)::DOUBLE" },
+    WeightFormula {
+        output: Col::WLinsight,
+        sql: "COALESCE(a.linsight, 0)::DOUBLE",
+    },
+    WeightFormula {
+        output: Col::WFathmmXf,
+        sql: "COALESCE(a.fathmm_xf, 0)::DOUBLE",
+    },
+    WeightFormula {
+        output: Col::WApcEpiActive,
+        sql: "COALESCE(a.apc.epigenetics_active, 0)::DOUBLE",
+    },
+    WeightFormula {
+        output: Col::WApcEpiRepressed,
+        sql: "COALESCE(a.apc.epigenetics_repressed, 0)::DOUBLE",
+    },
+    WeightFormula {
+        output: Col::WApcEpiTranscription,
+        sql: "COALESCE(a.apc.epigenetics_transcription, 0)::DOUBLE",
+    },
+    WeightFormula {
+        output: Col::WApcConservation,
+        sql: "COALESCE(a.apc.conservation_v2, 0)::DOUBLE",
+    },
+    WeightFormula {
+        output: Col::WApcProteinFunction,
+        sql: "COALESCE(a.apc.protein_function_v3, 0)::DOUBLE",
+    },
+    WeightFormula {
+        output: Col::WApcLocalNd,
+        sql: "COALESCE(a.apc.local_nucleotide_diversity_v3, 0)::DOUBLE",
+    },
+    WeightFormula {
+        output: Col::WApcMutationDensity,
+        sql: "COALESCE(a.apc.mutation_density, 0)::DOUBLE",
+    },
+    WeightFormula {
+        output: Col::WApcTf,
+        sql: "COALESCE(a.apc.transcription_factor, 0)::DOUBLE",
+    },
 ];
 
 /// Generate the annotation join SQL that creates the `_rare_all` table.
@@ -335,7 +401,8 @@ pub fn dedup_sql() -> String {
 pub fn distinct_chroms_sql() -> String {
     format!(
         "SELECT DISTINCT {} FROM _rare_all ORDER BY {}",
-        Col::Chromosome, Col::Chromosome,
+        Col::Chromosome,
+        Col::Chromosome,
     )
 }
 
@@ -370,7 +437,10 @@ impl ColType {
             ColType::UInt32 => matches!(dt, DataType::UInt32),
             ColType::Float32 => matches!(dt, DataType::Float32),
             ColType::Float64 => matches!(dt, DataType::Float64 | DataType::Float32),
-            ColType::Utf8 => matches!(dt, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View),
+            ColType::Utf8 => matches!(
+                dt,
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ),
             ColType::Boolean => matches!(dt, DataType::Boolean),
         }
     }
@@ -412,7 +482,11 @@ impl std::fmt::Display for SchemaError {
             SchemaError::Missing(col) => {
                 write!(f, "missing column '{}'", col.as_str())
             }
-            SchemaError::WrongType { col, expected, actual } => {
+            SchemaError::WrongType {
+                col,
+                expected,
+                actual,
+            } => {
                 write!(
                     f,
                     "column '{}': expected {expected}, got {actual:?}",
@@ -425,10 +499,7 @@ impl std::fmt::Display for SchemaError {
 
 impl SchemaContract {
     /// Validate an Arrow schema against this contract.
-    pub fn validate(
-        &self,
-        schema: &arrow::datatypes::Schema,
-    ) -> Result<(), Vec<SchemaError>> {
+    pub fn validate(&self, schema: &arrow::datatypes::Schema) -> Result<(), Vec<SchemaError>> {
         let mut errors = Vec::new();
         for &(col, expected_type) in self.required {
             match schema.field_with_name(col.as_str()) {
@@ -658,7 +729,10 @@ mod tests {
         assert!(sql.contains("ORDER BY position"));
         // All store columns present
         for col in store_columns() {
-            assert!(sql.contains(col.as_str()), "metadata_select_sql missing {col:?}");
+            assert!(
+                sql.contains(col.as_str()),
+                "metadata_select_sql missing {col:?}"
+            );
         }
     }
 
@@ -687,6 +761,10 @@ mod tests {
         let len_before = names.len();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), len_before, "Duplicate column names in store_columns()");
+        assert_eq!(
+            names.len(),
+            len_before,
+            "Duplicate column names in store_columns()"
+        );
     }
 }

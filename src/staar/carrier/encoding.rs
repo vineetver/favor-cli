@@ -43,7 +43,11 @@ impl SparseGHeader {
         Self {
             n_samples,
             n_variants,
-            flags: if n_samples > 65535 { FLAG_WIDE_INDEX } else { 0 },
+            flags: if n_samples > 65535 {
+                FLAG_WIDE_INDEX
+            } else {
+                0
+            },
             total_carriers,
             offsets_start,
         }
@@ -54,14 +58,14 @@ impl SparseGHeader {
     }
 
     pub fn write_to<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        w.write_all(&SPARSE_G_MAGIC)?;                          // 0..8
-        w.write_all(&SPARSE_G_VERSION.to_le_bytes())?;          // 8..10
-        w.write_all(&self.n_samples.to_le_bytes())?;            // 10..14
-        w.write_all(&self.n_variants.to_le_bytes())?;           // 14..18
-        w.write_all(&self.flags.to_le_bytes())?;                // 18..22
-        w.write_all(&self.total_carriers.to_le_bytes())?;       // 22..30
-        w.write_all(&self.offsets_start.to_le_bytes())?;        // 30..38
-        w.write_all(&[0u8; 26])?;                               // 38..64
+        w.write_all(&SPARSE_G_MAGIC)?; // 0..8
+        w.write_all(&SPARSE_G_VERSION.to_le_bytes())?; // 8..10
+        w.write_all(&self.n_samples.to_le_bytes())?; // 10..14
+        w.write_all(&self.n_variants.to_le_bytes())?; // 14..18
+        w.write_all(&self.flags.to_le_bytes())?; // 18..22
+        w.write_all(&self.total_carriers.to_le_bytes())?; // 22..30
+        w.write_all(&self.offsets_start.to_le_bytes())?; // 30..38
+        w.write_all(&[0u8; 26])?; // 38..64
         Ok(())
     }
 

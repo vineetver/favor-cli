@@ -77,8 +77,10 @@ fn is_downstream(v: &AnnotatedVariant) -> bool {
 
 fn is_utr(v: &AnnotatedVariant) -> bool {
     v.annotation.region_type.contains_utr()
-        || matches!(v.annotation.consequence,
-            Consequence::FivePrimeUtrVariant | Consequence::ThreePrimeUtrVariant)
+        || matches!(
+            v.annotation.consequence,
+            Consequence::FivePrimeUtrVariant | Consequence::ThreePrimeUtrVariant
+        )
 }
 
 fn is_promoter_cage(v: &AnnotatedVariant) -> bool {
@@ -99,8 +101,10 @@ fn is_enhancer_dhs(v: &AnnotatedVariant) -> bool {
 
 fn is_ncrna(v: &AnnotatedVariant) -> bool {
     v.annotation.region_type.contains_ncrna()
-        || matches!(v.annotation.consequence,
-            Consequence::NonCodingTranscriptExonVariant | Consequence::NonCodingTranscriptVariant)
+        || matches!(
+            v.annotation.consequence,
+            Consequence::NonCodingTranscriptExonVariant | Consequence::NonCodingTranscriptVariant
+        )
 }
 
 pub fn build_masks_from_registry(
@@ -112,7 +116,10 @@ pub fn build_masks_from_registry(
         std::collections::HashMap::new();
     for (i, v) in variants.iter().enumerate() {
         if !v.gene_name.is_empty() {
-            gene_variants.entry(v.gene_name.to_string()).or_default().push(i);
+            gene_variants
+                .entry(v.gene_name.to_string())
+                .or_default()
+                .push(i);
         }
     }
 
@@ -173,7 +180,11 @@ pub struct ScangParams {
 
 impl Default for ScangParams {
     fn default() -> Self {
-        Self { lmin: 40, lmax: 300, step: 10 }
+        Self {
+            lmin: 40,
+            lmax: 300,
+            step: 10,
+        }
     }
 }
 
@@ -201,8 +212,7 @@ pub fn build_scang_windows(
         let mut groups = Vec::new();
 
         for start in 0..=(n - wsize) {
-            let window_indices: Vec<usize> =
-                chrom_indices[start..start + wsize].to_vec();
+            let window_indices: Vec<usize> = chrom_indices[start..start + wsize].to_vec();
             let first_pos = variants[window_indices[0]].position;
             let last_pos = variants[*window_indices.last().unwrap()].position;
 
@@ -233,8 +243,16 @@ pub fn build_sliding_windows(
         return Vec::new();
     }
 
-    let min_pos = chrom_indices.iter().map(|&i| variants[i].position).min().unwrap_or(0);
-    let max_pos = chrom_indices.iter().map(|&i| variants[i].position).max().unwrap_or(0);
+    let min_pos = chrom_indices
+        .iter()
+        .map(|&i| variants[i].position)
+        .min()
+        .unwrap_or(0);
+    let max_pos = chrom_indices
+        .iter()
+        .map(|&i| variants[i].position)
+        .max()
+        .unwrap_or(0);
 
     let chrom_label = chromosome.label();
     let mut windows = Vec::new();
@@ -264,21 +282,37 @@ pub fn build_sliding_windows(
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-fn v(region_type: &str, consequence: &str, cadd: f64, revel: f64,
-     cage_prom: bool, cage_enh: bool, ccre_prom: bool, ccre_enh: bool) -> AnnotatedVariant {
-    use crate::types::{AnnotationWeights, FunctionalAnnotation, RegionType, RegulatoryFlags, Chromosome};
+fn v(
+    region_type: &str,
+    consequence: &str,
+    cadd: f64,
+    revel: f64,
+    cage_prom: bool,
+    cage_enh: bool,
+    ccre_prom: bool,
+    ccre_enh: bool,
+) -> AnnotatedVariant {
+    use crate::types::{
+        AnnotationWeights, Chromosome, FunctionalAnnotation, RegionType, RegulatoryFlags,
+    };
     AnnotatedVariant {
-        chromosome: Chromosome::Autosome(22), position: 1000,
-        ref_allele: "A".into(), alt_allele: "T".into(),
-        maf: 0.001, gene_name: "BRCA2".into(),
+        chromosome: Chromosome::Autosome(22),
+        position: 1000,
+        ref_allele: "A".into(),
+        alt_allele: "T".into(),
+        maf: 0.001,
+        gene_name: "BRCA2".into(),
         annotation: FunctionalAnnotation {
             region_type: RegionType::from_str_lossy(region_type),
             consequence: Consequence::from_str_lossy(consequence),
-            cadd_phred: cadd, revel,
+            cadd_phred: cadd,
+            revel,
             weights: AnnotationWeights([0.0; 11]),
             regulatory: RegulatoryFlags {
-                cage_promoter: cage_prom, cage_enhancer: cage_enh,
-                ccre_promoter: ccre_prom, ccre_enhancer: ccre_enh,
+                cage_promoter: cage_prom,
+                cage_enhancer: cage_enh,
+                ccre_promoter: ccre_prom,
+                ccre_enhancer: ccre_enh,
             },
         },
     }
@@ -303,7 +337,16 @@ mod tests {
 
     #[test]
     fn frameshift_is_plof_and_ptv() {
-        let var = v("exonic", "frameshift deletion", 20.9, 0.0, false, false, false, false);
+        let var = v(
+            "exonic",
+            "frameshift deletion",
+            20.9,
+            0.0,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(is_plof(&var));
         assert!(is_ptv(&var));
     }
@@ -327,7 +370,16 @@ mod tests {
 
     #[test]
     fn missense_high_cadd_is_disruptive() {
-        let var = v("exonic", "nonsynonymous SNV", 25.1, 0.3, false, false, false, false);
+        let var = v(
+            "exonic",
+            "nonsynonymous SNV",
+            25.1,
+            0.3,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(is_missense(&var));
         assert!(is_disruptive_missense(&var));
         assert!(!is_plof(&var));
@@ -336,20 +388,47 @@ mod tests {
 
     #[test]
     fn missense_low_scores_not_disruptive() {
-        let var = v("exonic", "nonsynonymous SNV", 10.0, 0.2, false, false, false, false);
+        let var = v(
+            "exonic",
+            "nonsynonymous SNV",
+            10.0,
+            0.2,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(is_missense(&var));
         assert!(!is_disruptive_missense(&var));
     }
 
     #[test]
     fn missense_high_revel_is_disruptive() {
-        let var = v("exonic", "nonsynonymous SNV", 5.0, 0.6, false, false, false, false);
+        let var = v(
+            "exonic",
+            "nonsynonymous SNV",
+            5.0,
+            0.6,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(is_disruptive_missense(&var));
     }
 
     #[test]
     fn synonymous_matches() {
-        let var = v("exonic", "synonymous SNV", 6.4, 0.0, false, false, false, false);
+        let var = v(
+            "exonic",
+            "synonymous SNV",
+            6.4,
+            0.0,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(is_synonymous(&var));
         assert!(!is_plof(&var));
         assert!(!is_missense(&var));
@@ -373,7 +452,16 @@ mod tests {
 
     #[test]
     fn compound_upstream_downstream() {
-        let var = v("upstream;downstream", "", 3.0, 0.0, false, false, false, false);
+        let var = v(
+            "upstream;downstream",
+            "",
+            3.0,
+            0.0,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(is_upstream(&var));
         assert!(is_downstream(&var));
     }
@@ -430,7 +518,16 @@ mod tests {
 
     #[test]
     fn ncrna_compound_splicing() {
-        let var = v("ncRNA_exonic;splicing", "", 15.0, 0.0, false, false, false, false);
+        let var = v(
+            "ncRNA_exonic;splicing",
+            "",
+            15.0,
+            0.0,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(is_ncrna(&var));
     }
 
@@ -459,12 +556,39 @@ mod tests {
     #[test]
     fn build_coding_masks_groups_by_gene() {
         let variants = vec![
-            AnnotatedVariant { position: 100, gene_name: "TP53".into(),
-                ..v("exonic", "stopgain", 30.0, 0.0, false, false, false, false) },
-            AnnotatedVariant { position: 200, gene_name: "TP53".into(),
-                ..v("exonic", "frameshift deletion", 25.0, 0.0, false, false, false, false) },
-            AnnotatedVariant { position: 300, gene_name: "BRCA1".into(),
-                ..v("exonic", "nonsynonymous SNV", 20.0, 0.0, false, false, false, false) },
+            AnnotatedVariant {
+                position: 100,
+                gene_name: "TP53".into(),
+                ..v("exonic", "stopgain", 30.0, 0.0, false, false, false, false)
+            },
+            AnnotatedVariant {
+                position: 200,
+                gene_name: "TP53".into(),
+                ..v(
+                    "exonic",
+                    "frameshift deletion",
+                    25.0,
+                    0.0,
+                    false,
+                    false,
+                    false,
+                    false,
+                )
+            },
+            AnnotatedVariant {
+                position: 300,
+                gene_name: "BRCA1".into(),
+                ..v(
+                    "exonic",
+                    "nonsynonymous SNV",
+                    20.0,
+                    0.0,
+                    false,
+                    false,
+                    false,
+                    false,
+                )
+            },
         ];
         let masks = build_coding_masks(&variants, 2);
         let plof = masks.iter().find(|(mt, _)| *mt == MaskType::PLof);
@@ -477,11 +601,15 @@ mod tests {
 
     #[test]
     fn sliding_windows_non_overlapping() {
-        let variants: Vec<AnnotatedVariant> = (0..5).map(|i| {
-            AnnotatedVariant { position: i * 500, ..v("exonic", "stopgain", 10.0, 0.0, false, false, false, false) }
-        }).collect();
+        let variants: Vec<AnnotatedVariant> = (0..5)
+            .map(|i| AnnotatedVariant {
+                position: i * 500,
+                ..v("exonic", "stopgain", 10.0, 0.0, false, false, false, false)
+            })
+            .collect();
         let indices: Vec<usize> = (0..5).collect();
-        let windows = build_sliding_windows(&variants, &indices, Chromosome::Autosome(22), 1000, 1000);
+        let windows =
+            build_sliding_windows(&variants, &indices, Chromosome::Autosome(22), 1000, 1000);
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].variant_indices.len(), 2);
         assert_eq!(windows[1].variant_indices.len(), 2);
@@ -491,20 +619,47 @@ mod tests {
 
     #[test]
     fn vep_missense_variant() {
-        let var = v("exonic", "missense_variant", 25.0, 0.7, false, false, false, false);
+        let var = v(
+            "exonic",
+            "missense_variant",
+            25.0,
+            0.7,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(is_missense(&var));
         assert!(is_disruptive_missense(&var));
     }
 
     #[test]
     fn vep_upstream_gene_variant() {
-        let var = v("", "upstream_gene_variant", 5.0, 0.0, false, false, false, false);
+        let var = v(
+            "",
+            "upstream_gene_variant",
+            5.0,
+            0.0,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(is_upstream(&var));
     }
 
     #[test]
     fn vep_splice_donor_high_cadd_is_ptv_ds() {
-        let var = v("", "splice_donor_variant", 30.0, 0.0, false, false, false, false);
+        let var = v(
+            "",
+            "splice_donor_variant",
+            30.0,
+            0.0,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(is_plof(&var));
         assert!(is_splice(&var));
         assert!(is_ptv_ds(&var));
@@ -514,7 +669,9 @@ mod tests {
     // -- SCANG tests --
 
     fn var_at(pos: u32) -> AnnotatedVariant {
-        use crate::types::{AnnotationWeights, Chromosome, FunctionalAnnotation, RegionType, RegulatoryFlags};
+        use crate::types::{
+            AnnotationWeights, Chromosome, FunctionalAnnotation, RegionType, RegulatoryFlags,
+        };
         AnnotatedVariant {
             chromosome: Chromosome::Autosome(1),
             position: pos,
@@ -537,7 +694,11 @@ mod tests {
     fn scang_windows_basic() {
         let variants: Vec<AnnotatedVariant> = (0..100).map(|i| var_at(i * 100)).collect();
         let indices: Vec<usize> = (0..100).collect();
-        let params = ScangParams { lmin: 10, lmax: 30, step: 10 };
+        let params = ScangParams {
+            lmin: 10,
+            lmax: 30,
+            step: 10,
+        };
         let result = build_scang_windows(&variants, &indices, Chromosome::Autosome(1), &params);
 
         assert_eq!(result.len(), 3);

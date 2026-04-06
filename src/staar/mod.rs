@@ -1,10 +1,8 @@
 pub mod ancestry;
 pub mod carrier;
 pub mod genotype;
-pub mod sparse_g;
-pub mod sparse_g_writer;
 #[cfg(test)]
-mod ground_truth_tests;
+mod ground_truth_test;
 pub mod masks;
 pub mod meta;
 pub mod model;
@@ -13,9 +11,11 @@ pub mod output;
 pub mod pipeline;
 pub mod score;
 pub mod score_cache;
+pub mod sparse_g;
+pub mod sparse_g_writer;
 pub mod stats;
 pub mod store;
-#[allow(dead_code)] // wired when `favor validate-store` lands
+#[allow(dead_code)]
 pub mod store_validate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,4 +105,3 @@ pub struct GeneResult {
     pub cumulative_mac: u32,
     pub staar: score::StaarResult,
 }
-

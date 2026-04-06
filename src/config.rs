@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::column::Col;
 use crate::error::FavorError;
 
-/// Annotation tier. Sum type — cannot be anything other than Base or Full.
+/// Annotation tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
@@ -15,7 +15,7 @@ pub enum Tier {
     Full,
 }
 
-/// Deployment environment. Affects resource detection defaults.
+/// Deployment environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
@@ -23,28 +23,48 @@ pub enum Environment {
     Workstation,
 }
 
-/// Pipeline columns derivable from base-tier annotations.
+/// Pipeline columns available from base-tier annotations.
 const BASE_TIER_COLS: &[Col] = &[
-    Col::Chromosome, Col::Position, Col::RefAllele, Col::AltAllele,
+    Col::Chromosome,
+    Col::Position,
+    Col::RefAllele,
+    Col::AltAllele,
     Col::Vid,
-    Col::GeneName, Col::RegionType, Col::Consequence,
+    Col::GeneName,
+    Col::RegionType,
+    Col::Consequence,
     Col::CaddPhred,
-    Col::IsCcrePromoter, Col::IsCcreEnhancer,
+    Col::IsCcrePromoter,
+    Col::IsCcreEnhancer,
 ];
 
-/// Pipeline columns derivable from full-tier annotations (superset of base).
+/// Pipeline columns available from full-tier annotations.
 const FULL_TIER_COLS: &[Col] = &[
-    Col::Chromosome, Col::Position, Col::RefAllele, Col::AltAllele,
+    Col::Chromosome,
+    Col::Position,
+    Col::RefAllele,
+    Col::AltAllele,
     Col::Vid,
-    Col::GeneName, Col::RegionType, Col::Consequence,
+    Col::GeneName,
+    Col::RegionType,
+    Col::Consequence,
     Col::CaddPhred,
-    Col::IsCcrePromoter, Col::IsCcreEnhancer,
+    Col::IsCcrePromoter,
+    Col::IsCcreEnhancer,
     Col::Revel,
-    Col::IsCagePromoter, Col::IsCageEnhancer,
-    Col::WCadd, Col::WLinsight, Col::WFathmmXf,
-    Col::WApcEpiActive, Col::WApcEpiRepressed, Col::WApcEpiTranscription,
-    Col::WApcConservation, Col::WApcProteinFunction,
-    Col::WApcLocalNd, Col::WApcMutationDensity, Col::WApcTf,
+    Col::IsCagePromoter,
+    Col::IsCageEnhancer,
+    Col::WCadd,
+    Col::WLinsight,
+    Col::WFathmmXf,
+    Col::WApcEpiActive,
+    Col::WApcEpiRepressed,
+    Col::WApcEpiTranscription,
+    Col::WApcConservation,
+    Col::WApcProteinFunction,
+    Col::WApcLocalNd,
+    Col::WApcMutationDensity,
+    Col::WApcTf,
 ];
 
 impl Tier {
@@ -90,8 +110,14 @@ impl Tier {
         match self {
             Tier::Base => &["gencode", "main", "ccre"],
             Tier::Full => &[
-                "gencode", "main", "ccre", "cage", "apc",
-                "dbnsfp", "linsight", "fathmm_xf",
+                "gencode",
+                "main",
+                "ccre",
+                "cage",
+                "apc",
+                "dbnsfp",
+                "linsight",
+                "fathmm_xf",
             ],
         }
     }
@@ -184,7 +210,9 @@ impl ResourceConfig {
     /// into bytes. Returns None if the string is empty or unparseable.
     pub fn parse_memory_bytes(s: &str) -> Option<u64> {
         let s = s.trim();
-        if s.is_empty() { return None; }
+        if s.is_empty() {
+            return None;
+        }
 
         let s_upper = s.to_uppercase();
         let (num_str, multiplier) = if let Some(n) = s_upper.strip_suffix("TB") {
@@ -204,12 +232,18 @@ impl ResourceConfig {
             return s.parse::<u64>().ok();
         };
 
-        num_str.trim().parse::<f64>().ok().map(|n| (n * multiplier as f64) as u64)
+        num_str
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|n| (n * multiplier as f64) as u64)
     }
 
     /// Resolve memory_budget to bytes. Returns None if not set.
     pub fn memory_budget_bytes(&self) -> Option<u64> {
-        self.memory_budget.as_deref().and_then(Self::parse_memory_bytes)
+        self.memory_budget
+            .as_deref()
+            .and_then(Self::parse_memory_bytes)
     }
 }
 
@@ -248,14 +282,12 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| FavorError::Resource(format!(
-                "Cannot read config '{}': {e}", path.display()
-            )))?;
-        let config: Config = toml::from_str(&content)
-            .map_err(|e| FavorError::Resource(format!(
-                "Invalid config '{}': {e}", path.display()
-            )))?;
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            FavorError::Resource(format!("Cannot read config '{}': {e}", path.display()))
+        })?;
+        let config: Config = toml::from_str(&content).map_err(|e| {
+            FavorError::Resource(format!("Invalid config '{}': {e}", path.display()))
+        })?;
         Ok(config)
     }
 
@@ -274,16 +306,17 @@ impl Config {
     pub fn save(&self) -> Result<(), FavorError> {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| FavorError::Resource(format!(
-                    "Cannot create config directory '{}': {e}", parent.display()
-                )))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                FavorError::Resource(format!(
+                    "Cannot create config directory '{}': {e}",
+                    parent.display()
+                ))
+            })?;
         }
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, &content)
-            .map_err(|e| FavorError::Resource(format!(
-                "Cannot write config '{}': {e}", path.display()
-            )))?;
+        std::fs::write(&path, &content).map_err(|e| {
+            FavorError::Resource(format!("Cannot write config '{}': {e}", path.display()))
+        })?;
         Ok(())
     }
 
@@ -305,14 +338,15 @@ impl Config {
                 .any(|entry| {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
-                    !name.starts_with('.')
-                        && (entry.path().is_dir() || name.ends_with(".parquet"))
+                    !name.starts_with('.') && (entry.path().is_dir() || name.ends_with(".parquet"))
                 })
     }
 
     /// Count chromosome=*/sorted.parquet files in a directory
     pub fn count_chromosomes(dir: &Path) -> usize {
-        if !dir.exists() { return 0; }
+        if !dir.exists() {
+            return 0;
+        }
         std::fs::read_dir(dir)
             .into_iter()
             .flatten()
@@ -351,7 +385,9 @@ impl DirProbe {
                 .filter(|e| e.path().is_dir())
                 .filter_map(|e| {
                     let name = e.file_name().into_string().ok()?;
-                    if name.starts_with('.') { return None; }
+                    if name.starts_with('.') {
+                        return None;
+                    }
                     Some(name)
                 })
                 .collect()
@@ -362,20 +398,31 @@ impl DirProbe {
         let rollups_found = root.join("rollups").is_dir();
         let reference_found = tissue_dir.join("reference").is_dir();
 
-        Self { base_chroms, full_chroms, tissue_tables, rollups_found, reference_found }
+        Self {
+            base_chroms,
+            full_chroms,
+            tissue_tables,
+            rollups_found,
+            reference_found,
+        }
     }
 
     pub fn has_any_data(&self) -> bool {
-        self.base_chroms > 0 || self.full_chroms > 0
+        self.base_chroms > 0
+            || self.full_chroms > 0
             || !self.tissue_tables.is_empty()
             || self.rollups_found
     }
 
     /// Best tier detected, if any annotations exist
     pub fn detected_tier(&self) -> Option<Tier> {
-        if self.full_chroms > 0 { Some(Tier::Full) }
-        else if self.base_chroms > 0 { Some(Tier::Base) }
-        else { None }
+        if self.full_chroms > 0 {
+            Some(Tier::Full)
+        } else if self.base_chroms > 0 {
+            Some(Tier::Base)
+        } else {
+            None
+        }
     }
 
     /// Summary lines for display in TUI
@@ -386,12 +433,18 @@ impl DirProbe {
         if self.full_chroms == 24 {
             lines.push(("full: 24/24 chromosomes".into(), ProbeStatus::Good));
         } else if self.full_chroms > 0 {
-            lines.push((format!("full: {}/24 chromosomes", self.full_chroms), ProbeStatus::Partial));
+            lines.push((
+                format!("full: {}/24 chromosomes", self.full_chroms),
+                ProbeStatus::Partial,
+            ));
         }
         if self.base_chroms == 24 {
             lines.push(("base: 24/24 chromosomes".into(), ProbeStatus::Good));
         } else if self.base_chroms > 0 {
-            lines.push((format!("base: {}/24 chromosomes", self.base_chroms), ProbeStatus::Partial));
+            lines.push((
+                format!("base: {}/24 chromosomes", self.base_chroms),
+                ProbeStatus::Partial,
+            ));
         }
         if self.full_chroms == 0 && self.base_chroms == 0 {
             lines.push(("annotations: not found".into(), ProbeStatus::Missing));
@@ -399,7 +452,10 @@ impl DirProbe {
 
         // Tissue packs
         if !self.tissue_tables.is_empty() {
-            lines.push((format!("tissue: {} tables", self.tissue_tables.len()), ProbeStatus::Good));
+            lines.push((
+                format!("tissue: {} tables", self.tissue_tables.len()),
+                ProbeStatus::Good,
+            ));
         } else {
             lines.push(("tissue: not found".into(), ProbeStatus::Missing));
         }
@@ -415,7 +471,10 @@ impl DirProbe {
         }
 
         if !self.has_any_data() {
-            lines.push(("(data will be downloaded after setup)".into(), ProbeStatus::Info));
+            lines.push((
+                "(data will be downloaded after setup)".into(),
+                ProbeStatus::Info,
+            ));
         }
 
         lines

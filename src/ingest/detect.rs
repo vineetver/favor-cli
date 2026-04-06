@@ -1,10 +1,4 @@
-//! Cheap build and coordinate-base detection.
-//!
-//! Samples 100 rows from the input, probes annotation parquets to determine:
-//! - hg38 vs hg19 (position match rate against known annotations)
-//! - 0-based vs 1-based (position vs position+1 match rate)
-//!
-//! NEVER counts all rows. NEVER scans the full file. Reads exactly 100 rows.
+//! Build and coordinate-base detection from a small sample.
 
 use std::path::Path;
 
@@ -131,5 +125,8 @@ fn probe_chromosome(
          WHERE EXISTS (SELECT 1 FROM {ann_table} a WHERE a.position = s.pos + 1)"
     ))?;
 
-    Ok(Some((hits_1 as f64 / count as f64, hits_0 as f64 / count as f64)))
+    Ok(Some((
+        hits_1 as f64 / count as f64,
+        hits_0 as f64 / count as f64,
+    )))
 }

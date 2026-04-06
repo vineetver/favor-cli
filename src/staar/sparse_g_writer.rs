@@ -13,8 +13,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, BooleanBuilder, FixedSizeListArray, Float32Array, Float64Array,
-    Float64Builder, Int32Array, Int32Builder, ListArray, StringBuilder, StringArray,
-    UInt32Builder,
+    Float64Builder, Int32Array, Int32Builder, ListArray, StringArray, StringBuilder, UInt32Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -72,7 +71,10 @@ pub fn build_chromosome(
     }
     let mut raw_rows: Vec<RawRow> = Vec::new();
     for batch in &meta_batches {
-        let pos_arr = batch.column(0).as_any().downcast_ref::<Int32Array>()
+        let pos_arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
             .ok_or_else(|| FavorError::Analysis("_rare_all missing position".into()))?;
         for i in 0..batch.num_rows() {
             raw_rows.push(RawRow {
@@ -85,7 +87,11 @@ pub fn build_chromosome(
     }
 
     if raw_rows.is_empty() {
-        return Ok(BuildStats { n_variants: 0, n_genes: 0, total_carriers: 0 });
+        return Ok(BuildStats {
+            n_variants: 0,
+            n_genes: 0,
+            total_carriers: 0,
+        });
     }
 
     // Deduplicate by (pos, ref, alt). A variant in multiple genes gets one
@@ -120,7 +126,11 @@ pub fn build_chromosome(
     let mut unique_pos: Vec<i32> = unique_variants.iter().map(|v| v.pos).collect();
     unique_pos.sort_unstable();
     unique_pos.dedup();
-    let pos_str = unique_pos.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    let pos_str = unique_pos
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
 
     // Load genotype dosages
     engine.register_parquet_file("_geno_carrier", Path::new(geno_parquet_path))?;
@@ -133,27 +143,37 @@ pub fn build_chromosome(
 
     let mut dosage_map: HashMap<(i32, String, String), Vec<(u32, u8)>> = HashMap::new();
     for batch in &dos_batches {
-        let pos_arr = batch.column(0).as_any().downcast_ref::<Int32Array>()
+        let pos_arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
             .ok_or_else(|| FavorError::Analysis("Genotype parquet missing position".into()))?;
         let dos_col = batch.column(3);
         let dos_fsl = dos_col.as_any().downcast_ref::<FixedSizeListArray>();
         let dos_list = dos_col.as_any().downcast_ref::<ListArray>();
         if dos_fsl.is_none() && dos_list.is_none() {
-            return Err(FavorError::Analysis("Genotype parquet missing dosages".into()));
+            return Err(FavorError::Analysis(
+                "Genotype parquet missing dosages".into(),
+            ));
         }
 
         for i in 0..batch.num_rows() {
             let pos = pos_arr.value(i);
             let ref_a = str_val(batch.column(1).as_ref(), i);
             let alt_a = str_val(batch.column(2).as_ref(), i);
-            let dosage_arr = if let Some(fsl) = dos_fsl { fsl.value(i) }
-                else { dos_list.unwrap().value(i) };
+            let dosage_arr = if let Some(fsl) = dos_fsl {
+                fsl.value(i)
+            } else {
+                dos_list.unwrap().value(i)
+            };
             let dosages_f32 = dosage_arr.as_any().downcast_ref::<Float32Array>();
 
             let mut carriers = Vec::new();
             let n_dos = dosage_arr.len();
             for si in 0..n_samples.min(n_dos) {
-                if dosage_arr.is_null(si) { continue; }
+                if dosage_arr.is_null(si) {
+                    continue;
+                }
                 let d = if let Some(a) = dosages_f32 {
                     a.value(si) as f64
                 } else if let Some(a) = dosage_arr.as_any().downcast_ref::<Float64Array>() {
@@ -181,7 +201,11 @@ pub fn build_chromosome(
     let placeholder = SparseGHeader::new(n_samples as u32, n_variants as u32, 0, 0);
     placeholder.write_to(&mut w)?;
 
-    let entry_size = if wide { CARRIER_ENTRY_WIDE } else { CARRIER_ENTRY_NARROW };
+    let entry_size = if wide {
+        CARRIER_ENTRY_WIDE
+    } else {
+        CARRIER_ENTRY_NARROW
+    };
     let mut offsets: Vec<u64> = Vec::with_capacity(n_variants);
     let mut data_offset: u64 = 0;
     let mut total_carriers: u64 = 0;
@@ -247,10 +271,14 @@ pub fn build_chromosome(
         Field::new(Col::VariantVcf.as_str(), DataType::UInt32, false),
         Field::new(Col::GeneName.as_str(), DataType::Utf8, false),
     ]));
-    let mem_batch = RecordBatch::try_new(mem_schema.clone(), vec![
-        Arc::new(mem_variant_vcf.finish()) as ArrayRef,
-        Arc::new(mem_gene.finish()) as ArrayRef,
-    ]).map_err(|e| FavorError::Resource(format!("membership batch: {e}")))?;
+    let mem_batch = RecordBatch::try_new(
+        mem_schema.clone(),
+        vec![
+            Arc::new(mem_variant_vcf.finish()) as ArrayRef,
+            Arc::new(mem_gene.finish()) as ArrayRef,
+        ],
+    )
+    .map_err(|e| FavorError::Resource(format!("membership batch: {e}")))?;
 
     write_parquet(chrom_dir, "membership.parquet", mem_schema, &mem_batch)?;
 
@@ -265,7 +293,11 @@ pub fn build_chromosome(
         "    chr{chrom}: {n_variants} variants, {n_genes} genes, {total_carriers} carriers"
     ));
 
-    Ok(BuildStats { n_variants, n_genes, total_carriers })
+    Ok(BuildStats {
+        n_variants,
+        n_genes,
+        total_carriers,
+    })
 }
 
 fn write_parquet(
@@ -281,8 +313,12 @@ fn write_parquet(
         .map_err(|e| FavorError::Resource(format!("Create {filename}: {e}")))?;
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))
         .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
-    writer.write(batch).map_err(|e| FavorError::Resource(format!("Write: {e}")))?;
-    writer.close().map_err(|e| FavorError::Resource(format!("Close: {e}")))?;
+    writer
+        .write(batch)
+        .map_err(|e| FavorError::Resource(format!("Write: {e}")))?;
+    writer
+        .close()
+        .map_err(|e| FavorError::Resource(format!("Close: {e}")))?;
     Ok(())
 }
 
@@ -331,32 +367,53 @@ fn write_variants_parquet(
 
     let mut meta_map: HashMap<(i32, String, String), MetaRow> = HashMap::new();
     for batch in full_batches {
-        let pos_arr = batch.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
-        let bool_col = |i: usize| batch.column(i).as_any().downcast_ref::<BooleanArray>().unwrap();
+        let pos_arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let bool_col = |i: usize| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+        };
         let cps = bool_col(9);
         let ces = bool_col(10);
         let crps = bool_col(11);
         let cres = bool_col(12);
 
         for i in 0..batch.num_rows() {
-            let key = (pos_arr.value(i), str_val(batch.column(1).as_ref(), i), str_val(batch.column(2).as_ref(), i));
-            if meta_map.contains_key(&key) { continue; } // keep first
+            let key = (
+                pos_arr.value(i),
+                str_val(batch.column(1).as_ref(), i),
+                str_val(batch.column(2).as_ref(), i),
+            );
+            if meta_map.contains_key(&key) {
+                continue;
+            } // keep first
             let mut w = [0.0f64; 11];
             #[allow(clippy::needless_range_loop)]
-            for ch in 0..11 { w[ch] = float_val(batch.column(13 + ch).as_ref(), i); }
-            meta_map.insert(key, MetaRow {
-                maf: float_val(batch.column(3).as_ref(), i),
-                gene: str_val(batch.column(4).as_ref(), i),
-                region_type: str_val(batch.column(5).as_ref(), i),
-                consequence: str_val(batch.column(6).as_ref(), i),
-                cadd_phred: float_val(batch.column(7).as_ref(), i),
-                revel: float_val(batch.column(8).as_ref(), i),
-                cage_prom: cps.value(i),
-                cage_enh: ces.value(i),
-                ccre_prom: crps.value(i),
-                ccre_enh: cres.value(i),
-                weights: w,
-            });
+            for ch in 0..11 {
+                w[ch] = float_val(batch.column(13 + ch).as_ref(), i);
+            }
+            meta_map.insert(
+                key,
+                MetaRow {
+                    maf: float_val(batch.column(3).as_ref(), i),
+                    gene: str_val(batch.column(4).as_ref(), i),
+                    region_type: str_val(batch.column(5).as_ref(), i),
+                    consequence: str_val(batch.column(6).as_ref(), i),
+                    cadd_phred: float_val(batch.column(7).as_ref(), i),
+                    revel: float_val(batch.column(8).as_ref(), i),
+                    cage_prom: cps.value(i),
+                    cage_enh: ces.value(i),
+                    ccre_prom: crps.value(i),
+                    ccre_enh: cres.value(i),
+                    weights: w,
+                },
+            );
         }
     }
 
@@ -375,7 +432,8 @@ fn write_variants_parquet(
     let mut ce_b = BooleanBuilder::with_capacity(n);
     let mut crp_b = BooleanBuilder::with_capacity(n);
     let mut cre_b = BooleanBuilder::with_capacity(n);
-    let mut w_builders: Vec<Float64Builder> = (0..11).map(|_| Float64Builder::with_capacity(n)).collect();
+    let mut w_builders: Vec<Float64Builder> =
+        (0..11).map(|_| Float64Builder::with_capacity(n)).collect();
 
     for (variant_vcf, uv) in unique_variants.iter().enumerate() {
         let key = (uv.pos, uv.ref_a.clone(), uv.alt_a.clone());
@@ -385,7 +443,12 @@ fn write_variants_parquet(
         pos_b.append_value(uv.pos);
         ref_b.append_value(&uv.ref_a);
         alt_b.append_value(&uv.alt_a);
-        vid_b.append_value(crate::types::format_vid(chrom, uv.pos as u32, &uv.ref_a, &uv.alt_a));
+        vid_b.append_value(crate::types::format_vid(
+            chrom,
+            uv.pos as u32,
+            &uv.ref_a,
+            &uv.alt_a,
+        ));
 
         if let Some(m) = mr {
             maf_b.append_value(m.maf);
@@ -410,7 +473,9 @@ fn write_variants_parquet(
             ce_b.append_value(false);
             crp_b.append_value(false);
             cre_b.append_value(false);
-            for wb in w_builders.iter_mut() { wb.append_value(0.0); }
+            for wb in w_builders.iter_mut() {
+                wb.append_value(0.0);
+            }
         }
     }
 

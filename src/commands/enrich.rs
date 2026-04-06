@@ -30,9 +30,14 @@ pub fn handle(
 
     let output = output_path.unwrap_or_else(|| {
         let name = input.file_name().unwrap_or_default().to_string_lossy();
-        let stem = name.strip_suffix(".annotated").or_else(|| name.strip_suffix("/"))
+        let stem = name
+            .strip_suffix(".annotated")
+            .or_else(|| name.strip_suffix("/"))
             .unwrap_or(&name);
-        input.parent().unwrap_or(&input).join(format!("{stem}.enriched"))
+        input
+            .parent()
+            .unwrap_or(&input)
+            .join(format!("{stem}.enriched"))
     });
 
     let config = EnrichConfig {
@@ -63,7 +68,9 @@ pub fn run(
 fn emit_dry_run(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorError> {
     let annotated = AnnotatedSet::open(&config.input)?;
     let tissue_db = TissueDb::open(&config.tissue_dir)?;
-    let available_tables: Vec<&str> = tissue_db.available_tables().iter()
+    let available_tables: Vec<&str> = tissue_db
+        .available_tables()
+        .iter()
         .map(|t| t.display_name())
         .collect();
     let plan = commands::DryRunPlan {
@@ -94,18 +101,45 @@ pub fn run_enrich(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorEr
     let engine = DfEngine::new(&resources)?;
 
     out.status(&format!("Input: {} variants", annotated.variant_count()));
-    out.status(&format!("Resources: {}, {} threads ({})",
-        resources.memory_human(), resources.threads, resources.environment()));
+    out.status(&format!(
+        "Resources: {}, {} threads ({})",
+        resources.memory_human(),
+        resources.threads,
+        resources.environment()
+    ));
 
     let resolved = resolve_tissue(&engine, &config.tissue_dir, &config.tissue_name)?;
-    out.status(&format!("Tissue '{}' -> {} subtissues", config.tissue_name, resolved.len()));
+    out.status(&format!(
+        "Tissue '{}' -> {} subtissues",
+        config.tissue_name,
+        resolved.len()
+    ));
 
-    std::fs::create_dir_all(&config.output)
-        .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", config.output.display())))?;
+    std::fs::create_dir_all(&config.output).map_err(|e| {
+        FavorError::Resource(format!("Cannot create '{}': {e}", config.output.display()))
+    })?;
 
-    let tables_written = run_enrichment(&annotated, &tissue_db, &resolved, &engine, &config.output, out)?;
-    write_meta(&tables_written, &resolved, config, annotated.variant_count() as i64, out);
-    report_result(&tables_written, config, annotated.variant_count() as i64, out);
+    let tables_written = run_enrichment(
+        &annotated,
+        &tissue_db,
+        &resolved,
+        &engine,
+        &config.output,
+        out,
+    )?;
+    write_meta(
+        &tables_written,
+        &resolved,
+        config,
+        annotated.variant_count() as i64,
+        out,
+    );
+    report_result(
+        &tables_written,
+        config,
+        annotated.variant_count() as i64,
+        out,
+    );
     Ok(())
 }
 
@@ -134,12 +168,13 @@ fn resolve_tissue(
     ))?;
 
     if resolved.is_empty() {
-        let groups = engine.query_strings(
-            "SELECT DISTINCT tissue_group FROM _tissue_vocab ORDER BY tissue_group"
-        ).unwrap_or_default();
+        let groups = engine
+            .query_strings("SELECT DISTINCT tissue_group FROM _tissue_vocab ORDER BY tissue_group")
+            .unwrap_or_default();
         return Err(FavorError::Input(format!(
             "Unknown tissue '{}'. Available groups: {}",
-            tissue_query, groups.join(", ")
+            tissue_query,
+            groups.join(", ")
         )));
     }
 
@@ -158,7 +193,8 @@ fn run_enrichment(
     output_dir: &std::path::Path,
     out: &dyn Output,
 ) -> Result<Vec<(String, i64)>, FavorError> {
-    let tissue_filter: String = resolved_tissues.iter()
+    let tissue_filter: String = resolved_tissues
+        .iter()
         .map(|t| format!("'{}'", t.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(", ");
@@ -170,7 +206,10 @@ fn run_enrichment(
         "COPY (SELECT * FROM _input) TO '{}' STORED AS PARQUET OPTIONS (compression 'zstd(4)')",
         annotated_out.display(),
     ))?;
-    out.status(&format!("  annotated.parquet ({} variants)", annotated.variant_count()));
+    out.status(&format!(
+        "  annotated.parquet ({} variants)",
+        annotated.variant_count()
+    ));
 
     engine.execute("CREATE TABLE _input_vids AS SELECT DISTINCT vid FROM _input")?;
 
@@ -179,15 +218,20 @@ fn run_enrichment(
     for &table in tissue_db.available_tables() {
         let table_path = tissue_db.table_path(table);
         let table_name = format!("_enrich_{}", table.display_name());
-        if engine.register_parquet_dir(&table_name, &table_path).is_err() {
+        if engine
+            .register_parquet_dir(&table_name, &table_path)
+            .is_err()
+        {
             continue;
         }
 
         let out_path = output_dir.join(format!("{}.parquet", table.display_name()));
 
         let where_clause = if table.has_tissue_filter() {
-            format!("WHERE t.vid IN (SELECT vid FROM _input_vids) \
-                     AND t.tissue_name IN ({tissue_filter})")
+            format!(
+                "WHERE t.vid IN (SELECT vid FROM _input_vids) \
+                     AND t.tissue_name IN ({tissue_filter})"
+            )
         } else {
             "WHERE t.vid IN (SELECT vid FROM _input_vids)".to_string()
         };
@@ -216,7 +260,11 @@ fn run_enrichment(
         if row_count == 0 {
             let _ = std::fs::remove_file(&out_path);
         } else {
-            out.status(&format!("  {}.parquet ({} rows)", table.display_name(), row_count));
+            out.status(&format!(
+                "  {}.parquet ({} rows)",
+                table.display_name(),
+                row_count
+            ));
             tables_written.push((table.display_name().to_string(), row_count));
         }
     }
@@ -266,7 +314,8 @@ fn report_result(
     } else {
         out.success(&format!(
             "Enriched -> {} ({} tables)",
-            config.output.display(), tables_written.len(),
+            config.output.display(),
+            tables_written.len(),
         ));
     }
 

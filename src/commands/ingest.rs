@@ -5,33 +5,40 @@ use serde_json::json;
 use crate::cli::GenomeBuild;
 use crate::commands::{self, IngestConfig};
 use crate::config::Config;
+use crate::data::{VariantSetKind, VariantSetWriter};
 use crate::engine::DfEngine;
 use crate::error::FavorError;
-use crate::ingest::{self, BuildGuess, InputFormat};
 use crate::ingest::format::FormatRegistry;
+use crate::ingest::{self, BuildGuess, InputFormat};
 use crate::output::Output;
 use crate::resource::Resources;
-use crate::data::{VariantSetKind, VariantSetWriter};
 
 /// Resolve inputs: expand directories to their VCF/parquet contents, validate all exist.
 fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, FavorError> {
     let mut resolved = Vec::new();
     for p in raw {
         if !p.exists() {
-            return Err(FavorError::Input(format!("File not found: {}", p.display())));
+            return Err(FavorError::Input(format!(
+                "File not found: {}",
+                p.display()
+            )));
         }
         if p.is_dir() {
             let mut found = Vec::new();
             for entry in std::fs::read_dir(&p)
                 .map_err(|e| FavorError::Input(format!("Cannot read dir '{}': {e}", p.display())))?
             {
-                let entry = entry
-                    .map_err(|e| FavorError::Input(format!("Dir entry error: {e}")))?;
+                let entry =
+                    entry.map_err(|e| FavorError::Input(format!("Dir entry error: {e}")))?;
                 let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.ends_with(".vcf.gz") || name.ends_with(".vcf.bgz")
-                    || name.ends_with(".vcf") || name.ends_with(".bcf")
-                    || name.ends_with(".tsv") || name.ends_with(".tsv.gz")
-                    || name.ends_with(".csv") || name.ends_with(".csv.gz")
+                if name.ends_with(".vcf.gz")
+                    || name.ends_with(".vcf.bgz")
+                    || name.ends_with(".vcf")
+                    || name.ends_with(".bcf")
+                    || name.ends_with(".tsv")
+                    || name.ends_with(".tsv.gz")
+                    || name.ends_with(".csv")
+                    || name.ends_with(".csv.gz")
                     || name.ends_with(".parquet")
                 {
                     found.push(entry.path());
@@ -69,13 +76,20 @@ pub fn handle(
     let first = &inputs[0];
     let output_path = output.unwrap_or_else(|| {
         let stem = first.file_stem().unwrap_or_default().to_string_lossy();
-        let stem = stem.strip_suffix(".vcf").or_else(|| stem.strip_suffix(".tsv"))
+        let stem = stem
+            .strip_suffix(".vcf")
+            .or_else(|| stem.strip_suffix(".tsv"))
             .or_else(|| stem.strip_suffix(".csv"))
             .unwrap_or(&stem);
-        let stem = stem.split("_b0_").next()
+        let stem = stem
+            .split("_b0_")
+            .next()
             .or_else(|| stem.split("_b0.").next())
             .unwrap_or(stem);
-        first.parent().unwrap_or(first).join(format!("{stem}.ingested"))
+        first
+            .parent()
+            .unwrap_or(first)
+            .join(format!("{stem}.ingested"))
     });
 
     let config = IngestConfig {
@@ -111,7 +125,11 @@ fn run_ingest_dry(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorEr
     apply_build_override(&mut analysis, config, first)?;
     report_analysis(&analysis, &config.inputs, out);
 
-    let file_list: Vec<String> = config.inputs.iter().map(|p| p.to_string_lossy().into()).collect();
+    let file_list: Vec<String> = config
+        .inputs
+        .iter()
+        .map(|p| p.to_string_lossy().into())
+        .collect();
     let plan = commands::DryRunPlan {
         command: "ingest".into(),
         inputs: json!({
@@ -160,7 +178,9 @@ fn validate_all_same_format(
     inputs: &[PathBuf],
     analysis: &ingest::Analysis,
 ) -> Result<(), FavorError> {
-    if inputs.len() <= 1 { return Ok(()); }
+    if inputs.len() <= 1 {
+        return Ok(());
+    }
     let registry = FormatRegistry::new();
     let first = &inputs[0];
     for p in &inputs[1..] {
@@ -186,38 +206,56 @@ fn ingest_vcf(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorError>
         let analysis = ingest::analyze(first)?;
         let script = ingest::sql::generate_script(&analysis, first, &config.output);
         let script_path = config.output.with_extension("ingest.sql");
-        std::fs::write(&script_path, &script)
-            .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", script_path.display())))?;
+        std::fs::write(&script_path, &script).map_err(|e| {
+            FavorError::Resource(format!("Cannot write '{}': {e}", script_path.display()))
+        })?;
         out.status(&format!("VCF hint script: {}", script_path.display()));
         return Ok(());
     }
 
     let resources = Resources::detect_configured();
-    out.status(&format!("Ingesting {} VCF file(s) ({}, {} threads)",
-        config.inputs.len(), resources.memory_human(), resources.threads));
+    out.status(&format!(
+        "Ingesting {} VCF file(s) ({}, {} threads)",
+        config.inputs.len(),
+        resources.memory_human(),
+        resources.threads
+    ));
 
     let source_str = if config.inputs.len() == 1 {
         first.display().to_string()
     } else {
         format!("{} files", config.inputs.len())
     };
-    let mut vs_writer = VariantSetWriter::new(
-        &config.output, ingest::JoinKey::ChromPosRefAlt, &source_str,
-    )?;
+    let mut vs_writer =
+        VariantSetWriter::new(&config.output, ingest::JoinKey::ChromPosRefAlt, &source_str)?;
     vs_writer.set_kind(VariantSetKind::Ingested);
 
     let result = ingest::vcf::ingest_vcfs(
-        &config.inputs, &mut vs_writer, resources.memory_bytes, resources.threads, out,
+        &config.inputs,
+        &mut vs_writer,
+        resources.memory_bytes,
+        resources.threads,
+        out,
     )?;
     let vs = vs_writer.finish()?;
 
-    out.success(&format!("Ingested {} variants from {} file(s) -> {}",
-        result.variant_count, config.inputs.len(), vs.root().display()));
+    out.success(&format!(
+        "Ingested {} variants from {} file(s) -> {}",
+        result.variant_count,
+        config.inputs.len(),
+        vs.root().display()
+    ));
     if result.filtered_contigs > 0 {
-        out.status(&format!("  {} records on non-standard contigs filtered", result.filtered_contigs));
+        out.status(&format!(
+            "  {} records on non-standard contigs filtered",
+            result.filtered_contigs
+        ));
     }
     if result.multiallelic_split > 0 {
-        out.status(&format!("  {} multi-allelic sites split to biallelic", result.multiallelic_split));
+        out.status(&format!(
+            "  {} multi-allelic sites split to biallelic",
+            result.multiallelic_split
+        ));
     }
 
     out.result_json(&json!({
@@ -243,8 +281,9 @@ fn emit_sql_script(
     let first = &config.inputs[0];
     let script = ingest::sql::generate_script(analysis, first, &config.output);
     let script_path = config.output.with_extension("ingest.sql");
-    std::fs::write(&script_path, &script)
-        .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", script_path.display())))?;
+    std::fs::write(&script_path, &script).map_err(|e| {
+        FavorError::Resource(format!("Cannot write '{}': {e}", script_path.display()))
+    })?;
 
     if analysis.needs_intervention() {
         out.warn("Cannot auto-ingest -- ambiguities detected. Edit the script, then re-run:");
@@ -290,7 +329,8 @@ fn ingest_tabular(
     engine.execute(&copy_sql)?;
 
     let mut vs_writer = VariantSetWriter::new(
-        &config.output, analysis.join_key,
+        &config.output,
+        analysis.join_key,
         &first.display().to_string(),
     )?;
     vs_writer.set_kind(VariantSetKind::Ingested);
@@ -390,16 +430,16 @@ fn apply_build_override(
     Ok(())
 }
 
-fn report_analysis(
-    analysis: &ingest::Analysis,
-    inputs: &[PathBuf],
-    out: &dyn Output,
-) {
+fn report_analysis(analysis: &ingest::Analysis, inputs: &[PathBuf], out: &dyn Output) {
     let first = &inputs[0];
     if inputs.len() == 1 {
         out.status(&format!("Analyzing {}...", first.display()));
     } else {
-        out.status(&format!("Analyzing {} files (first: {})...", inputs.len(), first.file_name().unwrap_or_default().to_string_lossy()));
+        out.status(&format!(
+            "Analyzing {} files (first: {})...",
+            inputs.len(),
+            first.file_name().unwrap_or_default().to_string_lossy()
+        ));
     }
 
     out.status(&format!("  Format: {:?}", analysis.format));
@@ -407,7 +447,10 @@ fn report_analysis(
 
     for mapping in &analysis.columns {
         if mapping.canonical != mapping.input_name.to_lowercase() {
-            out.status(&format!("  {} -> {}", mapping.input_name, mapping.canonical));
+            out.status(&format!(
+                "  {} -> {}",
+                mapping.input_name, mapping.canonical
+            ));
         }
     }
     for amb in &analysis.ambiguous {
@@ -422,7 +465,9 @@ fn report_analysis(
 
     match analysis.coord_base {
         ingest::CoordBase::OneBased => out.status("  Coordinates: 1-based"),
-        ingest::CoordBase::ZeroBased => out.warn("  Coordinates: 0-based (will convert to 1-based)"),
+        ingest::CoordBase::ZeroBased => {
+            out.warn("  Coordinates: 0-based (will convert to 1-based)")
+        }
         ingest::CoordBase::Unknown => {}
     }
 }

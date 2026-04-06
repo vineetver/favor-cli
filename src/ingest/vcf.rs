@@ -19,14 +19,17 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
+use crate::data::VariantSetWriter;
 use crate::error::FavorError;
 use crate::output::Output;
-use crate::data::VariantSetWriter;
 
 /// Open a VCF (plain or BGZF-compressed) for buffered reading.
 /// For BGZF files, `threads` decompression workers run in parallel.
 pub fn open_vcf(path: &Path, threads: usize) -> Result<Box<dyn BufRead + Send>, FavorError> {
-    let is_bgzf = path.extension().map(|e| e == "gz" || e == "bgz").unwrap_or(false);
+    let is_bgzf = path
+        .extension()
+        .map(|e| e == "gz" || e == "bgz")
+        .unwrap_or(false);
     let file = File::open(path)
         .map_err(|e| FavorError::Input(format!("Cannot open '{}': {e}", path.display())))?;
 
@@ -67,8 +70,7 @@ fn vcf_schema() -> Schema {
     ])
 }
 
-/// Columnar batch builder — SoA layout (Carmack-approved).
-/// Each field is a contiguous array, not a Vec of structs.
+/// Columnar batch builder with one contiguous array per field.
 struct BatchBuilder {
     chromosome: StringBuilder,
     position: Int32Builder,
@@ -146,7 +148,8 @@ impl BatchBuilder {
                 Arc::new(self.qual.finish()),
                 Arc::new(self.filter.finish()),
             ],
-        ).map_err(|e| FavorError::Analysis(format!("Arrow batch error: {e}")))?;
+        )
+        .map_err(|e| FavorError::Analysis(format!("Arrow batch error: {e}")))?;
 
         self.count = 0;
         Ok(batch)
@@ -162,12 +165,28 @@ pub fn normalize_chrom(raw: &str) -> Option<&'static str> {
         raw
     };
     match stripped {
-        "1" => Some("1"), "2" => Some("2"), "3" => Some("3"), "4" => Some("4"),
-        "5" => Some("5"), "6" => Some("6"), "7" => Some("7"), "8" => Some("8"),
-        "9" => Some("9"), "10" => Some("10"), "11" => Some("11"), "12" => Some("12"),
-        "13" => Some("13"), "14" => Some("14"), "15" => Some("15"), "16" => Some("16"),
-        "17" => Some("17"), "18" => Some("18"), "19" => Some("19"), "20" => Some("20"),
-        "21" => Some("21"), "22" => Some("22"),
+        "1" => Some("1"),
+        "2" => Some("2"),
+        "3" => Some("3"),
+        "4" => Some("4"),
+        "5" => Some("5"),
+        "6" => Some("6"),
+        "7" => Some("7"),
+        "8" => Some("8"),
+        "9" => Some("9"),
+        "10" => Some("10"),
+        "11" => Some("11"),
+        "12" => Some("12"),
+        "13" => Some("13"),
+        "14" => Some("14"),
+        "15" => Some("15"),
+        "16" => Some("16"),
+        "17" => Some("17"),
+        "18" => Some("18"),
+        "19" => Some("19"),
+        "20" => Some("20"),
+        "21" => Some("21"),
+        "22" => Some("22"),
         "X" | "x" => Some("X"),
         "Y" | "y" => Some("Y"),
         "M" | "MT" | "m" | "mt" => Some("MT"),
@@ -233,9 +252,7 @@ pub fn parsimony_normalize(ref_allele: &str, alt_allele: &str, pos: i32) -> (Str
     let a_after_suffix = alen - suffix_trim;
     let max_prefix = (r_after_suffix.min(a_after_suffix)) - 1;
     let mut prefix_trim = 0;
-    while prefix_trim < max_prefix
-        && r_bytes[prefix_trim] == a_bytes[prefix_trim]
-    {
+    while prefix_trim < max_prefix && r_bytes[prefix_trim] == a_bytes[prefix_trim] {
         prefix_trim += 1;
     }
 
@@ -277,8 +294,11 @@ pub fn ingest_vcfs(
     output: &dyn Output,
 ) -> Result<VcfIngestResult, FavorError> {
     let batch_size = derive_batch_size(memory_budget);
-    output.status(&format!("  Batch size: {} variants/chrom ({:.1}G memory)",
-        batch_size, memory_budget as f64 / (1024.0 * 1024.0 * 1024.0)));
+    output.status(&format!(
+        "  Batch size: {} variants/chrom ({:.1}G memory)",
+        batch_size,
+        memory_budget as f64 / (1024.0 * 1024.0 * 1024.0)
+    ));
 
     let schema = Arc::new(vcf_schema());
     let props = WriterProperties::builder()
@@ -293,28 +313,39 @@ pub fn ingest_vcfs(
 
     for (file_idx, input_path) in input_paths.iter().enumerate() {
         if input_paths.len() > 1 {
-            output.status(&format!("  File {}/{}: {}",
-                file_idx + 1, input_paths.len(),
-                input_path.file_name().unwrap_or_default().to_string_lossy()));
+            output.status(&format!(
+                "  File {}/{}: {}",
+                file_idx + 1,
+                input_paths.len(),
+                input_path.file_name().unwrap_or_default().to_string_lossy()
+            ));
         }
 
         let reader = open_vcf(input_path, threads)?;
         let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
-        let header = vcf_reader.read_header()
-            .map_err(|e| FavorError::Input(format!(
-                "Invalid VCF header in {}: {e}", input_path.display()
-            )))?;
+        let header = vcf_reader.read_header().map_err(|e| {
+            FavorError::Input(format!(
+                "Invalid VCF header in {}: {e}",
+                input_path.display()
+            ))
+        })?;
 
         for result in vcf_reader.records() {
-            let record = result
-                .map_err(|e| FavorError::Analysis(format!(
-                    "VCF parse error in {}: {e}", input_path.display()
-                )))?;
+            let record = result.map_err(|e| {
+                FavorError::Analysis(format!("VCF parse error in {}: {e}", input_path.display()))
+            })?;
 
             process_record(
-                &record, &header,
-                &mut writers, vs_writer, &schema, &props, batch_size,
-                &mut variant_count, &mut filtered_contigs, &mut multiallelic_split,
+                &record,
+                &header,
+                &mut writers,
+                vs_writer,
+                &schema,
+                &props,
+                batch_size,
+                &mut variant_count,
+                &mut filtered_contigs,
+                &mut multiallelic_split,
                 output,
             )?;
         }
@@ -325,10 +356,12 @@ pub fn ingest_vcfs(
     for (chrom, mut cw) in writers {
         if cw.batch.len() > 0 {
             let rb = cw.batch.finish()?;
-            cw.writer.write(&rb)
+            cw.writer
+                .write(&rb)
                 .map_err(|e| FavorError::Resource(format!("Parquet write error: {e}")))?;
         }
-        cw.writer.close()
+        cw.writer
+            .close()
             .map_err(|e| FavorError::Resource(format!("Parquet close error: {e}")))?;
         let path = vs_writer.chrom_path(chrom)?;
         let size = std::fs::metadata(&path).map_or(0, |m| m.len());
@@ -354,15 +387,19 @@ fn get_or_create_writer<'a>(
     if !writers.contains_key(chrom) {
         output.status(&format!("  chr{chrom}..."));
         let path = vs_writer.chrom_path(chrom)?;
-        let f = File::create(&path)
-            .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", path.display())))?;
+        let f = File::create(&path).map_err(|e| {
+            FavorError::Resource(format!("Cannot create '{}': {e}", path.display()))
+        })?;
         let w = ArrowWriter::try_new(f, schema.clone(), Some(props.clone()))
             .map_err(|e| FavorError::Resource(format!("Parquet writer init: {e}")))?;
-        writers.insert(chrom, ChromWriter {
-            batch: BatchBuilder::new(batch_size),
-            writer: w,
-            count: 0,
-        });
+        writers.insert(
+            chrom,
+            ChromWriter {
+                batch: BatchBuilder::new(batch_size),
+                writer: w,
+                count: 0,
+            },
+        );
     }
     // Just inserted above if missing, so key is guaranteed present
     Ok(writers.get_mut(chrom).unwrap())
@@ -386,7 +423,10 @@ fn process_record(
     let raw_chrom = record.reference_sequence_name();
     let chrom = match normalize_chrom(raw_chrom) {
         Some(c) => c,
-        None => { *filtered_contigs += 1; return Ok(()); }
+        None => {
+            *filtered_contigs += 1;
+            return Ok(());
+        }
     };
 
     let pos = match record.variant_start() {
@@ -428,7 +468,9 @@ fn process_record(
     for alt in &alts {
         let alt_upper = alt.trim().to_uppercase();
         // Skip missing, spanning deletion, and symbolic alleles (<DEL>, <INS>, etc.)
-        if alt_upper == "*" || alt_upper == "." || alt_upper.is_empty()
+        if alt_upper == "*"
+            || alt_upper == "."
+            || alt_upper.is_empty()
             || alt_upper.starts_with('<')
         {
             continue;
@@ -436,7 +478,8 @@ fn process_record(
 
         let (norm_ref, norm_alt, norm_pos) = parsimony_normalize(&ref_allele, &alt_upper, pos);
 
-        let cw = get_or_create_writer(chrom, writers, vs_writer, schema, props, batch_size, output)?;
+        let cw =
+            get_or_create_writer(chrom, writers, vs_writer, schema, props, batch_size, output)?;
 
         cw.batch.push(
             chrom,
@@ -452,7 +495,8 @@ fn process_record(
 
         if cw.batch.is_full() {
             let rb = cw.batch.finish()?;
-            cw.writer.write(&rb)
+            cw.writer
+                .write(&rb)
                 .map_err(|e| FavorError::Resource(format!("Parquet write error: {e}")))?;
 
             if *variant_count % 1_000_000 == 0 {
@@ -469,19 +513,28 @@ mod tests {
 
     #[test]
     fn snv() {
-        assert_eq!(parsimony_normalize("G", "A", 100), ("G".into(), "A".into(), 100));
+        assert_eq!(
+            parsimony_normalize("G", "A", 100),
+            ("G".into(), "A".into(), 100)
+        );
     }
 
     #[test]
     fn insertion_with_anchor() {
         // VCF: REF=A, ALT=ACGT — insertion of CGT after pos 100
-        assert_eq!(parsimony_normalize("A", "ACGT", 100), ("A".into(), "ACGT".into(), 100));
+        assert_eq!(
+            parsimony_normalize("A", "ACGT", 100),
+            ("A".into(), "ACGT".into(), 100)
+        );
     }
 
     #[test]
     fn deletion_with_anchor() {
         // VCF: REF=ACGT, ALT=A — deletion of CGT at pos 101-103
-        assert_eq!(parsimony_normalize("ACGT", "A", 100), ("ACGT".into(), "A".into(), 100));
+        assert_eq!(
+            parsimony_normalize("ACGT", "A", 100),
+            ("ACGT".into(), "A".into(), 100)
+        );
     }
 
     #[test]
@@ -491,29 +544,44 @@ mod tests {
         // Right-trim G: ACGT, A (suffix=1, but A is len 1 so max_suffix=0)
         // Actually: rlen=5, alen=2, max_suffix=min(5,2)-1=1. G==G → suffix_trim=1.
         // After: ACGT (4 bytes), A (1 byte). max_prefix=min(4,1)-1=0. No prefix trim.
-        assert_eq!(parsimony_normalize("ACGTG", "AG", 100), ("ACGT".into(), "A".into(), 100));
+        assert_eq!(
+            parsimony_normalize("ACGTG", "AG", 100),
+            ("ACGT".into(), "A".into(), 100)
+        );
     }
 
     #[test]
     fn redundant_prefix_and_suffix() {
         // REF=AACG, ALT=AATG — common prefix AA, common suffix G
         // Right-trim: AAC, AAT (suffix=1). Left-trim: C, T (prefix=2, pos+2)
-        assert_eq!(parsimony_normalize("AACG", "AATG", 100), ("C".into(), "T".into(), 102));
+        assert_eq!(
+            parsimony_normalize("AACG", "AATG", 100),
+            ("C".into(), "T".into(), 102)
+        );
     }
 
     #[test]
     fn complex_mnv_no_trim() {
-        assert_eq!(parsimony_normalize("ACG", "TCA", 100), ("ACG".into(), "TCA".into(), 100));
+        assert_eq!(
+            parsimony_normalize("ACG", "TCA", 100),
+            ("ACG".into(), "TCA".into(), 100)
+        );
     }
 
     #[test]
     fn identical_alleles() {
-        assert_eq!(parsimony_normalize("A", "A", 100), ("A".into(), "A".into(), 100));
+        assert_eq!(
+            parsimony_normalize("A", "A", 100),
+            ("A".into(), "A".into(), 100)
+        );
     }
 
     #[test]
     fn single_base_insertion() {
         // REF=T, ALT=TC
-        assert_eq!(parsimony_normalize("T", "TC", 100), ("T".into(), "TC".into(), 100));
+        assert_eq!(
+            parsimony_normalize("T", "TC", 100),
+            ("T".into(), "TC".into(), 100)
+        );
     }
 }

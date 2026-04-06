@@ -7,10 +7,6 @@ use crate::data::AnnotationDb;
 use crate::error::FavorError;
 use crate::output::Output;
 
-// ---------------------------------------------------------------------------
-// Schema (was commands/schema_cmd.rs)
-// ---------------------------------------------------------------------------
-
 pub fn schema(table: Option<String>, out: &dyn Output) -> Result<(), FavorError> {
     let config = Config::load_configured()?;
 
@@ -42,7 +38,12 @@ fn list_tables(config: &Config, out: &dyn Output) -> Result<(), FavorError> {
             "status": status,
             "size": tier.size_human(),
         });
-        out.status(&format!("{}: {} ({})", tier.as_str(), status, tier.size_human()));
+        out.status(&format!(
+            "{}: {} ({})",
+            tier.as_str(),
+            status,
+            tier.size_human()
+        ));
         tables.push(entry);
     }
 
@@ -59,26 +60,26 @@ fn list_tables(config: &Config, out: &dyn Output) -> Result<(), FavorError> {
     }
 
     if tissue_names.is_empty() {
-        out.status("No tissue tables installed. Run `favor data pull --pack eqtl` to add tissue data.");
+        out.status(
+            "No tissue tables installed. Run `favor data pull --pack eqtl` to add tissue data.",
+        );
     }
 
     out.result_json(&json!({ "tables": tables }));
     Ok(())
 }
 
-fn describe_tier(
-    config: &Config,
-    tier: Tier,
-    out: &dyn Output,
-) -> Result<(), FavorError> {
+fn describe_tier(config: &Config, tier: Tier, out: &dyn Output) -> Result<(), FavorError> {
     let ann_db = AnnotationDb::open_tier(tier, &config.root_dir())?;
     let sample = match ann_db.chrom_parquet("1") {
         Some(p) => p,
-        None => return Err(FavorError::DataMissing(format!(
-            "{} tier chromosome=1 not found. Run `favor data pull{}` first.",
-            tier,
-            if tier == Tier::Full { " --full" } else { "" },
-        ))),
+        None => {
+            return Err(FavorError::DataMissing(format!(
+                "{} tier chromosome=1 not found. Run `favor data pull{}` first.",
+                tier,
+                if tier == Tier::Full { " --full" } else { "" },
+            )))
+        }
     };
 
     let columns = describe_parquet(&sample)?;
@@ -97,11 +98,7 @@ fn describe_tier(
     Ok(())
 }
 
-fn describe_tissue_table(
-    config: &Config,
-    name: &str,
-    out: &dyn Output,
-) -> Result<(), FavorError> {
+fn describe_tissue_table(config: &Config, name: &str, out: &dyn Output) -> Result<(), FavorError> {
     let table_dir = config.tissue_dir().join(name);
     if !table_dir.is_dir() {
         return Err(FavorError::DataMissing(format!(
@@ -138,19 +135,24 @@ fn describe_parquet(path: &std::path::Path) -> Result<Vec<ColumnInfo>, FavorErro
     let reader = parquet::file::reader::SerializedFileReader::new(file)
         .map_err(|e| FavorError::Resource(format!("Bad parquet {}: {e}", path.display())))?;
     let schema = reader.metadata().file_metadata().schema_descr();
-    Ok(schema.columns().iter().map(|c| {
-        ColumnInfo {
+    Ok(schema
+        .columns()
+        .iter()
+        .map(|c| ColumnInfo {
             name: c.name().to_string(),
             col_type: format!("{:?}", c.physical_type()),
-        }
-    }).collect())
+        })
+        .collect())
 }
 
 fn find_first_parquet(table_dir: &std::path::Path) -> Result<std::path::PathBuf, FavorError> {
     let entries: Vec<_> = std::fs::read_dir(table_dir)
-        .map_err(|e| FavorError::Resource(format!(
-            "Cannot read directory '{}': {e}", table_dir.display()
-        )))?
+        .map_err(|e| {
+            FavorError::Resource(format!(
+                "Cannot read directory '{}': {e}",
+                table_dir.display()
+            ))
+        })?
         .filter_map(|e| e.ok())
         .filter(|e| {
             let name = e.file_name();
@@ -171,10 +173,6 @@ fn find_first_parquet(table_dir: &std::path::Path) -> Result<std::path::PathBuf,
         table_dir.display(),
     )))
 }
-
-// ---------------------------------------------------------------------------
-// Manifest (was commands/manifest.rs)
-// ---------------------------------------------------------------------------
 
 pub fn manifest(output: &dyn Output) -> Result<(), FavorError> {
     let config = Config::load_configured()?;

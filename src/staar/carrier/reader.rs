@@ -13,13 +13,9 @@ use std::path::Path;
 
 use crate::error::FavorError;
 use crate::types::{
-    AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation,
-    RegionType, RegulatoryFlags,
+    AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation, RegionType,
+    RegulatoryFlags,
 };
-
-// ═══════════════════════════════════════════════════════════════════════
-// Carrier types — format-agnostic, consumed by sparse_score.rs
-// ═══════════════════════════════════════════════════════════════════════
 
 /// A single carrier entry: (sample_index, dosage).
 #[derive(Clone, Copy, Debug)]
@@ -53,21 +49,12 @@ impl CarrierList {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// WeightVector — named, composable annotation weight channel
-// ═══════════════════════════════════════════════════════════════════════
-
 /// A named weight vector aligned to variant_vcf.
-/// First-class citizen: can be selected, combined, and composed at runtime.
 #[allow(dead_code)] // fields accessed via VariantIndex weight methods
 pub struct WeightVector {
     pub name: &'static str,
     pub values: Vec<f64>,
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// VariantIndex — aligned metadata + mask resolution
-// ═══════════════════════════════════════════════════════════════════════
 
 /// One variant's metadata as loaded from variants.parquet.
 #[derive(Clone, Debug)]
@@ -147,11 +134,17 @@ impl VariantIndex {
 
         // Build named weight channels from entries
         let weight_names: [&str; 11] = [
-            "cadd_phred", "linsight", "fathmm_xf",
-            "apc_epigenetics_active", "apc_epigenetics_repressed",
-            "apc_epigenetics_transcription", "apc_conservation",
-            "apc_protein_function", "apc_local_nucleotide_diversity",
-            "apc_mutation_density", "apc_transcription_factor",
+            "cadd_phred",
+            "linsight",
+            "fathmm_xf",
+            "apc_epigenetics_active",
+            "apc_epigenetics_repressed",
+            "apc_epigenetics_transcription",
+            "apc_conservation",
+            "apc_protein_function",
+            "apc_local_nucleotide_diversity",
+            "apc_mutation_density",
+            "apc_transcription_factor",
         ];
         let weight_channels: Vec<WeightVector> = (0..11)
             .map(|ch| WeightVector {
@@ -160,14 +153,22 @@ impl VariantIndex {
             })
             .collect();
 
-        Ok(Self { entries, gene_variants, vid_to_vcf, weight_channels })
+        Ok(Self {
+            entries,
+            gene_variants,
+            vid_to_vcf,
+            weight_channels,
+        })
     }
 
     // ── Mask resolution (compiled on demand) ─────────────────────────────
 
     /// Gene → variant_vcf set (sorted). Empty slice if gene not found.
     pub fn gene_variant_vcfs(&self, gene: &str) -> &[u32] {
-        self.gene_variants.get(gene).map(|v| v.as_slice()).unwrap_or(&[])
+        self.gene_variants
+            .get(gene)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// All gene names.
@@ -197,8 +198,7 @@ impl VariantIndex {
             .enumerate()
             .filter(|(_, &v)| {
                 let e = &self.entries[v as usize];
-                e.maf < maf_cutoff
-                    && predicate(&e.to_annotated_variant_with_gene(chrom, gene_name))
+                e.maf < maf_cutoff && predicate(&e.to_annotated_variant_with_gene(chrom, gene_name))
             })
             .map(|(i, _)| i)
             .collect()
@@ -268,24 +268,86 @@ fn load_variant_entries(chrom_dir: &Path) -> Result<Vec<VariantIndexEntry>, Favo
         //         region_type(6), consequence(7), cadd(8), revel(9),
         //         cage_prom(10), cage_enh(11), ccre_prom(12), ccre_enh(13),
         //         w_cadd(14)..w_apc_tf(24)
-        let _vvcf_arr = batch.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
-        let pos_arr = batch.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
-        let ref_arr = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
-        let alt_arr = batch.column(3).as_any().downcast_ref::<StringArray>().unwrap();
-        let vid_arr = batch.column(4).as_any().downcast_ref::<StringArray>().unwrap();
-        let maf_arr = batch.column(5).as_any().downcast_ref::<Float64Array>().unwrap();
-        let rt_arr = batch.column(6).as_any().downcast_ref::<StringArray>().unwrap();
-        let csq_arr = batch.column(7).as_any().downcast_ref::<StringArray>().unwrap();
-        let cadd_arr = batch.column(8).as_any().downcast_ref::<Float64Array>().unwrap();
-        let revel_arr = batch.column(9).as_any().downcast_ref::<Float64Array>().unwrap();
-        let cp_arr = batch.column(10).as_any().downcast_ref::<BooleanArray>().unwrap();
-        let ce_arr = batch.column(11).as_any().downcast_ref::<BooleanArray>().unwrap();
-        let crp_arr = batch.column(12).as_any().downcast_ref::<BooleanArray>().unwrap();
-        let cre_arr = batch.column(13).as_any().downcast_ref::<BooleanArray>().unwrap();
+        let _vvcf_arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        let pos_arr = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let ref_arr = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let alt_arr = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let vid_arr = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let maf_arr = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let rt_arr = batch
+            .column(6)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let csq_arr = batch
+            .column(7)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let cadd_arr = batch
+            .column(8)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let revel_arr = batch
+            .column(9)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let cp_arr = batch
+            .column(10)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        let ce_arr = batch
+            .column(11)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        let crp_arr = batch
+            .column(12)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        let cre_arr = batch
+            .column(13)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
 
         let mut w_arrs: Vec<&Float64Array> = Vec::with_capacity(11);
         for i in 0..11 {
-            w_arrs.push(batch.column(14 + i).as_any().downcast_ref::<Float64Array>().unwrap());
+            w_arrs.push(
+                batch
+                    .column(14 + i)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap(),
+            );
         }
 
         for i in 0..n {
@@ -334,8 +396,16 @@ fn load_membership(chrom_dir: &Path) -> Result<HashMap<String, Vec<u32>>, FavorE
 
     for batch_result in reader {
         let batch = batch_result.map_err(|e| FavorError::Resource(format!("Read: {e}")))?;
-        let vvcf_arr = batch.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
-        let gene_arr = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        let vvcf_arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        let gene_arr = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
 
         for i in 0..batch.num_rows() {
             let gene = gene_arr.value(i).to_string();
@@ -417,11 +487,17 @@ mod tests {
             .collect();
 
         let weight_names: [&str; 11] = [
-            "cadd_phred", "linsight", "fathmm_xf",
-            "apc_epigenetics_active", "apc_epigenetics_repressed",
-            "apc_epigenetics_transcription", "apc_conservation",
-            "apc_protein_function", "apc_local_nucleotide_diversity",
-            "apc_mutation_density", "apc_transcription_factor",
+            "cadd_phred",
+            "linsight",
+            "fathmm_xf",
+            "apc_epigenetics_active",
+            "apc_epigenetics_repressed",
+            "apc_epigenetics_transcription",
+            "apc_conservation",
+            "apc_protein_function",
+            "apc_local_nucleotide_diversity",
+            "apc_mutation_density",
+            "apc_transcription_factor",
         ];
         let weight_channels: Vec<WeightVector> = (0..11)
             .map(|ch| WeightVector {
@@ -430,7 +506,12 @@ mod tests {
             })
             .collect();
 
-        VariantIndex { entries, gene_variants, vid_to_vcf, weight_channels }
+        VariantIndex {
+            entries,
+            gene_variants,
+            vid_to_vcf,
+            weight_channels,
+        }
     }
 
     #[test]
@@ -456,7 +537,13 @@ mod tests {
         let vi = make_test_index();
         for (i, e) in vi.all_entries().iter().enumerate() {
             let resolved = vi.resolve_vid(&e.vid);
-            assert_eq!(resolved, Some(i as u32), "vid {} resolved to {:?}", e.vid, resolved);
+            assert_eq!(
+                resolved,
+                Some(i as u32),
+                "vid {} resolved to {:?}",
+                e.vid,
+                resolved
+            );
         }
         assert_eq!(vi.resolve_vid("nonexistent"), None);
     }
@@ -476,8 +563,11 @@ mod tests {
             let wv = vi.weight_channel(ch);
             assert_eq!(wv.values.len(), vi.len());
             for (i, &val) in wv.values.iter().enumerate() {
-                assert_eq!(val, vi.get(i as u32).weights.0[ch],
-                    "weight channel {ch} misaligned at variant_vcf {i}");
+                assert_eq!(
+                    val,
+                    vi.get(i as u32).weights.0[ch],
+                    "weight channel {ch} misaligned at variant_vcf {i}"
+                );
             }
         }
     }
@@ -560,8 +650,10 @@ mod tests {
         for gene in vi.gene_names() {
             let vcfs = vi.gene_variant_vcfs(gene);
             for i in 1..vcfs.len() {
-                assert!(vcfs[i] > vcfs[i - 1],
-                    "gene {gene} membership not sorted at index {i}");
+                assert!(
+                    vcfs[i] > vcfs[i - 1],
+                    "gene {gene} membership not sorted at index {i}"
+                );
             }
         }
     }
@@ -591,7 +683,10 @@ mod tests {
         let end = 250u32;
 
         // Path A: manual scan
-        let manual: Vec<u32> = vi.all_entries().iter().enumerate()
+        let manual: Vec<u32> = vi
+            .all_entries()
+            .iter()
+            .enumerate()
             .filter(|(_, e)| e.position >= start && e.position <= end)
             .map(|(i, _)| i as u32)
             .collect();
@@ -630,8 +725,11 @@ mod tests {
         for v in 0..vi.len() as u32 {
             let e = vi.get(v);
             let computed = crate::types::format_vid("22", e.position, &e.ref_allele, &e.alt_allele);
-            assert_eq!(&*e.vid, &*computed,
-                "variant_vcf {v}: stored vid '{}' != computed '{computed}'", e.vid);
+            assert_eq!(
+                &*e.vid, &*computed,
+                "variant_vcf {v}: stored vid '{}' != computed '{computed}'",
+                e.vid
+            );
         }
     }
 }

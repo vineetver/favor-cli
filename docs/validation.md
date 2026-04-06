@@ -2,7 +2,7 @@
 
 > [Back to README](../README.md)
 
-FAVOR CLI's STAAR implementation is validated against the official R packages from the [Li Lab](https://content.sph.harvard.edu/xlin/) (Harvard T.H. Chan School of Public Health).
+FAVOR CLI's STAAR implementation is validated against the official R packages from the [Lin Lab](https://content.sph.harvard.edu/xlin/) (Harvard T.H. Chan School of Public Health).
 
 | R Package | Version | Repository |
 |-----------|---------|------------|

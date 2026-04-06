@@ -1,12 +1,8 @@
-//! Ingest: auto-normalize variant inputs to canonical parquet.
-//!
-//! Two modes:
-//! - Happy path: `favor ingest <file>` — auto-detect, normalize, write parquet
-//! - Escape hatch: `favor ingest <file> --emit-sql` — generate editable SQL script
+//! Normalize variant inputs into canonical parquet.
 
-pub mod sql;
 pub mod detect;
 pub mod format;
+pub mod sql;
 pub mod vcf;
 
 use std::io::{BufRead, BufReader};
@@ -16,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::FavorError;
 
-/// Detected input format — sum type, no invalid variant possible.
+/// Detected input format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputFormat {
@@ -26,8 +22,7 @@ pub enum InputFormat {
 }
 
 /// Detected delimiter for tabular files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Delimiter {
     Tab,
     Comma,
@@ -64,7 +59,10 @@ pub enum BuildGuess {
     #[serde(rename = "hg38")]
     Hg38,
     #[serde(rename = "hg19")]
-    Hg19 { match_rate_hg38: f64, match_rate_hg19: f64 },
+    Hg19 {
+        match_rate_hg38: f64,
+        match_rate_hg19: f64,
+    },
     #[serde(rename = "unknown")]
     Unknown,
 }
@@ -93,7 +91,7 @@ pub struct Ambiguity {
     pub reason: &'static str,
 }
 
-/// What we learned from analyzing the input — query result, not mutable state (Cmd III).
+/// Summary of the analyzed input.
 #[derive(Debug, Serialize)]
 pub struct Analysis {
     pub format: InputFormat,
@@ -127,23 +125,33 @@ impl Analysis {
 
     /// Status string for machine output.
     pub fn status(&self) -> &'static str {
-        if self.needs_intervention() { "needs_edit" } else { "ok" }
+        if self.needs_intervention() {
+            "needs_edit"
+        } else {
+            "ok"
+        }
     }
 }
 
-/// Detect input format from file extension and first line.
-/// This is the boundary — after this, InputFormat is a branded type.
+/// Detect input format from the file extension and first line.
 pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), FavorError> {
-    let name = path.file_name()
-        .ok_or_else(|| FavorError::Input(format!(
-            "Path '{}' has no file name component.", path.display()
-        )))?
+    let name = path
+        .file_name()
+        .ok_or_else(|| {
+            FavorError::Input(format!(
+                "Path '{}' has no file name component.",
+                path.display()
+            ))
+        })?
         .to_string_lossy()
         .to_lowercase();
 
     // VCF: extension-only detection
-    if name.ends_with(".vcf") || name.ends_with(".vcf.gz")
-        || name.ends_with(".vcf.bgz") || name.ends_with(".bcf") {
+    if name.ends_with(".vcf")
+        || name.ends_with(".vcf.gz")
+        || name.ends_with(".vcf.bgz")
+        || name.ends_with(".bcf")
+    {
         return Ok((InputFormat::Vcf, None));
     }
 
@@ -153,9 +161,13 @@ pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), Fa
     }
 
     // Tabular: detect delimiter from first line
-    if name.ends_with(".tsv") || name.ends_with(".tsv.gz")
-        || name.ends_with(".csv") || name.ends_with(".csv.gz")
-        || name.ends_with(".txt") || name.ends_with(".txt.gz") {
+    if name.ends_with(".tsv")
+        || name.ends_with(".tsv.gz")
+        || name.ends_with(".csv")
+        || name.ends_with(".csv.gz")
+        || name.ends_with(".txt")
+        || name.ends_with(".txt.gz")
+    {
         let delim = sniff_delimiter(path)?;
         return Ok((InputFormat::Tabular, Some(delim)));
     }
@@ -186,7 +198,8 @@ pub(crate) fn sniff_delimiter(path: &Path) -> Result<Delimiter, FavorError> {
 
     let mut reader = BufReader::new(file);
     let mut first_line = String::new();
-    reader.read_line(&mut first_line)
+    reader
+        .read_line(&mut first_line)
         .map_err(|e| FavorError::Input(format!("Cannot read '{}': {e}", path.display())))?;
 
     // Skip VCF header lines
@@ -228,15 +241,27 @@ pub fn read_headers(path: &Path, delimiter: Delimiter) -> Result<Vec<String>, Fa
         let header_line = trimmed.strip_prefix('#').unwrap_or(trimmed);
 
         let cols: Vec<String> = match delimiter {
-            Delimiter::Tab => header_line.split('\t').map(|s| s.trim().to_string()).collect(),
-            Delimiter::Comma => header_line.split(',').map(|s| s.trim().to_string()).collect(),
-            Delimiter::Space => header_line.split_whitespace().map(|s| s.to_string()).collect(),
+            Delimiter::Tab => header_line
+                .split('\t')
+                .map(|s| s.trim().to_string())
+                .collect(),
+            Delimiter::Comma => header_line
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect(),
+            Delimiter::Space => header_line
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect(),
         };
 
         return Ok(cols);
     }
 
-    Err(FavorError::Input(format!("No header line found in '{}'", path.display())))
+    Err(FavorError::Input(format!(
+        "No header line found in '{}'",
+        path.display()
+    )))
 }
 
 /// Full analysis: detect format, map columns, detect join key.
@@ -248,13 +273,34 @@ pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
         InputFormat::Vcf => Ok(Analysis {
             format,
             delimiter: None,
-            raw_columns: vec!["CHROM".into(), "POS".into(), "ID".into(), "REF".into(), "ALT".into()],
+            raw_columns: vec![
+                "CHROM".into(),
+                "POS".into(),
+                "ID".into(),
+                "REF".into(),
+                "ALT".into(),
+            ],
             columns: vec![
-                ColumnMapping { input_name: "CHROM".into(), canonical: "chromosome" },
-                ColumnMapping { input_name: "POS".into(), canonical: "position" },
-                ColumnMapping { input_name: "REF".into(), canonical: "ref" },
-                ColumnMapping { input_name: "ALT".into(), canonical: "alt" },
-                ColumnMapping { input_name: "ID".into(), canonical: "rsid" },
+                ColumnMapping {
+                    input_name: "CHROM".into(),
+                    canonical: "chromosome",
+                },
+                ColumnMapping {
+                    input_name: "POS".into(),
+                    canonical: "position",
+                },
+                ColumnMapping {
+                    input_name: "REF".into(),
+                    canonical: "ref",
+                },
+                ColumnMapping {
+                    input_name: "ALT".into(),
+                    canonical: "alt",
+                },
+                ColumnMapping {
+                    input_name: "ID".into(),
+                    canonical: "rsid",
+                },
             ],
             ambiguous: vec![],
             unmapped: vec![],
@@ -296,7 +342,8 @@ pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
 
             // Extract key column names from the mapping
             let find_col = |canonical: &str| -> Option<String> {
-                mapped.iter()
+                mapped
+                    .iter()
                     .find(|m| m.canonical == canonical)
                     .map(|m| m.input_name.clone())
             };
@@ -308,26 +355,26 @@ pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
             let rsid_col = find_col("rsid");
 
             // Determine join key from what columns are available
-            let join_key = if chr_col.is_some() && pos_col.is_some()
-                && ref_col.is_some() && alt_col.is_some() {
-                JoinKey::ChromPosRefAlt
-            } else if rsid_col.is_some() {
-                JoinKey::Rsid
-            } else if chr_col.is_some() && pos_col.is_some() {
-                JoinKey::ChromPos
-            } else {
-                // Check if there's a composite variant_id column (chr:pos:ref:alt)
-                let has_variant_id = raw_columns.iter()
-                    .any(|c| {
+            let join_key =
+                if chr_col.is_some() && pos_col.is_some() && ref_col.is_some() && alt_col.is_some()
+                {
+                    JoinKey::ChromPosRefAlt
+                } else if rsid_col.is_some() {
+                    JoinKey::Rsid
+                } else if chr_col.is_some() && pos_col.is_some() {
+                    JoinKey::ChromPos
+                } else {
+                    // Check if there's a composite variant_id column (chr:pos:ref:alt)
+                    let has_variant_id = raw_columns.iter().any(|c| {
                         let lower = c.to_lowercase();
                         lower == "variant_id" || lower == "varid" || lower == "variant"
                     });
-                if has_variant_id {
-                    JoinKey::ChromPosRefAlt // will be parsed from composite ID
-                } else {
-                    JoinKey::Rsid // fallback — hopefully rsid exists
-                }
-            };
+                    if has_variant_id {
+                        JoinKey::ChromPosRefAlt // will be parsed from composite ID
+                    } else {
+                        JoinKey::Rsid // fallback — hopefully rsid exists
+                    }
+                };
 
             Ok(Analysis {
                 format,
@@ -365,7 +412,6 @@ static ALIASES: &[(&str, &str)] = &[
     ("chr_name", "chromosome"),
     ("chrom_id", "chromosome"),
     ("hg38chrc", "chromosome"),
-
     ("position", "position"),
     ("pos", "position"),
     ("bp", "position"),
@@ -376,14 +422,12 @@ static ALIASES: &[(&str, &str)] = &[
     ("start", "position"),
     ("chromstart", "position"),
     ("beg", "position"),
-
     ("ref", "ref"),
     ("reference", "ref"),
     ("ref_allele", "ref"),
     ("other_allele", "ref"),
     ("nea", "ref"),
     ("non_effect_allele", "ref"),
-
     ("alt", "alt"),
     ("alternate", "alt"),
     ("alt_allele", "alt"),
@@ -391,7 +435,6 @@ static ALIASES: &[(&str, &str)] = &[
     ("ea", "alt"),
     ("tested_allele", "alt"),
     ("risk_allele", "alt"),
-
     ("rsid", "rsid"),
     ("rsids", "rsid"),
     ("snp", "rsid"),
@@ -400,55 +443,45 @@ static ALIASES: &[(&str, &str)] = &[
     ("markername", "rsid"),
     ("rs", "rsid"),
     ("rs_id", "rsid"),
-
     ("beta", "beta"),
     ("effect", "beta"),
     ("effect_size", "beta"),
     ("b", "beta"),
     ("log_or", "beta"),
-
     ("se", "se"),
     ("stderr", "se"),
     ("standard_error", "se"),
     ("sebeta", "se"),
-
     ("pvalue", "pvalue"),
     ("p", "pvalue"),
     ("pval", "pvalue"),
     ("p_value", "pvalue"),
     ("p.value", "pvalue"),
     ("p_val", "pvalue"),
-
     ("log10p", "neglog10p"),
     ("neglog10p", "neglog10p"),
     ("mlogp", "neglog10p"),
     ("log10_p", "neglog10p"),
     ("nlog10p", "neglog10p"),
-
     ("z", "zscore"),
     ("zscore", "zscore"),
     ("z_score", "zscore"),
     ("z_stat", "zscore"),
-
     ("n", "n"),
     ("neff", "n"),
     ("n_eff", "n"),
     ("sample_size", "n"),
     ("n_total", "n"),
-
     ("pip", "pip"),
     ("posterior_prob", "pip"),
     ("posterior_inclusion_prob", "pip"),
     ("pp", "pip"),
-
     ("cs", "cs_id"),
     ("cs_id", "cs_id"),
     ("credible_set", "cs_id"),
     ("cs_index", "cs_id"),
-
     ("or", "odds_ratio"),
     ("odds_ratio", "odds_ratio"),
-
     ("af", "allele_freq"),
     ("freq", "allele_freq"),
     ("eaf", "allele_freq"),
@@ -502,7 +535,15 @@ impl ColumnResolver {
         Self {
             aliases: ALIASES,
             ambiguous: AMBIGUOUS_ALLELE_COLS,
-            required: &["chromosome", "position", "ref", "alt", "beta", "se", "pvalue"],
+            required: &[
+                "chromosome",
+                "position",
+                "ref",
+                "alt",
+                "beta",
+                "se",
+                "pvalue",
+            ],
         }
     }
 
@@ -516,18 +557,24 @@ impl ColumnResolver {
     }
 
     pub fn resolve(&self, input_columns: &[String]) -> ResolvedColumns {
-        let (mapped, ambiguous, unmapped) = map_columns_with(input_columns, self.aliases, self.ambiguous);
+        let (mapped, ambiguous, unmapped) =
+            map_columns_with(input_columns, self.aliases, self.ambiguous);
 
-        let mapped_canonicals: Vec<&str> = mapped.iter()
-            .map(|m| m.canonical)
-            .collect();
+        let mapped_canonicals: Vec<&str> = mapped.iter().map(|m| m.canonical).collect();
 
-        let missing_required: Vec<&str> = self.required.iter()
+        let missing_required: Vec<&str> = self
+            .required
+            .iter()
             .filter(|r| !mapped_canonicals.contains(r))
             .copied()
             .collect();
 
-        ResolvedColumns { mapping: mapped, unmapped, missing_required, ambiguous }
+        ResolvedColumns {
+            mapping: mapped,
+            unmapped,
+            missing_required,
+            ambiguous,
+        }
     }
 }
 
@@ -587,18 +634,22 @@ impl ColumnContract {
     /// Check that all required columns exist in the schema.
     /// Returns Vec of missing columns (empty = valid).
     pub fn check(&self, available: &[String]) -> Vec<&ColumnRequirement> {
-        self.required.iter()
+        self.required
+            .iter()
             .filter(|r| !available.iter().any(|c| c == r.name))
             .collect()
     }
 
     /// Format missing columns into an actionable error message.
     pub fn format_missing(missing: &[&ColumnRequirement]) -> String {
-        missing.iter()
-            .map(|r| format!(
-                "  '{}' (from {}, needed by {})",
-                r.name, r.source, r.used_by
-            ))
+        missing
+            .iter()
+            .map(|r| {
+                format!(
+                    "  '{}' (from {}, needed by {})",
+                    r.name, r.source, r.used_by
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -610,8 +661,8 @@ pub fn canonical_type(canonical: &str) -> &'static str {
         "chromosome" => "VARCHAR",
         "position" => "INTEGER",
         "ref" | "alt" | "rsid" => "VARCHAR",
-        "beta" | "se" | "pvalue" | "zscore" | "neglog10p"
-        | "pip" | "odds_ratio" | "allele_freq" => "DOUBLE",
+        "beta" | "se" | "pvalue" | "zscore" | "neglog10p" | "pip" | "odds_ratio"
+        | "allele_freq" => "DOUBLE",
         "n" | "cs_id" => "INTEGER",
         _ => "VARCHAR",
     }

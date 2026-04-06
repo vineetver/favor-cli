@@ -1,7 +1,4 @@
-//! Format detection framework: trait-based, content-aware, extensible.
-//!
-//! Each file format implements FormatHandler. FormatRegistry picks the
-//! best handler by combining extension and content-based detection.
+//! Format detection framework.
 
 use std::path::Path;
 
@@ -11,11 +8,7 @@ use parquet::file::reader::FileReader;
 
 use crate::error::FavorError;
 
-use super::{Delimiter, InputFormat, sniff_delimiter};
-
-// ---------------------------------------------------------------------------
-// Core types
-// ---------------------------------------------------------------------------
+use super::{sniff_delimiter, Delimiter, InputFormat};
 
 /// Detection confidence: 0.0 (no match) to 1.0 (certain).
 pub enum DetectResult {
@@ -50,10 +43,6 @@ pub trait FormatHandler: Send + Sync {
     fn delimiter(&self, path: &Path) -> Option<Delimiter>;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn path_lower(path: &Path) -> String {
     path.file_name()
         .unwrap_or_default()
@@ -66,19 +55,20 @@ fn first_line(header: &[u8]) -> Option<&str> {
     text.lines().next()
 }
 
-// ---------------------------------------------------------------------------
-// VcfHandler
-// ---------------------------------------------------------------------------
-
 pub struct VcfHandler;
 
 impl FormatHandler for VcfHandler {
-    fn name(&self) -> &'static str { "VCF" }
+    fn name(&self) -> &'static str {
+        "VCF"
+    }
 
     fn detect(&self, path: &Path, header: &[u8]) -> DetectResult {
         let name = path_lower(path);
-        if name.ends_with(".vcf") || name.ends_with(".vcf.gz")
-            || name.ends_with(".vcf.bgz") || name.ends_with(".bcf") {
+        if name.ends_with(".vcf")
+            || name.ends_with(".vcf.gz")
+            || name.ends_with(".vcf.bgz")
+            || name.ends_with(".bcf")
+        {
             return DetectResult::Yes(0.9);
         }
         // Content-based: check magic bytes
@@ -93,7 +83,6 @@ impl FormatHandler for VcfHandler {
     }
 
     fn schema(&self, _path: &Path) -> Result<Schema, FavorError> {
-        // VCF always produces the same canonical columns
         Ok(Schema::new(vec![
             Field::new("chromosome", DataType::Utf8, false),
             Field::new("position", DataType::Int32, false),
@@ -105,18 +94,20 @@ impl FormatHandler for VcfHandler {
         ]))
     }
 
-    fn input_format(&self) -> InputFormat { InputFormat::Vcf }
-    fn delimiter(&self, _path: &Path) -> Option<Delimiter> { None }
+    fn input_format(&self) -> InputFormat {
+        InputFormat::Vcf
+    }
+    fn delimiter(&self, _path: &Path) -> Option<Delimiter> {
+        None
+    }
 }
-
-// ---------------------------------------------------------------------------
-// ParquetHandler
-// ---------------------------------------------------------------------------
 
 pub struct ParquetHandler;
 
 impl FormatHandler for ParquetHandler {
-    fn name(&self) -> &'static str { "Parquet" }
+    fn name(&self) -> &'static str {
+        "Parquet"
+    }
 
     fn detect(&self, path: &Path, header: &[u8]) -> DetectResult {
         if header.starts_with(b"PAR1") {
@@ -135,14 +126,21 @@ impl FormatHandler for ParquetHandler {
         let reader = parquet::file::reader::SerializedFileReader::new(file)
             .map_err(|e| FavorError::Input(format!("Bad parquet '{}': {e}", path.display())))?;
         let parquet_schema = reader.metadata().file_metadata().schema_descr();
-        let fields: Vec<Field> = parquet_schema.root_schema().get_fields().iter()
+        let fields: Vec<Field> = parquet_schema
+            .root_schema()
+            .get_fields()
+            .iter()
             .map(|f| Field::new(f.name(), DataType::Utf8, true))
             .collect();
         Ok(Schema::new(fields))
     }
 
-    fn input_format(&self) -> InputFormat { InputFormat::Parquet }
-    fn delimiter(&self, _path: &Path) -> Option<Delimiter> { None }
+    fn input_format(&self) -> InputFormat {
+        InputFormat::Parquet
+    }
+    fn delimiter(&self, _path: &Path) -> Option<Delimiter> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,12 +150,17 @@ impl FormatHandler for ParquetHandler {
 pub struct TsvHandler;
 
 impl FormatHandler for TsvHandler {
-    fn name(&self) -> &'static str { "TSV" }
+    fn name(&self) -> &'static str {
+        "TSV"
+    }
 
     fn detect(&self, path: &Path, header: &[u8]) -> DetectResult {
         let name = path_lower(path);
-        if name.ends_with(".tsv") || name.ends_with(".tsv.gz")
-            || name.ends_with(".txt") || name.ends_with(".txt.gz") {
+        if name.ends_with(".tsv")
+            || name.ends_with(".tsv.gz")
+            || name.ends_with(".txt")
+            || name.ends_with(".txt.gz")
+        {
             return DetectResult::Yes(0.9);
         }
         if let Some(line) = first_line(header) {
@@ -171,13 +174,16 @@ impl FormatHandler for TsvHandler {
     fn schema(&self, path: &Path) -> Result<Schema, FavorError> {
         let delim = sniff_delimiter(path)?;
         let headers = super::read_headers(path, delim)?;
-        let fields: Vec<Field> = headers.iter()
+        let fields: Vec<Field> = headers
+            .iter()
             .map(|h| Field::new(h.as_str(), DataType::Utf8, true))
             .collect();
         Ok(Schema::new(fields))
     }
 
-    fn input_format(&self) -> InputFormat { InputFormat::Tabular }
+    fn input_format(&self) -> InputFormat {
+        InputFormat::Tabular
+    }
 
     fn delimiter(&self, path: &Path) -> Option<Delimiter> {
         sniff_delimiter(path).ok()
@@ -191,7 +197,9 @@ impl FormatHandler for TsvHandler {
 pub struct CsvHandler;
 
 impl FormatHandler for CsvHandler {
-    fn name(&self) -> &'static str { "CSV" }
+    fn name(&self) -> &'static str {
+        "CSV"
+    }
 
     fn detect(&self, path: &Path, header: &[u8]) -> DetectResult {
         let name = path_lower(path);
@@ -210,13 +218,16 @@ impl FormatHandler for CsvHandler {
 
     fn schema(&self, path: &Path) -> Result<Schema, FavorError> {
         let headers = super::read_headers(path, Delimiter::Comma)?;
-        let fields: Vec<Field> = headers.iter()
+        let fields: Vec<Field> = headers
+            .iter()
             .map(|h| Field::new(h.as_str(), DataType::Utf8, true))
             .collect();
         Ok(Schema::new(fields))
     }
 
-    fn input_format(&self) -> InputFormat { InputFormat::Tabular }
+    fn input_format(&self) -> InputFormat {
+        InputFormat::Tabular
+    }
 
     fn delimiter(&self, _path: &Path) -> Option<Delimiter> {
         Some(Delimiter::Comma)
@@ -248,9 +259,7 @@ impl FormatRegistry {
         let mut header = [0u8; 8192];
         let n = std::fs::File::open(path)
             .and_then(|mut f| std::io::Read::read(&mut f, &mut header))
-            .map_err(|e| FavorError::Input(format!(
-                "Cannot read '{}': {e}", path.display()
-            )))?;
+            .map_err(|e| FavorError::Input(format!("Cannot read '{}': {e}", path.display())))?;
 
         let mut best: Option<(&dyn FormatHandler, f32)> = None;
         for handler in &self.handlers {
@@ -270,7 +279,11 @@ impl FormatRegistry {
             None => Err(FavorError::Input(format!(
                 "Cannot detect format for '{}'. Supported formats: {}",
                 path.display(),
-                self.handlers.iter().map(|h| h.name()).collect::<Vec<_>>().join(", ")
+                self.handlers
+                    .iter()
+                    .map(|h| h.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ))),
         }
     }

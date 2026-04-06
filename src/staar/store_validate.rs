@@ -37,15 +37,27 @@ pub fn validate_store(
         let sparse_g = SparseG::open(&chrom_dir)?;
         let variant_index = VariantIndex::load(&chrom_dir)?;
 
-        results.extend(check_variant_vcf_alignment(&chrom_dir, &variant_index, chrom));
+        results.extend(check_variant_vcf_alignment(
+            &chrom_dir,
+            &variant_index,
+            chrom,
+        ));
         results.extend(check_sparse_g_integrity(&sparse_g, chrom));
         results.extend(check_no_duplicate_carriers(&sparse_g, chrom));
         results.extend(check_membership_validity(&variant_index, &sparse_g, chrom));
         results.extend(check_sortedness(&variant_index, chrom));
-        results.extend(check_sparse_g_variant_count(&sparse_g, &variant_index, chrom));
+        results.extend(check_sparse_g_variant_count(
+            &sparse_g,
+            &variant_index,
+            chrom,
+        ));
         results.extend(check_offsets_table(&sparse_g, chrom));
         results.extend(check_carrier_ordering(&sparse_g, chrom));
-        results.extend(check_cross_layer_consistency(&sparse_g, &variant_index, chrom));
+        results.extend(check_cross_layer_consistency(
+            &sparse_g,
+            &variant_index,
+            chrom,
+        ));
     }
 
     Ok(results)
@@ -63,21 +75,25 @@ fn check_variant_vcf_alignment(
     let pq_path = chrom_dir.join("variants.parquet");
     let file = match File::open(&pq_path) {
         Ok(f) => f,
-        Err(_) => return vec![CheckResult {
-            name: "variant_vcf_alignment",
-            passed: false,
-            detail: format!("chr{chrom}: cannot open variants.parquet"),
-        }],
+        Err(_) => {
+            return vec![CheckResult {
+                name: "variant_vcf_alignment",
+                passed: false,
+                detail: format!("chr{chrom}: cannot open variants.parquet"),
+            }]
+        }
     };
     let reader = match parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
         .and_then(|b| b.build())
     {
         Ok(r) => r,
-        Err(e) => return vec![CheckResult {
-            name: "variant_vcf_alignment",
-            passed: false,
-            detail: format!("chr{chrom}: parquet error: {e}"),
-        }],
+        Err(e) => {
+            return vec![CheckResult {
+                name: "variant_vcf_alignment",
+                passed: false,
+                detail: format!("chr{chrom}: parquet error: {e}"),
+            }]
+        }
     };
 
     let mut expected = 0u32;
@@ -87,7 +103,11 @@ fn check_variant_vcf_alignment(
             Ok(b) => b,
             Err(_) => continue,
         };
-        let vvcf_arr = batch.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+        let vvcf_arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
         for i in 0..batch.num_rows() {
             if vvcf_arr.value(i) != expected {
                 mismatches += 1;
@@ -322,11 +342,7 @@ fn check_carrier_ordering(sg: &SparseG, chrom: &str) -> Vec<CheckResult> {
 ///   - VariantIndex.get(v).vid matches the expected vid from (chrom, pos, ref, alt)
 ///   - Carrier list from sparse_g has all sample_ids < n_samples
 ///   - The carrier MAC is consistent (non-zero carriers for maf > 0 variants)
-fn check_cross_layer_consistency(
-    sg: &SparseG,
-    vi: &VariantIndex,
-    chrom: &str,
-) -> Vec<CheckResult> {
+fn check_cross_layer_consistency(sg: &SparseG, vi: &VariantIndex, chrom: &str) -> Vec<CheckResult> {
     let n = sg.n_variants().min(vi.len() as u32);
     let mut vid_mismatches = 0usize;
     let mut mac_inconsistencies = 0usize;
@@ -336,7 +352,8 @@ fn check_cross_layer_consistency(
         let cl = sg.load_variant(v);
 
         // Check vid matches expected format from metadata
-        let expected_vid = crate::types::format_vid(chrom, entry.position, &entry.ref_allele, &entry.alt_allele);
+        let expected_vid =
+            crate::types::format_vid(chrom, entry.position, &entry.ref_allele, &entry.alt_allele);
         if *entry.vid != *expected_vid {
             vid_mismatches += 1;
         }
@@ -352,12 +369,16 @@ fn check_cross_layer_consistency(
         CheckResult {
             name: "cross_layer_vid",
             passed: vid_mismatches == 0,
-            detail: format!("chr{chrom}: {vid_mismatches} vid mismatches between VariantIndex and expected"),
+            detail: format!(
+                "chr{chrom}: {vid_mismatches} vid mismatches between VariantIndex and expected"
+            ),
         },
         CheckResult {
             name: "cross_layer_mac",
             passed: mac_inconsistencies == 0,
-            detail: format!("chr{chrom}: {mac_inconsistencies} variants with maf>0 but zero carriers"),
+            detail: format!(
+                "chr{chrom}: {mac_inconsistencies} variants with maf>0 but zero carriers"
+            ),
         },
     ]
 }

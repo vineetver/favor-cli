@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 
 use super::carrier::sparse_score;
 use super::carrier::AnalysisVectors;
-use super::sparse_g::SparseG;
 use super::masks::MaskGroup;
 use super::score;
+use super::sparse_g::SparseG;
 use super::GeneResult;
 use crate::column::{Col, STAAR_WEIGHTS};
 use crate::data::parquet_column_names;
@@ -36,11 +36,31 @@ use crate::types::{
 };
 
 const META_SUMSTATS_COLUMNS: &[ColumnRequirement] = &[
-    ColumnRequirement { name: "segment_id", source: "summary statistics", used_by: "segment identification" },
-    ColumnRequirement { name: "positions", source: "summary statistics", used_by: "variant positions" },
-    ColumnRequirement { name: "refs", source: "summary statistics", used_by: "reference alleles" },
-    ColumnRequirement { name: "alts", source: "summary statistics", used_by: "alternate alleles" },
-    ColumnRequirement { name: "cov_lower", source: "summary statistics", used_by: "covariance matrix" },
+    ColumnRequirement {
+        name: "segment_id",
+        source: "summary statistics",
+        used_by: "segment identification",
+    },
+    ColumnRequirement {
+        name: "positions",
+        source: "summary statistics",
+        used_by: "variant positions",
+    },
+    ColumnRequirement {
+        name: "refs",
+        source: "summary statistics",
+        used_by: "reference alleles",
+    },
+    ColumnRequirement {
+        name: "alts",
+        source: "summary statistics",
+        used_by: "alternate alleles",
+    },
+    ColumnRequirement {
+        name: "cov_lower",
+        source: "summary statistics",
+        used_by: "covariance matrix",
+    },
 ];
 
 /// Load ALL segments for a (study, chromosome) by reading the parquet file directly.
@@ -48,12 +68,19 @@ pub fn load_all_segments(
     study: &StudyHandle,
     chrom: &str,
 ) -> Result<HashMap<i32, SegmentCov>, FavorError> {
-    let seg_path = study.path.join(format!("chromosome={chrom}/segments.parquet"));
-    if !seg_path.exists() { return Ok(HashMap::new()); }
+    let seg_path = study
+        .path
+        .join(format!("chromosome={chrom}/segments.parquet"));
+    if !seg_path.exists() {
+        return Ok(HashMap::new());
+    }
 
     // Upfront schema validation
     let cols = parquet_column_names(&seg_path)?;
-    let contract = ColumnContract { command: "meta-staar", required: META_SUMSTATS_COLUMNS };
+    let contract = ColumnContract {
+        command: "meta-staar",
+        required: META_SUMSTATS_COLUMNS,
+    };
     let missing = contract.check(&cols);
     if !missing.is_empty() {
         return Err(FavorError::Analysis(format!(
@@ -69,52 +96,74 @@ pub fn load_all_segments(
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| FavorError::Analysis(format!("Bad parquet {}: {e}", seg_path.display())))?
         .build()
-        .map_err(|e| FavorError::Analysis(format!("Parquet reader error {}: {e}", seg_path.display())))?;
+        .map_err(|e| {
+            FavorError::Analysis(format!("Parquet reader error {}: {e}", seg_path.display()))
+        })?;
 
     let mut result = HashMap::new();
     for batch in reader {
         let batch = batch.map_err(|e| FavorError::Analysis(format!("Parquet read error: {e}")))?;
         let n = batch.num_rows();
 
-        let seg_ids = batch.column_by_name("segment_id")
+        let seg_ids = batch
+            .column_by_name("segment_id")
             .ok_or_else(|| FavorError::Analysis("Missing segment_id column".into()))?
-            .as_any().downcast_ref::<Int32Array>()
+            .as_any()
+            .downcast_ref::<Int32Array>()
             .ok_or_else(|| FavorError::Analysis("segment_id is not Int32".into()))?;
-        let positions_col = batch.column_by_name("positions")
+        let positions_col = batch
+            .column_by_name("positions")
             .ok_or_else(|| FavorError::Analysis("Missing positions column".into()))?
-            .as_any().downcast_ref::<ListArray>()
+            .as_any()
+            .downcast_ref::<ListArray>()
             .ok_or_else(|| FavorError::Analysis("positions is not List".into()))?;
-        let refs_col = batch.column_by_name("refs")
+        let refs_col = batch
+            .column_by_name("refs")
             .ok_or_else(|| FavorError::Analysis("Missing refs column".into()))?
-            .as_any().downcast_ref::<ListArray>()
+            .as_any()
+            .downcast_ref::<ListArray>()
             .ok_or_else(|| FavorError::Analysis("refs is not List".into()))?;
-        let alts_col = batch.column_by_name("alts")
+        let alts_col = batch
+            .column_by_name("alts")
             .ok_or_else(|| FavorError::Analysis("Missing alts column".into()))?
-            .as_any().downcast_ref::<ListArray>()
+            .as_any()
+            .downcast_ref::<ListArray>()
             .ok_or_else(|| FavorError::Analysis("alts is not List".into()))?;
-        let cov_col = batch.column_by_name("cov_lower")
+        let cov_col = batch
+            .column_by_name("cov_lower")
             .ok_or_else(|| FavorError::Analysis("Missing cov_lower column".into()))?
-            .as_any().downcast_ref::<ListArray>()
+            .as_any()
+            .downcast_ref::<ListArray>()
             .ok_or_else(|| FavorError::Analysis("cov_lower is not List".into()))?;
 
         for row in 0..n {
             let seg_id = seg_ids.value(row);
 
             let pos_arr = positions_col.value(row);
-            let pos_vals = pos_arr.as_any().downcast_ref::<Int32Array>()
+            let pos_vals = pos_arr
+                .as_any()
+                .downcast_ref::<Int32Array>()
                 .ok_or_else(|| FavorError::Analysis("positions inner is not Int32".into()))?;
-            let positions: Vec<u32> = (0..pos_vals.len()).map(|i| pos_vals.value(i) as u32).collect();
+            let positions: Vec<u32> = (0..pos_vals.len())
+                .map(|i| pos_vals.value(i) as u32)
+                .collect();
 
             let refs_arr = refs_col.value(row);
             let refs_str = refs_arr.as_string::<i32>();
-            let refs: Vec<String> = (0..refs_str.len()).map(|i| refs_str.value(i).to_string()).collect();
+            let refs: Vec<String> = (0..refs_str.len())
+                .map(|i| refs_str.value(i).to_string())
+                .collect();
 
             let alts_arr = alts_col.value(row);
             let alts_str = alts_arr.as_string::<i32>();
-            let alts: Vec<String> = (0..alts_str.len()).map(|i| alts_str.value(i).to_string()).collect();
+            let alts: Vec<String> = (0..alts_str.len())
+                .map(|i| alts_str.value(i).to_string())
+                .collect();
 
             let cov_arr = cov_col.value(row);
-            let cov_vals = cov_arr.as_any().downcast_ref::<Float64Array>()
+            let cov_vals = cov_arr
+                .as_any()
+                .downcast_ref::<Float64Array>()
                 .ok_or_else(|| FavorError::Analysis("cov_lower inner is not Float64".into()))?;
             let cov_lower: Vec<f64> = (0..cov_vals.len()).map(|i| cov_vals.value(i)).collect();
 
@@ -123,7 +172,15 @@ pub fn load_all_segments(
                 pos_index.entry(p).or_default().push(i);
             }
 
-            result.insert(seg_id, SegmentCov { refs, alts, cov_lower, pos_index });
+            result.insert(
+                seg_id,
+                SegmentCov {
+                    refs,
+                    alts,
+                    cov_lower,
+                    pos_index,
+                },
+            );
         }
     }
     Ok(result)
@@ -151,7 +208,10 @@ impl SegmentCov {
         let mut key_to_local: Vec<Option<usize>> = Vec::with_capacity(m);
         for &(pos, ref_a, alt_a) in keys {
             let local = self.pos_index.get(&pos).and_then(|candidates| {
-                candidates.iter().find(|&&i| self.refs[i] == ref_a && self.alts[i] == alt_a).copied()
+                candidates
+                    .iter()
+                    .find(|&&i| self.refs[i] == ref_a && self.alts[i] == alt_a)
+                    .copied()
             });
             key_to_local.push(local);
         }
@@ -180,22 +240,34 @@ pub fn load_studies(paths: &[std::path::PathBuf]) -> Result<Vec<StudyHandle>, Fa
         if !meta_path.exists() {
             return Err(FavorError::Input(format!(
                 "Not a MetaSTAAR study directory: {}. Missing meta_staar.json. \
-                 Run `favor staar --emit-sumstats` first.", path.display()
+                 Run `favor staar --emit-sumstats` first.",
+                path.display()
             )));
         }
         let content = std::fs::read_to_string(&meta_path)?;
-        let meta: StudyMeta = serde_json::from_str(&content)
-            .map_err(|e| FavorError::Input(format!("Invalid meta_staar.json in {}: {e}", path.display())))?;
+        let meta: StudyMeta = serde_json::from_str(&content).map_err(|e| {
+            FavorError::Input(format!(
+                "Invalid meta_staar.json in {}: {e}",
+                path.display()
+            ))
+        })?;
         if meta.favor_meta_version != 1 {
             return Err(FavorError::Input(format!(
-                "Unsupported meta version {} in {}. Expected 1.", meta.favor_meta_version, path.display()
+                "Unsupported meta version {} in {}. Expected 1.",
+                meta.favor_meta_version,
+                path.display()
             )));
         }
-        studies.push(StudyHandle { path: path.clone(), meta });
+        studies.push(StudyHandle {
+            path: path.clone(),
+            meta,
+        });
     }
 
     if studies.len() < 2 {
-        return Err(FavorError::Input("MetaSTAAR requires at least 2 studies.".into()));
+        return Err(FavorError::Input(
+            "MetaSTAAR requires at least 2 studies.".into(),
+        ));
     }
 
     let first_type = &studies[0].meta.trait_type;
@@ -227,12 +299,18 @@ pub fn merge_chromosome(
 ) -> Result<Vec<MetaVariant>, FavorError> {
     let mut union_parts = Vec::new();
     for (idx, study) in studies.iter().enumerate() {
-        let var_path = study.path.join(format!("chromosome={chrom}/variants.parquet"));
-        if !var_path.exists() { continue; }
+        let var_path = study
+            .path
+            .join(format!("chromosome={chrom}/variants.parquet"));
+        if !var_path.exists() {
+            continue;
+        }
         engine.register_parquet_file(&format!("_study_{idx}"), &var_path)?;
         union_parts.push(format!("SELECT {idx} AS study_idx, * FROM _study_{idx}"));
     }
-    if union_parts.is_empty() { return Ok(Vec::new()); }
+    if union_parts.is_empty() {
+        return Ok(Vec::new());
+    }
 
     engine.execute(&format!(
         "CREATE OR REPLACE TABLE _study_variants AS {}",
@@ -240,11 +318,13 @@ pub fn merge_chromosome(
     ))?;
 
     // Weight columns: first_value(w_col) AS w_col for each weight
-    let weight_aggs: String = STAAR_WEIGHTS.iter()
+    let weight_aggs: String = STAAR_WEIGHTS
+        .iter()
         .map(|c| format!("first_value({col}) AS {col}", col = c.as_str()))
         .collect::<Vec<_>>()
         .join(", ");
-    let weight_select: String = STAAR_WEIGHTS.iter()
+    let weight_select: String = STAAR_WEIGHTS
+        .iter()
         .map(|c| c.as_str())
         .collect::<Vec<_>>()
         .join(", ");
@@ -279,19 +359,26 @@ pub fn merge_chromosome(
         ccre_p = Col::IsCcrePromoter, ccre_e = Col::IsCcreEnhancer,
     ))?;
 
-    let batches = engine.collect(
-        &format!("SELECT {pos}, {ref_a}, {alt_a}, u_meta, \
+    let batches = engine.collect(&format!(
+        "SELECT {pos}, {ref_a}, {alt_a}, u_meta, \
          mac_total, n_total, {gene}, {region}, {csq}, \
          {cadd}, {revel}, \
          {cage_p}, {cage_e}, {ccre_p}, {ccre_e}, \
          {weight_select}, \
          study_segs \
          FROM _meta_variants ORDER BY {pos}",
-        pos = Col::Position, ref_a = Col::RefAllele, alt_a = Col::AltAllele,
-        gene = Col::GeneName, region = Col::RegionType, csq = Col::Consequence,
-        cadd = Col::CaddPhred, revel = Col::Revel,
-        cage_p = Col::IsCagePromoter, cage_e = Col::IsCageEnhancer,
-        ccre_p = Col::IsCcrePromoter, ccre_e = Col::IsCcreEnhancer,
+        pos = Col::Position,
+        ref_a = Col::RefAllele,
+        alt_a = Col::AltAllele,
+        gene = Col::GeneName,
+        region = Col::RegionType,
+        csq = Col::Consequence,
+        cadd = Col::CaddPhred,
+        revel = Col::Revel,
+        cage_p = Col::IsCagePromoter,
+        cage_e = Col::IsCageEnhancer,
+        ccre_p = Col::IsCcrePromoter,
+        ccre_e = Col::IsCcreEnhancer,
     ))?;
 
     let mut result = Vec::new();
@@ -300,16 +387,40 @@ pub fn merge_chromosome(
     for batch in &batches {
         let n = batch.num_rows();
         let col = |i: usize| batch.column(i);
-        let i32_col = |i: usize| col(i).as_any().downcast_ref::<Int32Array>()
-            .ok_or_else(|| FavorError::Analysis(format!("_meta_variants col {i}: expected Int32")));
-        let i64_col = |i: usize| col(i).as_any().downcast_ref::<Int64Array>()
-            .ok_or_else(|| FavorError::Analysis(format!("_meta_variants col {i}: expected Int64")));
-        let f64_col = |i: usize| col(i).as_any().downcast_ref::<Float64Array>()
-            .ok_or_else(|| FavorError::Analysis(format!("_meta_variants col {i}: expected Float64")));
-        let str_col = |i: usize| col(i).as_any().downcast_ref::<StringArray>()
-            .ok_or_else(|| FavorError::Analysis(format!("_meta_variants col {i}: expected Utf8")));
-        let bool_col = |i: usize| col(i).as_any().downcast_ref::<BooleanArray>()
-            .ok_or_else(|| FavorError::Analysis(format!("_meta_variants col {i}: expected Boolean")));
+        let i32_col = |i: usize| {
+            col(i).as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                FavorError::Analysis(format!("_meta_variants col {i}: expected Int32"))
+            })
+        };
+        let i64_col = |i: usize| {
+            col(i).as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                FavorError::Analysis(format!("_meta_variants col {i}: expected Int64"))
+            })
+        };
+        let f64_col = |i: usize| {
+            col(i)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| {
+                    FavorError::Analysis(format!("_meta_variants col {i}: expected Float64"))
+                })
+        };
+        let str_col = |i: usize| {
+            col(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    FavorError::Analysis(format!("_meta_variants col {i}: expected Utf8"))
+                })
+        };
+        let bool_col = |i: usize| {
+            col(i)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| {
+                    FavorError::Analysis(format!("_meta_variants col {i}: expected Boolean"))
+                })
+        };
 
         let pos_arr = i32_col(0)?;
         let ref_arr = str_col(1)?;
@@ -339,37 +450,101 @@ pub fn merge_chromosome(
                 weights[ch] = if wa.is_null(i) { 0.0 } else { wa.value(i) };
             }
 
-            let segs_str = if segs_arr.is_null(i) { "" } else { segs_arr.value(i) };
+            let segs_str = if segs_arr.is_null(i) {
+                ""
+            } else {
+                segs_arr.value(i)
+            };
             let study_segments = parse_study_segments(segs_str);
 
-            let mac_total = if mac_arr.is_null(i) { 0 } else { mac_arr.value(i) };
-            let n_total = if n_obs_arr.is_null(i) { 0 } else { n_obs_arr.value(i) };
+            let mac_total = if mac_arr.is_null(i) {
+                0
+            } else {
+                mac_arr.value(i)
+            };
+            let n_total = if n_obs_arr.is_null(i) {
+                0
+            } else {
+                n_obs_arr.value(i)
+            };
             // MAF = MAC / (2*N) — diploid genomes have 2 alleles per sample
-            let maf = if n_total > 0 { mac_total as f64 / (2.0 * n_total as f64) } else { 0.0 };
+            let maf = if n_total > 0 {
+                mac_total as f64 / (2.0 * n_total as f64)
+            } else {
+                0.0
+            };
 
             result.push(MetaVariant {
                 variant: AnnotatedVariant {
                     chromosome: chrom_parsed,
                     position: pos_arr.value(i) as u32,
-                    ref_allele: if ref_arr.is_null(i) { "".into() } else { ref_arr.value(i).into() },
-                    alt_allele: if alt_arr.is_null(i) { "".into() } else { alt_arr.value(i).into() },
+                    ref_allele: if ref_arr.is_null(i) {
+                        "".into()
+                    } else {
+                        ref_arr.value(i).into()
+                    },
+                    alt_allele: if alt_arr.is_null(i) {
+                        "".into()
+                    } else {
+                        alt_arr.value(i).into()
+                    },
                     maf,
-                    gene_name: if gene_arr.is_null(i) { "".into() } else { gene_arr.value(i).into() },
+                    gene_name: if gene_arr.is_null(i) {
+                        "".into()
+                    } else {
+                        gene_arr.value(i).into()
+                    },
                     annotation: FunctionalAnnotation {
-                        region_type: RegionType::from_str_lossy(if rt_arr.is_null(i) { "" } else { rt_arr.value(i) }),
-                        consequence: Consequence::from_str_lossy(if csq_arr.is_null(i) { "" } else { csq_arr.value(i) }),
-                        cadd_phred: if cadd_arr.is_null(i) { 0.0 } else { cadd_arr.value(i) },
-                        revel: if revel_arr.is_null(i) { 0.0 } else { revel_arr.value(i) },
+                        region_type: RegionType::from_str_lossy(if rt_arr.is_null(i) {
+                            ""
+                        } else {
+                            rt_arr.value(i)
+                        }),
+                        consequence: Consequence::from_str_lossy(if csq_arr.is_null(i) {
+                            ""
+                        } else {
+                            csq_arr.value(i)
+                        }),
+                        cadd_phred: if cadd_arr.is_null(i) {
+                            0.0
+                        } else {
+                            cadd_arr.value(i)
+                        },
+                        revel: if revel_arr.is_null(i) {
+                            0.0
+                        } else {
+                            revel_arr.value(i)
+                        },
                         regulatory: RegulatoryFlags {
-                            cage_promoter: if cp_arr.is_null(i) { false } else { cp_arr.value(i) },
-                            cage_enhancer: if ce_arr.is_null(i) { false } else { ce_arr.value(i) },
-                            ccre_promoter: if crp_arr.is_null(i) { false } else { crp_arr.value(i) },
-                            ccre_enhancer: if cre_arr.is_null(i) { false } else { cre_arr.value(i) },
+                            cage_promoter: if cp_arr.is_null(i) {
+                                false
+                            } else {
+                                cp_arr.value(i)
+                            },
+                            cage_enhancer: if ce_arr.is_null(i) {
+                                false
+                            } else {
+                                ce_arr.value(i)
+                            },
+                            ccre_promoter: if crp_arr.is_null(i) {
+                                false
+                            } else {
+                                crp_arr.value(i)
+                            },
+                            ccre_enhancer: if cre_arr.is_null(i) {
+                                false
+                            } else {
+                                cre_arr.value(i)
+                            },
                         },
                         weights: AnnotationWeights(weights),
                     },
                 },
-                u_meta: if u_meta_arr.is_null(i) { 0.0 } else { u_meta_arr.value(i) },
+                u_meta: if u_meta_arr.is_null(i) {
+                    0.0
+                } else {
+                    u_meta_arr.value(i)
+                },
                 mac_total,
                 n_total,
                 study_segments,
@@ -391,11 +566,15 @@ pub fn meta_score_gene(
     _chrom: &str,
     segment_cache: &HashMap<(usize, i32), SegmentCov>,
 ) -> Option<GeneResult> {
-    let indices: Vec<usize> = group.variant_indices.iter()
+    let indices: Vec<usize> = group
+        .variant_indices
+        .iter()
         .filter(|&&i| i < meta_variants.len())
         .copied()
         .collect();
-    if indices.len() < 2 { return None; }
+    if indices.len() < 2 {
+        return None;
+    }
 
     let m = indices.len();
 
@@ -404,8 +583,15 @@ pub fn meta_score_gene(
         u[(local, 0)] = meta_variants[gi].u_meta;
     }
 
-    let keys: Vec<(u32, &str, &str)> = indices.iter()
-        .map(|&gi| (meta_variants[gi].variant.position, &*meta_variants[gi].variant.ref_allele, &*meta_variants[gi].variant.alt_allele))
+    let keys: Vec<(u32, &str, &str)> = indices
+        .iter()
+        .map(|&gi| {
+            (
+                meta_variants[gi].variant.position,
+                &*meta_variants[gi].variant.ref_allele,
+                &*meta_variants[gi].variant.alt_allele,
+            )
+        })
         .collect();
 
     let mut cov = Mat::zeros(m, m);
@@ -432,22 +618,33 @@ pub fn meta_score_gene(
         }
     }
 
-    let mafs: Vec<f64> = indices.iter().map(|&gi| {
-        let mv = &meta_variants[gi];
-        if mv.n_total > 0 { mv.mac_total as f64 / (2.0 * mv.n_total as f64) } else { 0.0 }
-    }).collect();
+    let mafs: Vec<f64> = indices
+        .iter()
+        .map(|&gi| {
+            let mv = &meta_variants[gi];
+            if mv.n_total > 0 {
+                mv.mac_total as f64 / (2.0 * mv.n_total as f64)
+            } else {
+                0.0
+            }
+        })
+        .collect();
 
     // Use max N across variants in this gene for MAC-based ACAT-V grouping
-    let n_total: usize = indices.iter()
+    let n_total: usize = indices
+        .iter()
         .map(|&gi| meta_variants[gi].n_total as usize)
         .max()
         .unwrap_or(0);
 
-    let ann_matrix: Vec<Vec<f64>> = (0..11).map(|ch| {
-        indices.iter().map(|&gi| {
-            meta_variants[gi].variant.annotation.weights.0[ch]
-        }).collect()
-    }).collect();
+    let ann_matrix: Vec<Vec<f64>> = (0..11)
+        .map(|ch| {
+            indices
+                .iter()
+                .map(|&gi| meta_variants[gi].variant.annotation.weights.0[ch])
+                .collect()
+        })
+        .collect();
 
     let sr = score::run_staar_from_sumstats(&u, &cov, &ann_matrix, &mafs, n_total);
 
@@ -468,8 +665,11 @@ pub fn meta_score_gene(
 fn parse_study_segments(s: &str) -> Vec<(usize, i32)> {
     let mut result = Vec::new();
     for part in s.split('{') {
-        let part = part.trim_matches(|c: char| c == '[' || c == ']' || c == ',' || c == ' ' || c == '}');
-        if part.is_empty() { continue; }
+        let part =
+            part.trim_matches(|c: char| c == '[' || c == ']' || c == ',' || c == ' ' || c == '}');
+        if part.is_empty() {
+            continue;
+        }
         let mut study = None;
         let mut seg = None;
         for kv in part.split(',') {
@@ -545,14 +745,24 @@ pub fn emit_sumstats(
         let chrom_dir = store_dir.join(format!("chromosome={chrom}"));
         let sparse_g = SparseG::open(&chrom_dir)?;
         let variant_index = super::carrier::VariantIndex::load(&chrom_dir)?;
-        emit_chromosome_sparse(&sparse_g, &variant_index, analysis, variants, &indices, chrom, &dir, out)?;
+        emit_chromosome_sparse(
+            &sparse_g,
+            &variant_index,
+            analysis,
+            variants,
+            &indices,
+            chrom,
+            &dir,
+            out,
+        )?;
     }
 
     let meta_json = serde_json::to_string_pretty(meta)
         .map_err(|e| FavorError::Resource(format!("Failed to serialize meta_staar.json: {e}")))?;
     let meta_path = output_dir.join("meta_staar.json");
-    std::fs::write(&meta_path, meta_json)
-        .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", meta_path.display())))?;
+    std::fs::write(&meta_path, meta_json).map_err(|e| {
+        FavorError::Resource(format!("Cannot write '{}': {e}", meta_path.display()))
+    })?;
 
     out.success(&format!("Summary statistics -> {}", output_dir.display()));
     Ok(())
@@ -572,8 +782,7 @@ fn emit_chromosome_sparse(
     let n = analysis.n_pheno;
 
     // Build position-based segments (same binning as v1 for output compat)
-    let mut coarse: std::collections::BTreeMap<i32, Vec<usize>> =
-        std::collections::BTreeMap::new();
+    let mut coarse: std::collections::BTreeMap<i32, Vec<usize>> = std::collections::BTreeMap::new();
     for &gi in chrom_indices {
         coarse
             .entry((variants[gi].position / SEGMENT_BP) as i32)

@@ -1,7 +1,4 @@
-//! Data layer: packs, variant sets, and annotation database.
-//!
-//! Single module for everything "data on disk" — pack definitions,
-//! hive-partitioned variant sets, and FAVOR annotation parquets.
+//! Data layer for packs, variant sets, and annotation parquet.
 
 pub mod publish;
 pub mod transfer;
@@ -17,10 +14,6 @@ use crate::column::Col;
 use crate::config::{Config, Tier};
 use crate::error::FavorError;
 use crate::ingest::JoinKey;
-
-// ---------------------------------------------------------------------------
-// Pack registry (was packs.rs)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceType {
@@ -76,7 +69,11 @@ impl Pack {
     }
 
     pub fn base_url<'a>(&self, default: &'a str) -> &'a str {
-        if self.remote_url.is_empty() { default } else { self.remote_url }
+        if self.remote_url.is_empty() {
+            default
+        } else {
+            self.remote_url
+        }
     }
 }
 
@@ -85,97 +82,191 @@ const MB: u64 = 1024 * 1024;
 
 pub static PACKS: &[Pack] = &[
     Pack {
-        id: "reference", name: "Reference",
+        id: "reference",
+        name: "Reference",
         description: "Gene index, cCRE regions, tissue vocabulary, evidence types",
-        source: "FAVOR", size_human: "40 MB", size_bytes: 40 * MB,
-        always_installed: true, version: "1", source_type: SourceType::Tissue,
-        base_dir: "tissue", tables: &["reference"], remote_url: "",
+        source: "FAVOR",
+        size_human: "40 MB",
+        size_bytes: 40 * MB,
+        always_installed: true,
+        version: "1",
+        source_type: SourceType::Tissue,
+        base_dir: "tissue",
+        tables: &["reference"],
+        remote_url: "",
     },
     Pack {
-        id: "rollups", name: "Rollups",
+        id: "rollups",
+        name: "Rollups",
         description: "Gene-level and 25kb region-level summary statistics",
-        source: "FAVOR", size_human: "49 MB", size_bytes: 49 * MB,
-        always_installed: true, version: "1", source_type: SourceType::Root,
-        base_dir: "", tables: &["rollups"], remote_url: "",
+        source: "FAVOR",
+        size_human: "49 MB",
+        size_bytes: 49 * MB,
+        always_installed: true,
+        version: "1",
+        source_type: SourceType::Root,
+        base_dir: "",
+        tables: &["rollups"],
+        remote_url: "",
     },
     Pack {
-        id: "variant-index", name: "Variant Index",
+        id: "variant-index",
+        name: "Variant Index",
         description: "Pre-computed variant-to-region junction table (required for enrichment)",
-        source: "FAVOR", size_human: "155 GB", size_bytes: 155 * GB,
-        always_installed: true, version: "1", source_type: SourceType::Tissue,
-        base_dir: "tissue", tables: &["variant_in_region"], remote_url: "",
+        source: "FAVOR",
+        size_human: "155 GB",
+        size_bytes: 155 * GB,
+        always_installed: true,
+        version: "1",
+        source_type: SourceType::Tissue,
+        base_dir: "tissue",
+        tables: &["variant_in_region"],
+        remote_url: "",
     },
     Pack {
-        id: "eqtl", name: "Bulk eQTL",
+        id: "eqtl",
+        name: "Bulk eQTL",
         description: "eQTL, sQTL, apaQTL across 50 tissues + SuSiE fine-mapped",
-        source: "GTEx v10", size_human: "3 GB", size_bytes: 3 * GB,
-        always_installed: false, version: "1", source_type: SourceType::Tissue,
+        source: "GTEx v10",
+        size_human: "3 GB",
+        size_bytes: 3 * GB,
+        always_installed: false,
+        version: "1",
+        source_type: SourceType::Tissue,
         base_dir: "tissue",
-        tables: &["variant_eqtl", "variant_sqtl", "variant_apaqtl", "variant_eqtl_susie", "variant_eqtl_ccre"],
+        tables: &[
+            "variant_eqtl",
+            "variant_sqtl",
+            "variant_apaqtl",
+            "variant_eqtl_susie",
+            "variant_eqtl_ccre",
+        ],
         remote_url: "",
     },
     Pack {
-        id: "eqtl-catalogue", name: "eQTL Catalogue",
+        id: "eqtl-catalogue",
+        name: "eQTL Catalogue",
         description: "Multi-study eQTL from 37 datasets, 127 cell types",
-        source: "EBI eQTL Catalogue", size_human: "2 GB", size_bytes: 2 * GB,
-        always_installed: false, version: "1", source_type: SourceType::Tissue,
-        base_dir: "tissue", tables: &["variant_eqtl_catalogue"], remote_url: "",
+        source: "EBI eQTL Catalogue",
+        size_human: "2 GB",
+        size_bytes: 2 * GB,
+        always_installed: false,
+        version: "1",
+        source_type: SourceType::Tissue,
+        base_dir: "tissue",
+        tables: &["variant_eqtl_catalogue"],
+        remote_url: "",
     },
     Pack {
-        id: "sc-eqtl", name: "Single-cell eQTL",
+        id: "sc-eqtl",
+        name: "Single-cell eQTL",
         description: "sc-eQTL from immune cells, brain, and 15 DICE cell types",
-        source: "OneK1K, DICE, PsychENCODE", size_human: "48 GB", size_bytes: 48 * GB,
-        always_installed: false, version: "1", source_type: SourceType::Tissue,
+        source: "OneK1K, DICE, PsychENCODE",
+        size_human: "48 GB",
+        size_bytes: 48 * GB,
+        always_installed: false,
+        version: "1",
+        source_type: SourceType::Tissue,
         base_dir: "tissue",
-        tables: &["variant_sc_eqtl", "variant_sc_eqtl_dice", "variant_sc_eqtl_psychencode"],
+        tables: &[
+            "variant_sc_eqtl",
+            "variant_sc_eqtl_dice",
+            "variant_sc_eqtl_psychencode",
+        ],
         remote_url: "",
     },
     Pack {
-        id: "regulatory", name: "Regulatory Elements",
+        id: "regulatory",
+        name: "Regulatory Elements",
         description: "cCRE tissue signals, chromatin states, accessibility peaks",
-        source: "ENCODE SCREEN v4, Roadmap Epigenomics, VISTA", size_human: "18 GB", size_bytes: 18 * GB,
-        always_installed: false, version: "1", source_type: SourceType::Tissue,
+        source: "ENCODE SCREEN v4, Roadmap Epigenomics, VISTA",
+        size_human: "18 GB",
+        size_bytes: 18 * GB,
+        always_installed: false,
+        version: "1",
+        source_type: SourceType::Tissue,
         base_dir: "tissue",
-        tables: &["region_ccre_tissue_signals", "region_chromatin_states", "region_accessibility_peaks", "region_validated_enhancers"],
+        tables: &[
+            "region_ccre_tissue_signals",
+            "region_chromatin_states",
+            "region_accessibility_peaks",
+            "region_validated_enhancers",
+        ],
         remote_url: "",
     },
     Pack {
-        id: "enhancer-gene", name: "Enhancer-Gene Links",
+        id: "enhancer-gene",
+        name: "Enhancer-Gene Links",
         description: "Enhancer-gene predictions + experimental cCRE-gene links",
-        source: "ABC, EPIraction, ENCODE rE2G, EpiMap, ChIA-PET, SCREEN v4", size_human: "12 GB", size_bytes: 12 * GB,
-        always_installed: false, version: "1", source_type: SourceType::Tissue,
+        source: "ABC, EPIraction, ENCODE rE2G, EpiMap, ChIA-PET, SCREEN v4",
+        size_human: "12 GB",
+        size_bytes: 12 * GB,
+        always_installed: false,
+        version: "1",
+        source_type: SourceType::Tissue,
         base_dir: "tissue",
-        tables: &["region_enhancer_gene", "region_epiraction", "region_encode_re2g", "region_epimap", "linkage_ccre_experimental_chiapet", "linkage_ccre_experimental_crispr", "linkage_ccre_computational_screen_v4"],
+        tables: &[
+            "region_enhancer_gene",
+            "region_epiraction",
+            "region_encode_re2g",
+            "region_epimap",
+            "linkage_ccre_experimental_chiapet",
+            "linkage_ccre_experimental_crispr",
+            "linkage_ccre_computational_screen_v4",
+        ],
         remote_url: "",
     },
     Pack {
-        id: "tissue-scores", name: "Tissue-Specific Scores",
+        id: "tissue-scores",
+        name: "Tissue-Specific Scores",
         description: "Tissue scores, ChromBPNet, allelic imbalance/methylation",
-        source: "TLand, ChromBPNet, ENTEx", size_human: "5 GB", size_bytes: 5 * GB,
-        always_installed: false, version: "1", source_type: SourceType::Tissue,
+        source: "TLand, ChromBPNet, ENTEx",
+        size_human: "5 GB",
+        size_bytes: 5 * GB,
+        always_installed: false,
+        version: "1",
+        source_type: SourceType::Tissue,
         base_dir: "tissue",
-        tables: &["variant_tissue_scores", "variant_tissue_scores_positional", "variant_chrombpnet", "variant_allelic_imbalance", "variant_allelic_methylation", "region_ase_ccre", "region_chromatin_loops"],
+        tables: &[
+            "variant_tissue_scores",
+            "variant_tissue_scores_positional",
+            "variant_chrombpnet",
+            "variant_allelic_imbalance",
+            "variant_allelic_methylation",
+            "region_ase_ccre",
+            "region_chromatin_loops",
+        ],
         remote_url: "",
     },
     Pack {
-        id: "pgs", name: "Polygenic Risk Scores",
+        id: "pgs",
+        name: "Polygenic Risk Scores",
         description: "Pre-computed polygenic scores across phenotypes",
-        source: "PGS Catalog", size_human: "75 GB", size_bytes: 75 * GB,
-        always_installed: false, version: "1", source_type: SourceType::Tissue,
-        base_dir: "tissue", tables: &["pgs_scores", "pgs_metadata"], remote_url: "",
+        source: "PGS Catalog",
+        size_human: "75 GB",
+        size_bytes: 75 * GB,
+        always_installed: false,
+        version: "1",
+        source_type: SourceType::Tissue,
+        base_dir: "tissue",
+        tables: &["pgs_scores", "pgs_metadata"],
+        remote_url: "",
     },
     Pack {
-        id: "genotypes", name: "Genotype Matrix",
+        id: "genotypes",
+        name: "Genotype Matrix",
         description: "Reference genotype matrix for fine-mapping and LD",
-        source: "TOPMed", size_human: "3 GB", size_bytes: 3 * GB,
-        always_installed: false, version: "1", source_type: SourceType::Tissue,
-        base_dir: "tissue", tables: &["genotype_matrix"], remote_url: "",
+        source: "TOPMed",
+        size_human: "3 GB",
+        size_bytes: 3 * GB,
+        always_installed: false,
+        version: "1",
+        source_type: SourceType::Tissue,
+        base_dir: "tissue",
+        tables: &["genotype_matrix"],
+        remote_url: "",
     },
 ];
-
-// ---------------------------------------------------------------------------
-// VariantSet (was variant_set.rs)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -218,9 +309,13 @@ impl VariantSet {
         }
         let content = std::fs::read_to_string(&meta_path)
             .map_err(|e| FavorError::Input(format!("Cannot read {}: {e}", meta_path.display())))?;
-        let meta: VariantMeta = serde_json::from_str(&content)
-            .map_err(|e| FavorError::Input(format!("Invalid meta.json in {}: {e}", path.display())))?;
-        Ok(Self { root: path.to_path_buf(), meta })
+        let meta: VariantMeta = serde_json::from_str(&content).map_err(|e| {
+            FavorError::Input(format!("Invalid meta.json in {}: {e}", path.display()))
+        })?;
+        Ok(Self {
+            root: path.to_path_buf(),
+            meta,
+        })
     }
 
     pub fn chrom_dir(&self, chrom: &str) -> PathBuf {
@@ -233,14 +328,24 @@ impl VariantSet {
         chroms
     }
 
-    pub fn count(&self) -> u64 { self.meta.variant_count }
+    pub fn count(&self) -> u64 {
+        self.meta.variant_count
+    }
 
-    pub fn columns(&self) -> &[String] { &self.meta.columns }
+    pub fn columns(&self) -> &[String] {
+        &self.meta.columns
+    }
 
-    pub fn join_key(&self) -> JoinKey { self.meta.join_key }
-    pub fn root(&self) -> &Path { &self.root }
+    pub fn join_key(&self) -> JoinKey {
+        self.meta.join_key
+    }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 
-    pub fn kind(&self) -> Option<&VariantSetKind> { self.meta.kind.as_ref() }
+    pub fn kind(&self) -> Option<&VariantSetKind> {
+        self.meta.kind.as_ref()
+    }
 
     pub fn require_annotated(&self) -> Result<(), FavorError> {
         match &self.meta.kind {
@@ -267,14 +372,19 @@ impl VariantSetWriter {
     pub fn new(root: &Path, join_key: JoinKey, source: &str) -> Result<Self, FavorError> {
         if root.join("meta.json").exists() {
             return Err(FavorError::Input(format!(
-                "VariantSet already exists at {}. Remove it first.", root.display()
+                "VariantSet already exists at {}. Remove it first.",
+                root.display()
             )));
         }
         std::fs::create_dir_all(root)
             .map_err(|e| FavorError::Resource(format!("Cannot create {}: {e}", root.display())))?;
         Ok(Self {
-            root: root.to_path_buf(), join_key, source: source.to_string(),
-            columns: None, per_chrom: HashMap::new(), kind: None,
+            root: root.to_path_buf(),
+            join_key,
+            source: source.to_string(),
+            columns: None,
+            per_chrom: HashMap::new(),
+            kind: None,
         })
     }
 
@@ -286,17 +396,28 @@ impl VariantSetWriter {
     }
 
     pub fn register_chrom(&mut self, chrom: &str, variant_count: u64, size_bytes: u64) {
-        self.per_chrom.insert(chrom.to_string(), ChromMeta { variant_count, size_bytes });
+        self.per_chrom.insert(
+            chrom.to_string(),
+            ChromMeta {
+                variant_count,
+                size_bytes,
+            },
+        );
     }
 
-    pub fn set_columns(&mut self, columns: Vec<String>) { self.columns = Some(columns); }
-    pub fn set_kind(&mut self, kind: VariantSetKind) { self.kind = Some(kind); }
+    pub fn set_columns(&mut self, columns: Vec<String>) {
+        self.columns = Some(columns);
+    }
+    pub fn set_kind(&mut self, kind: VariantSetKind) {
+        self.kind = Some(kind);
+    }
 
     /// Scan written parquet files to populate per-chrom metadata.
     /// Uses parquet file metadata directly — no query engine needed.
     pub fn scan_and_register(&mut self) -> Result<(), FavorError> {
-        let entries = std::fs::read_dir(&self.root)
-            .map_err(|e| FavorError::Resource(format!("Cannot read {}: {e}", self.root.display())))?;
+        let entries = std::fs::read_dir(&self.root).map_err(|e| {
+            FavorError::Resource(format!("Cannot read {}: {e}", self.root.display()))
+        })?;
 
         let mut first_parquet: Option<PathBuf> = None;
 
@@ -307,18 +428,22 @@ impl VariantSetWriter {
                 Some(c) if !c.is_empty() => c.to_string(),
                 _ => continue,
             };
-            if !entry.file_type().is_ok_and(|t| t.is_dir()) { continue; }
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
 
             let dir = entry.path();
             let mut total_count: u64 = 0;
             let mut total_size: u64 = 0;
 
-            let files = std::fs::read_dir(&dir)
-                .map_err(|e| FavorError::Resource(format!("{e}")))?;
+            let files =
+                std::fs::read_dir(&dir).map_err(|e| FavorError::Resource(format!("{e}")))?;
             for file in files {
                 let file = file.map_err(|e| FavorError::Resource(format!("{e}")))?;
                 let fname = file.file_name().to_string_lossy().to_string();
-                if !fname.ends_with(".parquet") { continue; }
+                if !fname.ends_with(".parquet") {
+                    continue;
+                }
                 let fpath = file.path();
                 total_size += std::fs::metadata(&fpath).map_or(0, |m| m.len());
                 total_count += parquet_row_count(&fpath)?;
@@ -346,32 +471,60 @@ impl VariantSetWriter {
 
     pub fn finish(self) -> Result<VariantSet, FavorError> {
         if self.per_chrom.is_empty() {
-            return Err(FavorError::Analysis("VariantSet has no chromosomes. No variants were written.".into()));
+            return Err(FavorError::Analysis(
+                "VariantSet has no chromosomes. No variants were written.".into(),
+            ));
         }
         let variant_count: u64 = self.per_chrom.values().map(|m| m.variant_count).sum();
         let meta = VariantMeta {
-            version: 1, join_key: self.join_key, variant_count,
-            per_chrom: self.per_chrom, columns: self.columns.unwrap_or_default(),
-            source: self.source, kind: self.kind,
+            version: 1,
+            join_key: self.join_key,
+            variant_count,
+            per_chrom: self.per_chrom,
+            columns: self.columns.unwrap_or_default(),
+            source: self.source,
+            kind: self.kind,
         };
         let meta_path = self.root.join("meta.json");
         let json = serde_json::to_string_pretty(&meta)
             .map_err(|e| FavorError::Resource(format!("JSON serialize failed: {e}")))?;
-        std::fs::write(&meta_path, json)
-            .map_err(|e| FavorError::Resource(format!("Cannot write {}: {e}", meta_path.display())))?;
-        Ok(VariantSet { root: self.root, meta })
+        std::fs::write(&meta_path, json).map_err(|e| {
+            FavorError::Resource(format!("Cannot write {}: {e}", meta_path.display()))
+        })?;
+        Ok(VariantSet {
+            root: self.root,
+            meta,
+        })
     }
 }
 
 fn chrom_sort_key(chrom: &str) -> (u8, u8) {
     match chrom {
-        "1" => (0, 1), "2" => (0, 2), "3" => (0, 3), "4" => (0, 4),
-        "5" => (0, 5), "6" => (0, 6), "7" => (0, 7), "8" => (0, 8),
-        "9" => (0, 9), "10" => (0, 10), "11" => (0, 11), "12" => (0, 12),
-        "13" => (0, 13), "14" => (0, 14), "15" => (0, 15), "16" => (0, 16),
-        "17" => (0, 17), "18" => (0, 18), "19" => (0, 19), "20" => (0, 20),
-        "21" => (0, 21), "22" => (0, 22),
-        "X" => (1, 0), "Y" => (1, 1), "MT" => (1, 2),
+        "1" => (0, 1),
+        "2" => (0, 2),
+        "3" => (0, 3),
+        "4" => (0, 4),
+        "5" => (0, 5),
+        "6" => (0, 6),
+        "7" => (0, 7),
+        "8" => (0, 8),
+        "9" => (0, 9),
+        "10" => (0, 10),
+        "11" => (0, 11),
+        "12" => (0, 12),
+        "13" => (0, 13),
+        "14" => (0, 14),
+        "15" => (0, 15),
+        "16" => (0, 16),
+        "17" => (0, 17),
+        "18" => (0, 18),
+        "19" => (0, 19),
+        "20" => (0, 20),
+        "21" => (0, 21),
+        "22" => (0, 22),
+        "X" => (1, 0),
+        "Y" => (1, 1),
+        "MT" => (1, 2),
         _ => (2, 0),
     }
 }
@@ -391,12 +544,13 @@ pub fn parquet_column_names(path: &Path) -> Result<Vec<String>, FavorError> {
         .map_err(|e| FavorError::Resource(format!("Bad parquet {}: {e}", path.display())))?;
     let schema = reader.metadata().file_metadata().schema_descr();
     // Top-level fields from root group — returns "gencode" not its leaf children.
-    Ok(schema.root_schema().get_fields().iter().map(|f| f.name().to_string()).collect())
+    Ok(schema
+        .root_schema()
+        .get_fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect())
 }
-
-// ---------------------------------------------------------------------------
-// AnnotationDb (was annotation_db.rs)
-// ---------------------------------------------------------------------------
 
 pub struct AnnotationDb {
     tier: Tier,
@@ -413,7 +567,8 @@ impl AnnotationDb {
         if !root.exists() {
             return Err(FavorError::DataMissing(format!(
                 "Annotations not found at {}. Run `favor data pull --tier {}` first.",
-                root.display(), tier
+                root.display(),
+                tier
             )));
         }
         let db = Self { tier, root };
@@ -425,12 +580,20 @@ impl AnnotationDb {
     pub fn validate_installed(&self) -> Result<(), FavorError> {
         let mut missing = Vec::new();
         for n in 1..=22 {
-            if !self.root.join(format!("chromosome={n}/sorted.parquet")).exists() {
+            if !self
+                .root
+                .join(format!("chromosome={n}/sorted.parquet"))
+                .exists()
+            {
                 missing.push(n.to_string());
             }
         }
         for c in ["X", "Y"] {
-            if !self.root.join(format!("chromosome={c}/sorted.parquet")).exists() {
+            if !self
+                .root
+                .join(format!("chromosome={c}/sorted.parquet"))
+                .exists()
+            {
                 missing.push(c.to_string());
             }
         }
@@ -446,14 +609,18 @@ impl AnnotationDb {
         Ok(())
     }
 
-    pub fn tier(&self) -> Tier { self.tier }
+    pub fn tier(&self) -> Tier {
+        self.tier
+    }
 
     pub fn chrom_parquet(&self, chrom: &str) -> Option<PathBuf> {
         let p = self.root.join(format!("chromosome={chrom}/sorted.parquet"));
         p.exists().then_some(p)
     }
 
-    pub fn root(&self) -> &Path { &self.root }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,7 +656,11 @@ impl AnnotatedSet {
             }
             None => Tier::Full, // legacy sets without kind tag — assume full
         };
-        let chromosomes = vs.chromosomes().into_iter().map(|s| s.to_string()).collect();
+        let chromosomes = vs
+            .chromosomes()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         Ok(Self {
             root: path.to_path_buf(),
             meta: AnnotatedSetMeta {
@@ -503,13 +674,23 @@ impl AnnotatedSet {
         })
     }
 
-    pub fn tier(&self) -> Tier { self.meta.tier }
-    pub fn root(&self) -> &Path { &self.root }
-    pub fn variant_count(&self) -> u64 { self.meta.variant_count }
+    pub fn tier(&self) -> Tier {
+        self.meta.tier
+    }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn variant_count(&self) -> u64 {
+        self.meta.variant_count
+    }
     #[allow(dead_code)]
-    pub fn columns(&self) -> &[String] { &self.meta.columns }
+    pub fn columns(&self) -> &[String] {
+        &self.meta.columns
+    }
     #[allow(dead_code)]
-    pub fn chromosomes(&self) -> &[String] { &self.meta.chromosomes }
+    pub fn chromosomes(&self) -> &[String] {
+        &self.meta.chromosomes
+    }
 
     /// Validate that this annotated set supports the given pipeline columns.
     pub fn supports(&self, required: &[Col]) -> Result<(), FavorError> {
@@ -562,9 +743,15 @@ impl EnrichedSet {
         Self { root, meta }
     }
 
-    pub fn root(&self) -> &Path { &self.root }
-    pub fn tables_found(&self) -> &[(String, i64)] { &self.meta.tables_written }
-    pub fn tissue(&self) -> &str { &self.meta.tissue }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn tables_found(&self) -> &[(String, i64)] {
+        &self.meta.tables_written
+    }
+    pub fn tissue(&self) -> &str {
+        &self.meta.tissue
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -650,12 +837,13 @@ impl TissueTable {
     #[allow(dead_code)]
     pub fn required_pack(self) -> &'static str {
         match self {
-            Self::Eqtl | Self::Sqtl | Self::ApaQtl
-            | Self::EqtlSusie | Self::EqtlCcre => "eqtl",
+            Self::Eqtl | Self::Sqtl | Self::ApaQtl | Self::EqtlSusie | Self::EqtlCcre => "eqtl",
             Self::EqtlCatalogue => "eqtl-catalogue",
             Self::ScEqtl | Self::ScEqtlDice | Self::ScEqtlPsychencode => "sc-eqtl",
-            Self::TissueScores | Self::ChromBpnet
-            | Self::AllelicImbalance | Self::AllelicMethylation => "tissue-scores",
+            Self::TissueScores
+            | Self::ChromBpnet
+            | Self::AllelicImbalance
+            | Self::AllelicMethylation => "tissue-scores",
         }
     }
 }
@@ -677,16 +865,24 @@ impl TissueDb {
                 tissue_dir.display()
             )));
         }
-        let available = TissueTable::all().iter()
+        let available = TissueTable::all()
+            .iter()
             .filter(|t| tissue_dir.join(t.dir_name()).is_dir())
             .copied()
             .collect();
-        Ok(Self { root: tissue_dir.to_path_buf(), available })
+        Ok(Self {
+            root: tissue_dir.to_path_buf(),
+            available,
+        })
     }
 
     #[allow(dead_code)]
-    pub fn root(&self) -> &Path { &self.root }
-    pub fn available_tables(&self) -> &[TissueTable] { &self.available }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn available_tables(&self) -> &[TissueTable] {
+        &self.available
+    }
 
     pub fn table_path(&self, table: TissueTable) -> PathBuf {
         self.root.join(table.dir_name())
@@ -694,16 +890,23 @@ impl TissueDb {
 
     #[allow(dead_code)]
     pub fn validate_tables(&self, needed: &[TissueTable]) -> Result<(), FavorError> {
-        let missing: Vec<_> = needed.iter()
+        let missing: Vec<_> = needed
+            .iter()
             .filter(|t| !self.available.contains(t))
             .collect();
         if !missing.is_empty() {
             return Err(FavorError::DataMissing(format!(
                 "Tissue data missing: {}. Install with:\n{}",
-                missing.iter().map(|t| t.display_name()).collect::<Vec<_>>().join(", "),
-                missing.iter().map(|t| format!(
-                    "  favor data pull --pack {}", t.required_pack()
-                )).collect::<Vec<_>>().join("\n")
+                missing
+                    .iter()
+                    .map(|t| t.display_name())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                missing
+                    .iter()
+                    .map(|t| format!("  favor data pull --pack {}", t.required_pack()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             )));
         }
         Ok(())

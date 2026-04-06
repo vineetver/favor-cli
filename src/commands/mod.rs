@@ -6,10 +6,6 @@ pub mod interpret;
 pub mod meta_staar;
 pub mod staar;
 
-// ---------------------------------------------------------------------------
-// Dry-run plan types (was commands/dry_run.rs)
-// ---------------------------------------------------------------------------
-
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -17,11 +13,6 @@ use serde::Serialize;
 use crate::config::Tier;
 use crate::output::Output;
 use crate::staar::MaskCategory;
-
-// ---------------------------------------------------------------------------
-// Config structs — the ONLY way to configure each command.
-// Constructed from clap args in the command handler, never leaks raw CLI args.
-// ---------------------------------------------------------------------------
 
 pub struct IngestConfig {
     pub inputs: Vec<PathBuf>,

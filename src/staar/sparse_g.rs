@@ -62,9 +62,7 @@ impl SparseG {
         let mut offsets = Vec::with_capacity(n_variants);
         for i in 0..n_variants {
             let base = offsets_start + i * 8;
-            let val = u64::from_le_bytes(
-                mmap[base..base + 8].try_into().unwrap(),
-            );
+            let val = u64::from_le_bytes(mmap[base..base + 8].try_into().unwrap());
             offsets.push(val);
         }
 
@@ -159,18 +157,23 @@ impl SparseG {
 
         if self.wide {
             for _ in 0..n_carriers {
-                let sample_id = u32::from_le_bytes([
-                    data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-                ]);
+                let sample_id =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
                 let dosage = data[pos + 4];
-                entries.push(CarrierEntry { sample_idx: sample_id, dosage });
+                entries.push(CarrierEntry {
+                    sample_idx: sample_id,
+                    dosage,
+                });
                 pos += CARRIER_ENTRY_WIDE;
             }
         } else {
             for _ in 0..n_carriers {
                 let sample_id = u16::from_le_bytes([data[pos], data[pos + 1]]) as u32;
                 let dosage = data[pos + 2];
-                entries.push(CarrierEntry { sample_idx: sample_id, dosage });
+                entries.push(CarrierEntry {
+                    sample_idx: sample_id,
+                    dosage,
+                });
                 pos += CARRIER_ENTRY_NARROW;
             }
         }

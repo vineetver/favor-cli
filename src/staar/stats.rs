@@ -48,7 +48,11 @@ pub fn cauchy_combine_weighted(p_values: &[f64], weights: &[f64]) -> f64 {
         // Clamp into (0, 1). The lower bound is the smallest positive double
         // so the small-p branch still represents fully underflowed inputs.
         let p_clamped = p.clamp(P_FLOOR, 1.0 - 1e-15);
-        let w = if use_weights { weights[i].max(0.0) } else { 1.0 };
+        let w = if use_weights {
+            weights[i].max(0.0)
+        } else {
+            1.0
+        };
         if w == 0.0 {
             continue;
         }
@@ -102,9 +106,15 @@ pub fn mixture_chisq_pvalue(statistic: f64, eigenvalues: &[f64]) -> f64 {
 
     // Match SKAT R: Get_Lambda_Org — keep eigenvalues > mean(positive) / 100000
     let positive: Vec<f64> = eigenvalues.iter().copied().filter(|&l| l >= 0.0).collect();
-    if positive.is_empty() { return 1.0; }
+    if positive.is_empty() {
+        return 1.0;
+    }
     let threshold = positive.iter().sum::<f64>() / positive.len() as f64 / 100000.0;
-    let lambdas: Vec<f64> = eigenvalues.iter().copied().filter(|&l| l > threshold).collect();
+    let lambdas: Vec<f64> = eigenvalues
+        .iter()
+        .copied()
+        .filter(|&l| l > threshold)
+        .collect();
     if lambdas.is_empty() {
         return 1.0;
     }
@@ -412,7 +422,10 @@ mod tests {
         // Combining smaller p-values must yield a smaller (or equal) result.
         let p_a = cauchy_combine(&[1e-100, 1e-100, 1e-100]);
         let p_b = cauchy_combine(&[1e-200, 1e-200, 1e-200]);
-        assert!(p_b < p_a, "smaller inputs must give smaller p: {p_a:e} vs {p_b:e}");
+        assert!(
+            p_b < p_a,
+            "smaller inputs must give smaller p: {p_a:e} vs {p_b:e}"
+        );
     }
 
     #[test]
@@ -432,7 +445,10 @@ mod tests {
         let p = cauchy_combine(&pvals);
         let expected = pvals.len() as f64 / pvals.iter().map(|p| 1.0 / p).sum::<f64>();
         let rel_err = (p - expected).abs() / expected;
-        assert!(rel_err < 1e-3, "p={p:e} expected={expected:e} rel_err={rel_err:e}");
+        assert!(
+            rel_err < 1e-3,
+            "p={p:e} expected={expected:e} rel_err={rel_err:e}"
+        );
     }
 
     #[test]
@@ -442,7 +458,10 @@ mod tests {
         let p_high = cauchy_combine_weighted(&pvals, &[10.0, 1.0]);
         // High weight on the large p-value
         let p_low = cauchy_combine_weighted(&pvals, &[1.0, 10.0]);
-        assert!(p_high < p_low, "Weighting small p should give smaller combined p");
+        assert!(
+            p_high < p_low,
+            "Weighting small p should give smaller combined p"
+        );
     }
 
     // -- SKAT p-value tests --
@@ -454,8 +473,10 @@ mod tests {
         let t = 5.0;
         let p = mixture_chisq_pvalue(t, &[lambda]);
         let exact = 1.0 - ChiSquared::new(1.0).unwrap().cdf(t / lambda);
-        assert!((p - exact).abs() < 0.01,
-            "Single eigenvalue: got {p:.6}, expected {exact:.6}");
+        assert!(
+            (p - exact).abs() < 0.01,
+            "Single eigenvalue: got {p:.6}, expected {exact:.6}"
+        );
     }
 
     #[test]
@@ -467,8 +488,10 @@ mod tests {
         let t = 10.0;
         let p = mixture_chisq_pvalue(t, &eigenvalues);
         let exact = 1.0 - ChiSquared::new(k as f64).unwrap().cdf(t / lambda);
-        assert!((p - exact).abs() < 0.05,
-            "Equal eigenvalues: got {p:.6}, expected {exact:.6}");
+        assert!(
+            (p - exact).abs() < 0.05,
+            "Equal eigenvalues: got {p:.6}, expected {exact:.6}"
+        );
     }
 
     #[test]
@@ -485,8 +508,7 @@ mod tests {
         let eigenvalues = [1.0, 2.0, 3.0];
         let mean = eigenvalues.iter().sum::<f64>();
         let p = mixture_chisq_pvalue(mean, &eigenvalues);
-        assert!(p > 0.3 && p < 0.7,
-            "p at mean should be ~0.5: {p}");
+        assert!(p > 0.3 && p < 0.7, "p at mean should be ~0.5: {p}");
     }
 
     // -- SPA tests --
@@ -503,7 +525,10 @@ mod tests {
         // Centered CGF: K'(0) = 0 (the centering term -t*mu*g makes this hold)
         let mu = vec![0.5, 0.3, 0.8];
         let g = vec![1.0, 0.0, 2.0];
-        assert!(cgf_d1(0.0, &mu, &g).abs() < 1e-12, "K'(0) should be 0 for centered CGF");
+        assert!(
+            cgf_d1(0.0, &mu, &g).abs() < 1e-12,
+            "K'(0) should be 0 for centered CGF"
+        );
     }
 
     #[test]
@@ -527,7 +552,11 @@ mod tests {
         let p_spa = spa_pvalue(score, &mu, &g);
 
         let norm = Normal::new(0.0, 1.0).unwrap();
-        let var: f64 = mu.iter().zip(&g).map(|(m, gi)| m * (1.0 - m) * gi * gi).sum();
+        let var: f64 = mu
+            .iter()
+            .zip(&g)
+            .map(|(m, gi)| m * (1.0 - m) * gi * gi)
+            .sum();
         let z = score / var.sqrt(); // centered CGF: E[S] = 0
         let p_normal = 2.0 * norm.cdf(-z.abs());
 

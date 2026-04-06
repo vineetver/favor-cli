@@ -7,10 +7,6 @@ use serde_json::json;
 
 use crate::error::FavorError;
 
-// ---------------------------------------------------------------------------
-// Format + OutputMode (was mode.rs)
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Debug, ValueEnum)]
 pub enum Format {
     Auto,
@@ -47,10 +43,6 @@ impl OutputMode {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Output trait
-// ---------------------------------------------------------------------------
-
 /// All commands use this trait for output — never write stdout directly.
 pub trait Output {
     fn status(&self, msg: &str);
@@ -67,10 +59,6 @@ pub fn create(mode: &OutputMode) -> Box<dyn Output> {
         OutputMode::Machine => Box::new(MachineOutput),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Human output (was output/human.rs)
-// ---------------------------------------------------------------------------
 
 struct HumanOutput;
 
@@ -116,7 +104,11 @@ impl Output for HumanOutput {
             .collect::<Vec<_>>()
             .join("");
         eprintln!("{header}");
-        let sep: String = widths.iter().map(|w| format!("  {}", "-".repeat(*w))).collect::<Vec<_>>().join("");
+        let sep: String = widths
+            .iter()
+            .map(|w| format!("  {}", "-".repeat(*w)))
+            .collect::<Vec<_>>()
+            .join("");
         eprintln!("{sep}");
         for row in rows {
             let line: String = row
@@ -129,10 +121,6 @@ impl Output for HumanOutput {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Machine output (was output/machine.rs)
-// ---------------------------------------------------------------------------
 
 struct MachineOutput;
 

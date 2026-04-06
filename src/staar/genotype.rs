@@ -47,10 +47,15 @@ pub fn extract_genotypes(
 ) -> Result<GenotypeResult, FavorError> {
     let reader = open_vcf(vcf_path, threads)?;
     let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
-    let header = vcf_reader.read_header()
+    let header = vcf_reader
+        .read_header()
         .map_err(|e| FavorError::Input(format!("VCF header: {e}")))?;
 
-    let sample_names: Vec<String> = header.sample_names().iter().map(|s| s.to_string()).collect();
+    let sample_names: Vec<String> = header
+        .sample_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let n_samples = sample_names.len();
     if n_samples == 0 {
         return Err(FavorError::Input(
@@ -58,8 +63,12 @@ pub fn extract_genotypes(
         ));
     }
 
-    output.status(&format!("Extracting genotypes: {} samples, {} decompression threads, {:.1}G memory",
-        n_samples, threads, available_memory as f64 / (1024.0 * 1024.0 * 1024.0)));
+    output.status(&format!(
+        "Extracting genotypes: {} samples, {} decompression threads, {:.1}G memory",
+        n_samples,
+        threads,
+        available_memory as f64 / (1024.0 * 1024.0 * 1024.0)
+    ));
 
     let bytes_per_variant = (n_samples as u64) * 4 + 200;
     let batch_size = ((available_memory / 4) / bytes_per_variant).clamp(1000, 100_000) as usize;
@@ -67,8 +76,9 @@ pub fn extract_genotypes(
     // Schema: 5 metadata columns + 1 packed dosage list
     let schema = Arc::new(packed_schema(n_samples));
     let geno_dir = output_dir.join("genotypes");
-    std::fs::create_dir_all(&geno_dir)
-        .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", geno_dir.display())))?;
+    std::fs::create_dir_all(&geno_dir).map_err(|e| {
+        FavorError::Resource(format!("Cannot create '{}': {e}", geno_dir.display()))
+    })?;
 
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
@@ -84,15 +94,18 @@ pub fn extract_genotypes(
     };
 
     for result in vcf_reader.records() {
-        let record = result.map_err(|e| FavorError::Analysis(format!(
-            "VCF parse error in '{}': {e}", vcf_path.display()
-        )))?;
-        process_record(&record, n_samples, &mut state, &schema, &props, &geno_dir, output)?;
+        let record = result.map_err(|e| {
+            FavorError::Analysis(format!("VCF parse error in '{}': {e}", vcf_path.display()))
+        })?;
+        process_record(
+            &record, n_samples, &mut state, &schema, &props, &geno_dir, output,
+        )?;
     }
 
     flush(&mut state, &schema)?;
     if let Some(w) = state.writer.take() {
-        w.close().map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+        w.close()
+            .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
     }
 
     // Write sample names sidecar (order matters for unpacking dosages)
@@ -112,7 +125,8 @@ pub fn extract_genotypes(
         &meta_path,
         serde_json::to_string_pretty(&meta)
             .map_err(|e| FavorError::Resource(format!("JSON serialize: {e}")))?,
-    ).map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", meta_path.display())))?;
+    )
+    .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", meta_path.display())))?;
 
     output.success(&format!(
         "Extracted {} variants × {} samples → packed dosage lists",
@@ -137,26 +151,33 @@ fn flush(state: &mut ExtractState, schema: &Arc<Schema>) -> Result<(), FavorErro
     if state.batch.count > 0 {
         if let Some(w) = state.writer.as_mut() {
             let rb = state.batch.finish(schema)?;
-            w.write(&rb).map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+            w.write(&rb)
+                .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
         }
     }
     Ok(())
 }
 
 fn switch_chrom(
-    chrom: &str, state: &mut ExtractState, schema: &Arc<Schema>,
-    props: &WriterProperties, geno_dir: &Path, output: &dyn Output,
+    chrom: &str,
+    state: &mut ExtractState,
+    schema: &Arc<Schema>,
+    props: &WriterProperties,
+    geno_dir: &Path,
+    output: &dyn Output,
 ) -> Result<(), FavorError> {
     flush(state, schema)?;
     if let Some(w) = state.writer.take() {
-        w.close().map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+        w.close()
+            .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
     }
     let chr_dir = geno_dir.join(format!("chromosome={chrom}"));
     std::fs::create_dir_all(&chr_dir)
         .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", chr_dir.display())))?;
     let parquet_path = chr_dir.join("data.parquet");
-    let f = File::create(&parquet_path)
-        .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", parquet_path.display())))?;
+    let f = File::create(&parquet_path).map_err(|e| {
+        FavorError::Resource(format!("Cannot create '{}': {e}", parquet_path.display()))
+    })?;
     state.writer = Some(
         ArrowWriter::try_new(f, schema.clone(), Some(props.clone()))
             .map_err(|e| FavorError::Resource(format!("Writer init: {e}")))?,
@@ -168,9 +189,13 @@ fn switch_chrom(
 }
 
 fn process_record(
-    record: &noodles_vcf::Record, n_samples: usize,
-    state: &mut ExtractState, schema: &Arc<Schema>,
-    props: &WriterProperties, geno_dir: &Path, output: &dyn Output,
+    record: &noodles_vcf::Record,
+    n_samples: usize,
+    state: &mut ExtractState,
+    schema: &Arc<Schema>,
+    props: &WriterProperties,
+    geno_dir: &Path,
+    output: &dyn Output,
 ) -> Result<(), FavorError> {
     let raw_chrom = record.reference_sequence_name();
     let chrom = match normalize_chrom(raw_chrom) {
@@ -204,7 +229,9 @@ fn process_record(
 
     for (alt_idx, alt) in alts.iter().enumerate() {
         let alt_upper = alt.trim().to_uppercase();
-        if alt_upper == "*" || alt_upper == "." || alt_upper.is_empty() { continue; }
+        if alt_upper == "*" || alt_upper == "." || alt_upper.is_empty() {
+            continue;
+        }
 
         let (norm_ref, norm_alt, norm_pos) = parsimony_normalize(&ref_allele, &alt_upper, pos);
 
@@ -226,7 +253,9 @@ fn process_record(
         let af = if an > 0.0 { ac / an } else { 0.0 };
         let maf = af.min(1.0 - af) as f32;
 
-        state.batch.push(chrom, norm_pos, &norm_ref, &norm_alt, maf, &dosages);
+        state
+            .batch
+            .push(chrom, norm_pos, &norm_ref, &norm_alt, maf, &dosages);
         state.total_variants += 1;
 
         if state.batch.is_full() {
@@ -247,12 +276,14 @@ fn packed_schema(n_samples: usize) -> Schema {
         Field::new("ref", DataType::Utf8, false),
         Field::new("alt", DataType::Utf8, false),
         Field::new("maf", DataType::Float32, true),
-        Field::new("dosages",
+        Field::new(
+            "dosages",
             DataType::FixedSizeList(
                 Arc::new(Field::new("item", DataType::Float32, true)),
                 n_samples as i32,
             ),
-            false),
+            false,
+        ),
     ])
 }
 
@@ -294,14 +325,20 @@ impl PackedBatchBuilder {
 
         let values = self.dosages.values();
         for &d in doses {
-            if d.is_nan() { values.append_null(); } else { values.append_value(d); }
+            if d.is_nan() {
+                values.append_null();
+            } else {
+                values.append_value(d);
+            }
         }
         self.dosages.append(true);
 
         self.count += 1;
     }
 
-    fn is_full(&self) -> bool { self.count >= self.capacity }
+    fn is_full(&self) -> bool {
+        self.count >= self.capacity
+    }
 
     fn finish(&mut self, schema: &Arc<Schema>) -> Result<RecordBatch, FavorError> {
         let columns: Vec<ArrayRef> = vec![
@@ -333,7 +370,11 @@ pub fn extract_gt_field(sample_field: &str, gt_index: usize) -> &str {
             start = i + 1;
         }
     }
-    if field_idx == gt_index { &sample_field[start..] } else { "." }
+    if field_idx == gt_index {
+        &sample_field[start..]
+    } else {
+        "."
+    }
 }
 
 /// Parse GT bytes to dosage. Branchless for common cases, no allocation.
@@ -344,9 +385,19 @@ pub fn gt_to_dosage(gt: &[u8], alt_index: u8) -> f32 {
     if gt.len() == 3 {
         let a0 = gt[0];
         let a1 = gt[2];
-        if a0 == b'.' || a1 == b'.' { return f32::NAN; }
-        let d0 = if a0.wrapping_sub(b'0') == alt_index { 1.0f32 } else { 0.0 };
-        let d1 = if a1.wrapping_sub(b'0') == alt_index { 1.0f32 } else { 0.0 };
+        if a0 == b'.' || a1 == b'.' {
+            return f32::NAN;
+        }
+        let d0 = if a0.wrapping_sub(b'0') == alt_index {
+            1.0f32
+        } else {
+            0.0
+        };
+        let d1 = if a1.wrapping_sub(b'0') == alt_index {
+            1.0f32
+        } else {
+            0.0
+        };
         return d0 + d1;
     }
     // Slow path: multi-digit alleles or missing
@@ -356,9 +407,13 @@ pub fn gt_to_dosage(gt: &[u8], alt_index: u8) -> f32 {
 fn gt_to_dosage_slow(gt: &[u8], alt_index: u8) -> f32 {
     let mut dose = 0.0f32;
     for allele in std::str::from_utf8(gt).unwrap_or(".").split(['/', '|']) {
-        if allele == "." { return f32::NAN; }
+        if allele == "." {
+            return f32::NAN;
+        }
         if let Ok(idx) = allele.parse::<u8>() {
-            if idx == alt_index { dose += 1.0; }
+            if idx == alt_index {
+                dose += 1.0;
+            }
         }
     }
     dose
@@ -368,9 +423,14 @@ pub fn read_sample_names(vcf_path: &Path) -> Result<Vec<String>, FavorError> {
     // Header-only read — single decompression thread is sufficient.
     let reader = open_vcf(vcf_path, 1)?;
     let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
-    let header = vcf_reader.read_header()
+    let header = vcf_reader
+        .read_header()
         .map_err(|e| FavorError::Input(format!("VCF header: {e}")))?;
-    Ok(header.sample_names().iter().map(|s| s.to_string()).collect())
+    Ok(header
+        .sample_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect())
 }
 
 use crate::engine::DfEngine;
@@ -385,7 +445,11 @@ pub fn load(
 ) -> Result<Vec<f64>, FavorError> {
     use arrow::array::{Array, Float64Array, ListArray};
     engine.register_parquet_file("_geno_load", std::path::Path::new(geno_path))?;
-    let pos_str = positions.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    let pos_str = positions
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let batches = engine.collect(&format!(
         "SELECT dosages FROM _geno_load WHERE position IN ({pos_str}) ORDER BY position"
     ))?;
@@ -394,16 +458,31 @@ pub fn load(
     let mut flat = vec![0.0; n_variants * n_samples];
     let mut vi = 0;
     for batch in &batches {
-        let dos_arr = batch.column(0).as_any().downcast_ref::<ListArray>()
-            .ok_or_else(|| FavorError::Analysis("Genotype parquet missing list-typed dosages column".into()))?;
+        let dos_arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .ok_or_else(|| {
+                FavorError::Analysis("Genotype parquet missing list-typed dosages column".into())
+            })?;
         for i in 0..batch.num_rows() {
-            if vi >= n_variants { break; }
+            if vi >= n_variants {
+                break;
+            }
             let dosage_list = dos_arr.value(i);
-            let dosages = dosage_list.as_any().downcast_ref::<Float64Array>()
-                .ok_or_else(|| FavorError::Analysis("Dosage list elements are not Float64".into()))?;
+            let dosages = dosage_list
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| {
+                    FavorError::Analysis("Dosage list elements are not Float64".into())
+                })?;
             let base = vi * n_samples;
             for si in 0..n_samples.min(dosages.len()) {
-                flat[base + si] = if dosages.is_null(si) { 0.0 } else { dosages.value(si) };
+                flat[base + si] = if dosages.is_null(si) {
+                    0.0
+                } else {
+                    dosages.value(si)
+                };
             }
             vi += 1;
         }

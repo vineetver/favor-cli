@@ -8,13 +8,9 @@ use crate::cli::DataAction;
 use crate::config::{Config, DirProbe, Environment, ResourceConfig, Tier};
 use crate::data::Pack;
 use crate::error::FavorError;
-use crate::output::OutputMode;
 use crate::output::Output;
+use crate::output::OutputMode;
 use crate::resource::Resources;
-
-// ---------------------------------------------------------------------------
-// Init command (was commands/init.rs)
-// ---------------------------------------------------------------------------
 
 pub fn init(
     path: Option<PathBuf>,
@@ -26,16 +22,15 @@ pub fn init(
 
     let project_dir = match path {
         Some(p) => {
-            std::fs::create_dir_all(&p)
-                .map_err(|e| FavorError::Resource(format!(
-                    "Cannot create directory '{}': {e}", p.display()
-                )))?;
-            p.canonicalize().map_err(|e| {
-                FavorError::Input(format!("Cannot resolve '{}': {e}", p.display()))
-            })?
+            std::fs::create_dir_all(&p).map_err(|e| {
+                FavorError::Resource(format!("Cannot create directory '{}': {e}", p.display()))
+            })?;
+            p.canonicalize()
+                .map_err(|e| FavorError::Input(format!("Cannot resolve '{}': {e}", p.display())))?
         }
-        None => std::env::current_dir()
-            .map_err(|e| FavorError::Resource(format!("Cannot determine current directory: {e}")))?,
+        None => std::env::current_dir().map_err(|e| {
+            FavorError::Resource(format!("Cannot determine current directory: {e}"))
+        })?,
     };
 
     let claude_path = project_dir.join("CLAUDE.md");
@@ -54,15 +49,25 @@ pub fn init(
     let probe = DirProbe::scan(&config.root_dir());
     let content = render_init_template(&config, &probe);
 
-    std::fs::write(&claude_path, &content)
-        .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", claude_path.display())))?;
-    std::fs::create_dir_all(&codex_dir)
-        .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", codex_dir.display())))?;
-    std::fs::write(&codex_path, &content)
-        .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", codex_path.display())))?;
+    std::fs::write(&claude_path, &content).map_err(|e| {
+        FavorError::Resource(format!("Cannot write '{}': {e}", claude_path.display()))
+    })?;
+    std::fs::create_dir_all(&codex_dir).map_err(|e| {
+        FavorError::Resource(format!("Cannot create '{}': {e}", codex_dir.display()))
+    })?;
+    std::fs::write(&codex_path, &content).map_err(|e| {
+        FavorError::Resource(format!("Cannot write '{}': {e}", codex_path.display()))
+    })?;
 
-    let action = if is_refresh { "Refreshed" } else { "Initialized" };
-    out.success(&format!("{action} agent context in {}", project_dir.display()));
+    let action = if is_refresh {
+        "Refreshed"
+    } else {
+        "Initialized"
+    };
+    out.success(&format!(
+        "{action} agent context in {}",
+        project_dir.display()
+    ));
     out.status("  CLAUDE.md (Claude Code)");
     out.status("  .codex/instructions.md (Codex)");
     out.status(&format!(
@@ -226,10 +231,6 @@ WHERE e.tissue_name LIKE '%Liver%';
 - Exit codes: 0=ok, 1=input, 2=data missing, 3=resource, 4=analysis
 "#;
 
-// ---------------------------------------------------------------------------
-// Setup command (was commands/setup.rs)
-// ---------------------------------------------------------------------------
-
 pub fn setup(
     output: &dyn Output,
     mode: &OutputMode,
@@ -245,7 +246,10 @@ pub fn setup(
     // 1. Pick tier — returns Tier directly, no index mapping
     let tier = match tui::select_tier().map_err(|e| FavorError::Internal(e.into()))? {
         Some(t) => t,
-        None => { output.warn("Setup cancelled"); return Ok(()); }
+        None => {
+            output.warn("Setup cancelled");
+            return Ok(());
+        }
     };
 
     // 2. Pick root directory — browser shows live data probe
@@ -254,12 +258,16 @@ pub fn setup(
         .map_err(|e| FavorError::Internal(e.into()))?
     {
         Some(p) => p,
-        None => { output.warn("Setup cancelled"); return Ok(()); }
+        None => {
+            output.warn("Setup cancelled");
+            return Ok(());
+        }
     };
 
     // 3. Pick add-on packs — detect what's already installed on disk
     let optional_packs = Pack::optional();
-    let installed_pack_ids: Vec<String> = optional_packs.iter()
+    let installed_pack_ids: Vec<String> = optional_packs
+        .iter()
         .filter(|p| p.tables.iter().any(|t| p.local_dir(&root).join(t).is_dir()))
         .map(|p| p.id.to_string())
         .collect();
@@ -276,12 +284,20 @@ pub fn setup(
 
     // Validate HPC choice: check srun/sbatch availability
     if environment == Some(Environment::Hpc) {
-        let has_srun = std::process::Command::new("which").arg("srun")
-            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false);
-        let has_sbatch = std::process::Command::new("which").arg("sbatch")
-            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false);
+        let has_srun = std::process::Command::new("which")
+            .arg("srun")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let has_sbatch = std::process::Command::new("which")
+            .arg("sbatch")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
 
         if !has_srun && !has_sbatch {
             output.warn("srun/sbatch not found in PATH — are you sure this is HPC?");
@@ -300,8 +316,7 @@ pub fn setup(
         }
         Some(budget.clone())
     } else {
-        tui::select_memory_budget(&res_detect)
-            .map_err(|e| FavorError::Internal(e.into()))?
+        tui::select_memory_budget(&res_detect).map_err(|e| FavorError::Internal(e.into()))?
     };
 
     // 6. Probe the chosen root to show what's already there
@@ -319,13 +334,21 @@ pub fn setup(
     if chrom_count == 24 {
         output.success(&format!("  {tier}: 24/24 chromosomes found"));
     } else if chrom_count > 0 {
-        output.status(&format!("  {tier}: {chrom_count}/24 found, will download remaining"));
+        output.status(&format!(
+            "  {tier}: {chrom_count}/24 found, will download remaining"
+        ));
     } else {
-        output.status(&format!("  {tier}: will download ({tier_size})", tier_size = tier.size_human()));
+        output.status(&format!(
+            "  {tier}: will download ({tier_size})",
+            tier_size = tier.size_human()
+        ));
     }
 
     if !probe.tissue_tables.is_empty() {
-        output.success(&format!("  Tissue: {} tables found", probe.tissue_tables.len()));
+        output.success(&format!(
+            "  Tissue: {} tables found",
+            probe.tissue_tables.len()
+        ));
     }
     if !selected_packs.is_empty() {
         output.status(&format!("  Packs:  {}", selected_packs.join(", ")));
@@ -336,13 +359,15 @@ pub fn setup(
     if let Some(budget) = &memory_budget {
         output.status(&format!("  Budget: {}", budget));
     }
-    output.status(&format!("  System: {} memory, {} threads ({})",
-        res_detect.memory_human(), res_detect.threads, res_detect.environment()));
+    output.status(&format!(
+        "  System: {} memory, {} threads ({})",
+        res_detect.memory_human(),
+        res_detect.threads,
+        res_detect.environment()
+    ));
 
     // 7. Save config — preserve existing resource customizations, overlay new ones
-    let mut existing_resources = Config::load()
-        .map(|c| c.resources)
-        .unwrap_or_default();
+    let mut existing_resources = Config::load().map(|c| c.resources).unwrap_or_default();
 
     // Update environment and budget from this setup run
     if environment.is_some() {
@@ -366,35 +391,42 @@ pub fn setup(
     // 8. Download annotations (skips if already complete)
     output.status("Checking annotations...");
     if let Err(e) = crate::data::transfer::run(
-        DataAction::Pull { full: tier == Tier::Full, dry_run: false, yes: true, pack: None },
+        DataAction::Pull {
+            full: tier == Tier::Full,
+            dry_run: false,
+            yes: true,
+            pack: None,
+        },
         output,
     ) {
-        output.warn("Config saved but annotation download incomplete. Run `favor data pull` to retry.");
+        output.warn(
+            "Config saved but annotation download incomplete. Run `favor data pull` to retry.",
+        );
         return Err(e);
     }
 
     // 9. Download always-installed packs
     for pack in Pack::required() {
         if let Err(e) = crate::data::transfer::pull_pack(pack.id, false, true, output) {
-            output.warn(&format!("{} failed: {e}. Run `favor data pull --pack {}` to retry.",
-                pack.name, pack.id));
+            output.warn(&format!(
+                "{} failed: {e}. Run `favor data pull --pack {}` to retry.",
+                pack.name, pack.id
+            ));
         }
     }
 
     // 10. Download selected packs
     for pack_id in &selected_packs {
         if let Err(e) = crate::data::transfer::pull_pack(pack_id, false, true, output) {
-            output.warn(&format!("Pack '{pack_id}' failed: {e}. Run `favor data pull --pack {pack_id}` to retry."));
+            output.warn(&format!(
+                "Pack '{pack_id}' failed: {e}. Run `favor data pull --pack {pack_id}` to retry."
+            ));
         }
     }
 
     output.success("Setup complete. Run: favor annotate <input.vcf>");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Uninstall command (was commands/uninstall.rs)
-// ---------------------------------------------------------------------------
 
 pub fn uninstall(out: &dyn Output) -> Result<(), FavorError> {
     let binary = std::env::current_exe().unwrap_or_default();
@@ -407,10 +439,12 @@ pub fn uninstall(out: &dyn Output) -> Result<(), FavorError> {
 
     // Remove config directory
     if config_dir.exists() {
-        std::fs::remove_dir_all(&config_dir)
-            .map_err(|e| FavorError::Resource(format!(
-                "Cannot remove config directory '{}': {e}", config_dir.display()
-            )))?;
+        std::fs::remove_dir_all(&config_dir).map_err(|e| {
+            FavorError::Resource(format!(
+                "Cannot remove config directory '{}': {e}",
+                config_dir.display()
+            ))
+        })?;
         out.status("  Removed config directory");
     }
 
@@ -423,7 +457,8 @@ pub fn uninstall(out: &dyn Output) -> Result<(), FavorError> {
         let rc_path = home.join(rc);
         if rc_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&rc_path) {
-                let filtered: Vec<&str> = content.lines()
+                let filtered: Vec<&str> = content
+                    .lines()
                     .filter(|line| !line.contains(&*install_str) || !line.contains("PATH"))
                     .collect();
                 if filtered.len() < content.lines().count() {
@@ -436,14 +471,11 @@ pub fn uninstall(out: &dyn Output) -> Result<(), FavorError> {
 
     // Remove binary last (we're running it)
     if binary.exists() {
-        std::fs::remove_file(&binary)
-            .map_err(|e| FavorError::Resource(format!(
-                "Cannot remove binary '{}': {e}", binary.display()
-            )))?;
+        std::fs::remove_file(&binary).map_err(|e| {
+            FavorError::Resource(format!("Cannot remove binary '{}': {e}", binary.display()))
+        })?;
     }
 
     out.success("Uninstalled. Data packs remain at your configured root directory.");
     Ok(())
 }
-
-// TUI widgets live in setup/tui.rs

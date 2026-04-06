@@ -7,7 +7,9 @@ use serde_json::json;
 use crate::error::FavorError;
 use crate::output::Output;
 
-use super::transfer::{sha256_file, FileEntry, PackManifest, MANIFEST_SCHEMA_VERSION, REMOTE_BASE_URL};
+use super::transfer::{
+    sha256_file, FileEntry, PackManifest, MANIFEST_SCHEMA_VERSION, REMOTE_BASE_URL,
+};
 use super::Pack;
 
 const MINIO_ALIAS: &str = "favor";
@@ -21,14 +23,14 @@ pub fn publish(
 ) -> Result<(), FavorError> {
     if !source_root.is_dir() {
         return Err(FavorError::Input(format!(
-            "Source root does not exist: {}", source_root.display()
+            "Source root does not exist: {}",
+            source_root.display()
         )));
     }
 
     let packs: Vec<&Pack> = if let Some(ref id) = pack_filter {
-        let pack = Pack::find(id).ok_or_else(|| {
-            FavorError::Input(format!("Unknown pack '{id}'"))
-        })?;
+        let pack =
+            Pack::find(id).ok_or_else(|| FavorError::Input(format!("Unknown pack '{id}'")))?;
         vec![pack]
     } else {
         Pack::all().iter().collect()
@@ -36,7 +38,8 @@ pub fn publish(
 
     output.status(&format!(
         "Publishing {} pack(s) from {}{}",
-        packs.len(), source_root.display(),
+        packs.len(),
+        source_root.display(),
         if dry_run { " (dry run)" } else { "" },
     ));
 
@@ -65,7 +68,8 @@ fn publish_pack(
     if !source_base.is_dir() {
         return Err(FavorError::Input(format!(
             "Source directory does not exist for pack '{}': {}",
-            pack.id, source_base.display()
+            pack.id,
+            source_base.display()
         )));
     }
 
@@ -74,7 +78,11 @@ fn publish_pack(
     for table in pack.tables {
         let table_dir = source_base.join(table);
         if !table_dir.is_dir() {
-            output.warn(&format!("  table '{}' not found at {}", table, table_dir.display()));
+            output.warn(&format!(
+                "  table '{}' not found at {}",
+                table,
+                table_dir.display()
+            ));
             continue;
         }
 
@@ -89,24 +97,38 @@ fn publish_pack(
             });
 
         for entry in walker {
-            let rel_path = entry.path()
+            let rel_path = entry
+                .path()
                 .strip_prefix(&source_base)
-                .map_err(|_| FavorError::Resource(
-                    format!("Failed to compute relative path for {}", entry.path().display())
-                ))?
+                .map_err(|_| {
+                    FavorError::Resource(format!(
+                        "Failed to compute relative path for {}",
+                        entry.path().display()
+                    ))
+                })?
                 .to_string_lossy()
                 .to_string();
 
-            let size = entry.metadata()
-                .map_err(|e| FavorError::Resource(
-                    format!("Failed to read metadata for {}: {e}", entry.path().display())
-                ))?
+            let size = entry
+                .metadata()
+                .map_err(|e| {
+                    FavorError::Resource(format!(
+                        "Failed to read metadata for {}: {e}",
+                        entry.path().display()
+                    ))
+                })?
                 .len();
 
             output.status(&format!("  hashing {rel_path}..."));
             let sha256 = sha256_file(entry.path())?;
 
-            files.insert(rel_path, FileEntry { size, sha256: Some(sha256) });
+            files.insert(
+                rel_path,
+                FileEntry {
+                    size,
+                    sha256: Some(sha256),
+                },
+            );
         }
     }
 
@@ -126,12 +148,17 @@ fn publish_pack(
         files: files.clone(),
     };
 
-    let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| {
-        FavorError::Resource(format!("Failed to serialize manifest: {e}"))
-    })?;
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| FavorError::Resource(format!("Failed to serialize manifest: {e}")))?;
 
     let total_gb = total_size as f64 / (1024.0 * 1024.0 * 1024.0);
-    output.status(&format!("  {}: {} files, {:.1} GB, schema v{}", pack.id, manifest.files.len(), total_gb, MANIFEST_SCHEMA_VERSION));
+    output.status(&format!(
+        "  {}: {} files, {:.1} GB, schema v{}",
+        pack.id,
+        manifest.files.len(),
+        total_gb,
+        MANIFEST_SCHEMA_VERSION
+    ));
 
     if dry_run {
         let manifest_path = format!("/tmp/favor-manifest-{}.json", pack.id);
@@ -161,7 +188,8 @@ fn publish_pack(
 
         if !status.success() {
             return Err(FavorError::Resource(format!(
-                "mc cp failed for {rel_path} (exit {})", status.code().unwrap_or(-1)
+                "mc cp failed for {rel_path} (exit {})",
+                status.code().unwrap_or(-1)
             )));
         }
 
@@ -183,7 +211,9 @@ fn publish_pack(
         .map_err(|e| FavorError::Resource(format!("Failed to upload manifest: {e}")))?;
 
     if !status.success() {
-        return Err(FavorError::Resource("mc cp failed for manifest.json".to_string()));
+        return Err(FavorError::Resource(
+            "mc cp failed for manifest.json".to_string(),
+        ));
     }
 
     let _ = std::fs::remove_file(&tmp_manifest);
@@ -191,8 +221,11 @@ fn publish_pack(
     output.status("  validating uploaded manifest...");
     let base = pack.base_url(REMOTE_BASE_URL);
     let url = format!("{base}/packs/{}/manifest.json", pack.id);
-    let body = ureq::get(&url).call()
-        .map_err(|e| FavorError::Resource(format!("Failed to re-fetch manifest after upload: {e}")))?
+    let body = ureq::get(&url)
+        .call()
+        .map_err(|e| {
+            FavorError::Resource(format!("Failed to re-fetch manifest after upload: {e}"))
+        })?
         .into_body()
         .read_to_string()
         .map_err(|e| FavorError::Resource(format!("Failed to read uploaded manifest: {e}")))?;
@@ -203,15 +236,23 @@ fn publish_pack(
 
     if reread.schema_version != MANIFEST_SCHEMA_VERSION {
         return Err(FavorError::Resource(format!(
-            "Uploaded manifest has schema_version {}, expected {}", reread.schema_version, MANIFEST_SCHEMA_VERSION
+            "Uploaded manifest has schema_version {}, expected {}",
+            reread.schema_version, MANIFEST_SCHEMA_VERSION
         )));
     }
     if reread.files.len() != files.len() {
         return Err(FavorError::Resource(format!(
-            "Uploaded manifest has {} files, expected {}", reread.files.len(), files.len()
+            "Uploaded manifest has {} files, expected {}",
+            reread.files.len(),
+            files.len()
         )));
     }
 
-    output.success(&format!("  {} published: {} files, {:.1} GB", pack.id, files.len(), total_gb));
+    output.success(&format!(
+        "  {} published: {} files, {:.1} GB",
+        pack.id,
+        files.len(),
+        total_gb
+    ));
     Ok(())
 }

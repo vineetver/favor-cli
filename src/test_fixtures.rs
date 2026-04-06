@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use crate::types::{
-    AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation,
-    RegionType, RegulatoryFlags,
+    AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation, RegionType,
+    RegulatoryFlags,
 };
 
 // Ground truth annotation weights from real OR11H1 stopgain on chr22.
@@ -40,7 +40,9 @@ pub fn base_variant() -> AnnotatedVariant {
     }
 }
 
-pub fn stopgain() -> AnnotatedVariant { base_variant() }
+pub fn stopgain() -> AnnotatedVariant {
+    base_variant()
+}
 
 pub fn splice() -> AnnotatedVariant {
     AnnotatedVariant {
@@ -182,7 +184,10 @@ pub fn cage_promoter() -> AnnotatedVariant {
             consequence: Consequence::Unknown,
             cadd_phred: 12.3,
             revel: 0.0,
-            regulatory: RegulatoryFlags { cage_promoter: true, ..RegulatoryFlags::default() },
+            regulatory: RegulatoryFlags {
+                cage_promoter: true,
+                ..RegulatoryFlags::default()
+            },
             ..base_variant().annotation
         },
         ..base_variant()
@@ -197,7 +202,10 @@ pub fn cage_enhancer() -> AnnotatedVariant {
             consequence: Consequence::Unknown,
             cadd_phred: 8.1,
             revel: 0.0,
-            regulatory: RegulatoryFlags { cage_enhancer: true, ..RegulatoryFlags::default() },
+            regulatory: RegulatoryFlags {
+                cage_enhancer: true,
+                ..RegulatoryFlags::default()
+            },
             ..base_variant().annotation
         },
         ..base_variant()
@@ -212,7 +220,10 @@ pub fn ccre_pls() -> AnnotatedVariant {
             consequence: Consequence::Unknown,
             cadd_phred: 7.0,
             revel: 0.0,
-            regulatory: RegulatoryFlags { ccre_promoter: true, ..RegulatoryFlags::default() },
+            regulatory: RegulatoryFlags {
+                ccre_promoter: true,
+                ..RegulatoryFlags::default()
+            },
             ..base_variant().annotation
         },
         ..base_variant()
@@ -227,7 +238,10 @@ pub fn ccre_els() -> AnnotatedVariant {
             consequence: Consequence::Unknown,
             cadd_phred: 8.7,
             revel: 0.0,
-            regulatory: RegulatoryFlags { ccre_enhancer: true, ..RegulatoryFlags::default() },
+            regulatory: RegulatoryFlags {
+                ccre_enhancer: true,
+                ..RegulatoryFlags::default()
+            },
             ..base_variant().annotation
         },
         ..base_variant()
@@ -266,11 +280,23 @@ pub fn intronic() -> AnnotatedVariant {
 
 pub fn all_variants() -> Vec<AnnotatedVariant> {
     vec![
-        stopgain(), splice(), missense_high(), missense_low(),
-        synonymous(), frameshift(), stoploss(), upstream(),
-        downstream(), upstream_downstream(), utr3(),
-        cage_promoter(), cage_enhancer(), ccre_pls(), ccre_els(),
-        ncrna(), intronic(),
+        stopgain(),
+        splice(),
+        missense_high(),
+        missense_low(),
+        synonymous(),
+        frameshift(),
+        stoploss(),
+        upstream(),
+        downstream(),
+        upstream_downstream(),
+        utr3(),
+        cage_promoter(),
+        cage_enhancer(),
+        ccre_pls(),
+        ccre_els(),
+        ncrna(),
+        intronic(),
     ]
 }
 
@@ -435,15 +461,17 @@ pub fn staar_rare_sql() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::staar::masks;
-    use crate::staar::MaskType;
     use crate::engine::DfEngine;
     use crate::resource::Resources;
+    use crate::staar::masks;
+    use crate::staar::MaskType;
     use arrow::array::{Array, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray};
 
     // DataFusion 53 may return Utf8View instead of Utf8 for CAST(... AS VARCHAR).
     fn str_col_val(col: &dyn Array, row: usize) -> String {
-        if col.is_null(row) { return String::new(); }
+        if col.is_null(row) {
+            return String::new();
+        }
         if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
             return a.value(row).to_string();
         }
@@ -453,7 +481,9 @@ mod tests {
     // DataFusion 53 may return different numeric types than expected.
     // Use array_value_to_string + parse as a universal extractor.
     fn num_col_val(col: &dyn Array, row: usize) -> f64 {
-        if col.is_null(row) { return 0.0; }
+        if col.is_null(row) {
+            return 0.0;
+        }
         if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
             return a.value(row);
         }
@@ -470,7 +500,9 @@ mod tests {
     }
 
     fn bool_col_val(col: &dyn Array, row: usize) -> bool {
-        if col.is_null(row) { return false; }
+        if col.is_null(row) {
+            return false;
+        }
         if let Some(a) = col.as_any().downcast_ref::<BooleanArray>() {
             return a.value(row);
         }
@@ -483,22 +515,34 @@ mod tests {
         // gene_name, region_type, consequence, cadd_phred, revel,
         // is_cage_promoter..is_ccre_enhancer, w_cadd..w_apc_tf
         // (25 columns total = chromosome + 13 metadata + 11 weights)
-        let batches = engine.collect(
-            &format!("SELECT {chr}, {pos}, {ref_a}, {alt_a}, {maf}, \
+        let batches = engine
+            .collect(&format!(
+                "SELECT {chr}, {pos}, {ref_a}, {alt_a}, {maf}, \
                  {gene}, {region}, {csq}, {cadd}, {revel}, \
                  {cage_p}, {cage_e}, {ccre_p}, {ccre_e}, \
                  {weights} \
                  FROM _rare ORDER BY {pos}",
-                chr = Col::Chromosome, pos = Col::Position,
-                ref_a = Col::RefAllele, alt_a = Col::AltAllele, maf = Col::Maf,
-                gene = Col::GeneName, region = Col::RegionType, csq = Col::Consequence,
-                cadd = Col::CaddPhred, revel = Col::Revel,
-                cage_p = Col::IsCagePromoter, cage_e = Col::IsCageEnhancer,
-                ccre_p = Col::IsCcrePromoter, ccre_e = Col::IsCcreEnhancer,
-                weights = crate::column::STAAR_WEIGHTS.iter()
-                    .map(|c| c.as_str()).collect::<Vec<_>>().join(", "),
-            )
-        ).unwrap();
+                chr = Col::Chromosome,
+                pos = Col::Position,
+                ref_a = Col::RefAllele,
+                alt_a = Col::AltAllele,
+                maf = Col::Maf,
+                gene = Col::GeneName,
+                region = Col::RegionType,
+                csq = Col::Consequence,
+                cadd = Col::CaddPhred,
+                revel = Col::Revel,
+                cage_p = Col::IsCagePromoter,
+                cage_e = Col::IsCageEnhancer,
+                ccre_p = Col::IsCcrePromoter,
+                ccre_e = Col::IsCcreEnhancer,
+                weights = crate::column::STAAR_WEIGHTS
+                    .iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ))
+            .unwrap();
 
         let mut variants = Vec::new();
         for batch in &batches {
@@ -510,15 +554,22 @@ mod tests {
 
                 variants.push(AnnotatedVariant {
                     chromosome: str_col_val(batch.column(0).as_ref(), row)
-                        .parse().unwrap_or(Chromosome::Autosome(1)),
+                        .parse()
+                        .unwrap_or(Chromosome::Autosome(1)),
                     position: num_col_val(batch.column(1).as_ref(), row) as u32,
                     ref_allele: str_col_val(batch.column(2).as_ref(), row).into(),
                     alt_allele: str_col_val(batch.column(3).as_ref(), row).into(),
                     maf: num_col_val(batch.column(4).as_ref(), row),
                     gene_name: str_col_val(batch.column(5).as_ref(), row).into(),
                     annotation: FunctionalAnnotation {
-                        region_type: RegionType::from_str_lossy(&str_col_val(batch.column(6).as_ref(), row)),
-                        consequence: Consequence::from_str_lossy(&str_col_val(batch.column(7).as_ref(), row)),
+                        region_type: RegionType::from_str_lossy(&str_col_val(
+                            batch.column(6).as_ref(),
+                            row,
+                        )),
+                        consequence: Consequence::from_str_lossy(&str_col_val(
+                            batch.column(7).as_ref(),
+                            row,
+                        )),
                         cadd_phred: num_col_val(batch.column(8).as_ref(), row),
                         revel: num_col_val(batch.column(9).as_ref(), row),
                         regulatory: RegulatoryFlags {
@@ -573,7 +624,10 @@ mod tests {
     #[test]
     fn extraction_splice_has_empty_consequence() {
         let (_dir, _engine, variants) = setup_rare_table();
-        let v = variants.iter().find(|v| v.annotation.region_type == RegionType::Splicing).unwrap();
+        let v = variants
+            .iter()
+            .find(|v| v.annotation.region_type == RegionType::Splicing)
+            .unwrap();
         assert_eq!(v.annotation.consequence, Consequence::Unknown);
         assert!((v.annotation.cadd_phred - 25.1).abs() < 0.1);
     }
@@ -605,7 +659,10 @@ mod tests {
     #[test]
     fn extraction_null_cage_is_false() {
         let (_dir, _engine, variants) = setup_rare_table();
-        let intronic = variants.iter().find(|v| v.annotation.region_type == RegionType::Intronic).unwrap();
+        let intronic = variants
+            .iter()
+            .find(|v| v.annotation.region_type == RegionType::Intronic)
+            .unwrap();
         assert!(!intronic.annotation.regulatory.cage_promoter);
         assert!(!intronic.annotation.regulatory.cage_enhancer);
     }
@@ -613,9 +670,12 @@ mod tests {
     #[test]
     fn extraction_annotation_weights_nonzero() {
         let (_dir, _engine, variants) = setup_rare_table();
-        let v = variants.iter().find(|v| v.annotation.consequence == Consequence::Stopgain).unwrap();
+        let v = variants
+            .iter()
+            .find(|v| v.annotation.consequence == Consequence::Stopgain)
+            .unwrap();
         assert!(v.annotation.weights.0[0] > 0.99); // cadd weight for phred=23.7
-        assert!(v.annotation.weights.0[1] > 0.0);  // linsight
+        assert!(v.annotation.weights.0[1] > 0.0); // linsight
     }
 
     #[test]
@@ -623,7 +683,8 @@ mod tests {
         let (_dir, _engine, variants) = setup_rare_table();
         let coding = masks::build_coding_masks(&variants, 1);
 
-        let plof_genes: Vec<&str> = coding.iter()
+        let plof_genes: Vec<&str> = coding
+            .iter()
             .filter(|(mt, _)| *mt == MaskType::PLof)
             .flat_map(|(_, groups)| groups.iter().map(|g| g.name.as_str()))
             .collect();
@@ -633,8 +694,11 @@ mod tests {
         for group in &ptv.1 {
             for &idx in &group.variant_indices {
                 let csq = variants[idx].annotation.consequence;
-                assert!(csq == Consequence::Stopgain || csq == Consequence::FrameshiftDeletion,
-                    "ptv should not include: {}", csq.as_str());
+                assert!(
+                    csq == Consequence::Stopgain || csq == Consequence::FrameshiftDeletion,
+                    "ptv should not include: {}",
+                    csq.as_str()
+                );
             }
         }
     }
@@ -645,7 +709,9 @@ mod tests {
         let noncoding = masks::build_noncoding_masks(&variants, 1);
 
         let has_mask = |mt: MaskType| -> bool {
-            noncoding.iter().any(|(m, groups)| *m == mt && !groups.is_empty())
+            noncoding
+                .iter()
+                .any(|(m, groups)| *m == mt && !groups.is_empty())
         };
 
         assert!(has_mask(MaskType::Upstream));
@@ -661,15 +727,20 @@ mod tests {
     #[test]
     fn intronic_in_no_mask() {
         let (_dir, _engine, variants) = setup_rare_table();
-        let intronic_idx = variants.iter().position(|v| v.annotation.region_type == RegionType::Intronic).unwrap();
+        let intronic_idx = variants
+            .iter()
+            .position(|v| v.annotation.region_type == RegionType::Intronic)
+            .unwrap();
 
         let coding = masks::build_coding_masks(&variants, 1);
         let noncoding = masks::build_noncoding_masks(&variants, 1);
 
         for (_, groups) in coding.iter().chain(noncoding.iter()) {
             for group in groups {
-                assert!(!group.variant_indices.contains(&intronic_idx),
-                    "intronic variant should not appear in any mask");
+                assert!(
+                    !group.variant_indices.contains(&intronic_idx),
+                    "intronic variant should not appear in any mask"
+                );
             }
         }
     }
@@ -678,7 +749,13 @@ mod tests {
     fn sliding_windows_on_extracted() {
         let (_dir, _engine, variants) = setup_rare_table();
         let indices: Vec<usize> = (0..variants.len()).collect();
-        let windows = masks::build_sliding_windows(&variants, &indices, crate::types::Chromosome::Autosome(22), 2000, 2000);
+        let windows = masks::build_sliding_windows(
+            &variants,
+            &indices,
+            crate::types::Chromosome::Autosome(22),
+            2000,
+            2000,
+        );
         assert!(!windows.is_empty());
         for w in &windows {
             assert!(w.variant_indices.len() >= 2);
