@@ -11,6 +11,7 @@ use super::model::NullModel;
 use super::score::{self, StaarResult};
 use super::stats;
 
+#[derive(Clone)]
 pub struct AncestryInfo {
     pub group: Vec<usize>,
     pub n_pops: usize,

@@ -8,5 +8,5 @@ pub mod encoding;
 pub mod reader;
 pub mod sparse_score;
 
-pub use reader::VariantIndex;
+pub use reader::{CarrierList, VariantIndex, VariantIndexEntry};
 pub use sparse_score::AnalysisVectors;

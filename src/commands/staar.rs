@@ -1,7 +1,7 @@
 //! `favor staar` command — thin orchestrator.
 //!
-//! Validates CLI arguments, constructs a `StaarConfig`, and delegates to
-//! `StaarPipeline` for the actual work.
+//! Validates `StaarArgs`, builds a typed `StaarConfig`, and delegates to
+//! `StaarPipeline::run`. Replaces the previous 20-positional-arg entry point.
 
 use std::path::PathBuf;
 
@@ -11,48 +11,46 @@ use crate::commands;
 use crate::data::VariantSet;
 use crate::error::FavorError;
 use crate::output::Output;
-use crate::staar::store;
+use crate::staar::masks::ScangParams;
 use crate::staar::pipeline::{StaarConfig, StaarPipeline};
+use crate::staar::store;
 use crate::staar::{self, MaskCategory};
 
 const GB: u64 = 1024 * 1024 * 1024;
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    genotypes: PathBuf,
-    phenotype: PathBuf,
-    trait_names: Vec<String>,
-    covariates: Vec<String>,
-    annotations: Option<PathBuf>,
-    masks: Vec<String>,
-    maf_cutoff: f64,
-    window_size: u32,
-    individual: bool,
-    spa: bool,
-    ancestry_col: Option<String>,
-    ai_base_tests: usize,
-    ai_seed: u64,
-    scang_lmin: usize,
-    scang_lmax: usize,
-    scang_step: usize,
-    kinship: Vec<PathBuf>,
-    kinship_groups: Option<String>,
-    known_loci: Option<PathBuf>,
-    emit_sumstats: bool,
-    rebuild_store: bool,
-    column_map: Vec<String>,
-    output_path: Option<PathBuf>,
-    out: &dyn Output,
-    dry_run: bool,
-) -> Result<(), FavorError> {
-    let config = validate_and_parse(
-        genotypes, phenotype, trait_names, covariates, annotations, masks,
-        maf_cutoff, window_size, individual, spa,
-        ancestry_col, ai_base_tests, ai_seed,
-        scang_lmin, scang_lmax, scang_step, kinship, kinship_groups,
-        known_loci, emit_sumstats,
-        rebuild_store, column_map, output_path,
-    )?;
+/// Raw, unvalidated CLI arguments for `favor staar`.
+///
+/// Mirrors the `Command::Staar` variant in `cli.rs`. Carrying a single
+/// struct around lets each layer pass arguments by name, kills the 20-arg
+/// signature blob, and gives validation a typed home.
+pub struct StaarArgs {
+    pub genotypes: PathBuf,
+    pub phenotype: PathBuf,
+    pub trait_names: Vec<String>,
+    pub covariates: Vec<String>,
+    pub annotations: Option<PathBuf>,
+    pub masks: Vec<String>,
+    pub maf_cutoff: f64,
+    pub window_size: u32,
+    pub individual: bool,
+    pub spa: bool,
+    pub ancestry_col: Option<String>,
+    pub ai_base_tests: usize,
+    pub ai_seed: u64,
+    pub scang_lmin: usize,
+    pub scang_lmax: usize,
+    pub scang_step: usize,
+    pub kinship: Vec<PathBuf>,
+    pub kinship_groups: Option<String>,
+    pub known_loci: Option<PathBuf>,
+    pub emit_sumstats: bool,
+    pub rebuild_store: bool,
+    pub column_map: Vec<String>,
+    pub output_path: Option<PathBuf>,
+}
+
+pub fn run(args: StaarArgs, out: &dyn Output, dry_run: bool) -> Result<(), FavorError> {
+    let config = build_config(args)?;
 
     if dry_run {
         return emit_dry_run(&config, out);
@@ -62,86 +60,54 @@ pub fn run(
     pipeline.run()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn validate_and_parse(
-    genotypes: PathBuf,
-    phenotype: PathBuf,
-    trait_names: Vec<String>,
-    covariates: Vec<String>,
-    annotations: Option<PathBuf>,
-    masks: Vec<String>,
-    maf_cutoff: f64,
-    window_size: u32,
-    individual: bool,
-    spa: bool,
-    ancestry_col: Option<String>,
-    ai_base_tests: usize,
-    ai_seed: u64,
-    scang_lmin: usize,
-    scang_lmax: usize,
-    scang_step: usize,
-    kinship: Vec<PathBuf>,
-    kinship_groups: Option<String>,
-    known_loci: Option<PathBuf>,
-    emit_sumstats: bool,
-    rebuild_store: bool,
-    column_map_raw: Vec<String>,
-    output_path: Option<PathBuf>,
-) -> Result<StaarConfig, FavorError> {
-    if !genotypes.exists() {
+/// Validate `StaarArgs` and produce a `StaarConfig`. All input checks live
+/// here so the pipeline never sees a half-validated config.
+fn build_config(args: StaarArgs) -> Result<StaarConfig, FavorError> {
+    if !args.genotypes.exists() {
         return Err(FavorError::Input(format!(
             "Genotype VCF not found: '{}'. Check the path to your multi-sample VCF.",
-            genotypes.display()
+            args.genotypes.display()
         )));
     }
-    if !phenotype.exists() {
+    if !args.phenotype.exists() {
         return Err(FavorError::Input(format!(
             "Phenotype file not found: '{}'. Provide a tab-delimited file with sample IDs, traits, and covariates.",
-            phenotype.display()
+            args.phenotype.display()
         )));
     }
-    if maf_cutoff <= 0.0 || maf_cutoff >= 0.5 {
+    if args.maf_cutoff <= 0.0 || args.maf_cutoff >= 0.5 {
         return Err(FavorError::Input(format!(
-            "MAF cutoff must be in (0, 0.5), got {maf_cutoff}"
+            "MAF cutoff must be in (0, 0.5), got {}",
+            args.maf_cutoff
         )));
     }
-    let annotations_path = annotations.ok_or_else(|| {
+    if args.trait_names.is_empty() {
+        return Err(FavorError::Input(
+            "At least one --trait-name is required.".into(),
+        ));
+    }
+
+    let annotations = args.annotations.ok_or_else(|| {
         FavorError::Input("STAAR requires --annotations <path> from `favor annotate`.".into())
     })?;
-    if !annotations_path.exists() {
+    if !annotations.exists() {
         return Err(FavorError::Input(format!(
             "Annotations not found: {}. Run `favor annotate` first.",
-            annotations_path.display()
+            annotations.display()
         )));
     }
-    let ann_vs = VariantSet::open(&annotations_path).map_err(|e| {
+    let ann_vs = VariantSet::open(&annotations).map_err(|e| {
         FavorError::Input(format!(
             "'{}' is not a valid variant set ({}). Run `favor annotate` to produce one.",
-            annotations_path.display(), e,
+            annotations.display(),
+            e,
         ))
     })?;
     ann_vs.require_annotated()?;
 
-    let mask_categories: Vec<MaskCategory> = masks
-        .iter()
-        .map(|s| {
-            s.parse::<MaskCategory>().map_err(|_| {
-                FavorError::Input(format!(
-                    "Unknown mask '{s}'. Available: coding, noncoding, sliding-window, scang, custom"
-                ))
-            })
-        })
-        .collect::<Result<_, _>>()?;
+    let mask_categories = parse_mask_categories(&args.masks)?;
 
-    let output_dir = output_path.unwrap_or_else(|| {
-        let stem = genotypes
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy();
-        genotypes.with_file_name(format!("{stem}.staar"))
-    });
-
-    if let Some(ref loci) = known_loci {
+    if let Some(ref loci) = args.known_loci {
         if !loci.exists() {
             return Err(FavorError::Input(format!(
                 "Known loci file not found: {}",
@@ -150,69 +116,86 @@ fn validate_and_parse(
         }
     }
 
-    if trait_names.is_empty() {
-        return Err(FavorError::Input(
-            "At least one --trait-name is required.".into(),
-        ));
-    }
-
-    let mut column_map = std::collections::HashMap::new();
-    for entry in &column_map_raw {
-        if let Some((k, v)) = entry.split_once('=') {
-            column_map.insert(k.trim().to_string(), v.trim().to_string());
-        } else {
-            return Err(FavorError::Input(format!(
-                "Invalid --column-map entry '{entry}'. Expected key=value."
-            )));
-        }
-    }
-
-    let store_dir = output_dir.join("store");
-
-    let ancestry_col = ancestry_col.and_then(|s| {
-        let trimmed = s.trim().to_string();
-        if trimmed.is_empty() { None } else { Some(trimmed) }
-    });
-
-    for kp in &kinship {
+    for kp in &args.kinship {
         if !kp.exists() {
             return Err(FavorError::DataMissing(format!(
-                "Kinship file not found: '{}'", kp.display()
+                "Kinship file not found: '{}'",
+                kp.display()
             )));
         }
     }
-    let kinship_groups = kinship_groups.and_then(|s| {
-        let trimmed = s.trim().to_string();
-        if trimmed.is_empty() { None } else { Some(trimmed) }
-    });
+
+    let column_map = parse_column_map(&args.column_map)?;
+    let output_dir = args.output_path.unwrap_or_else(|| default_output_dir(&args.genotypes));
+    let store_dir = output_dir.join("store");
 
     Ok(StaarConfig {
-        genotypes,
-        phenotype,
-        annotations: annotations_path,
-        trait_names,
-        covariates,
+        genotypes: args.genotypes,
+        phenotype: args.phenotype,
+        annotations,
+        trait_names: args.trait_names,
+        covariates: args.covariates,
         mask_categories,
-        maf_cutoff,
-        window_size,
-        individual,
-        spa,
-        ancestry_col,
-        ai_base_tests,
-        ai_seed,
-        scang_params: staar::masks::ScangParams {
-            lmin: scang_lmin,
-            lmax: scang_lmax,
-            step: scang_step,
+        maf_cutoff: args.maf_cutoff,
+        window_size: args.window_size,
+        individual: args.individual,
+        spa: args.spa,
+        ancestry_col: blank_to_none(args.ancestry_col),
+        ai_base_tests: args.ai_base_tests,
+        ai_seed: args.ai_seed,
+        scang_params: ScangParams {
+            lmin: args.scang_lmin,
+            lmax: args.scang_lmax,
+            step: args.scang_step,
         },
-        kinship,
-        kinship_groups,
-        known_loci,
-        emit_sumstats,
-        rebuild_store,
+        kinship: args.kinship,
+        kinship_groups: blank_to_none(args.kinship_groups),
+        known_loci: args.known_loci,
+        emit_sumstats: args.emit_sumstats,
+        rebuild_store: args.rebuild_store,
         column_map,
         output_dir,
         store_dir,
+    })
+}
+
+fn parse_mask_categories(masks: &[String]) -> Result<Vec<MaskCategory>, FavorError> {
+    masks
+        .iter()
+        .map(|s| {
+            s.parse::<MaskCategory>().map_err(|_| {
+                FavorError::Input(format!(
+                    "Unknown mask '{s}'. Available: coding, noncoding, sliding-window, scang, custom"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn parse_column_map(entries: &[String]) -> Result<std::collections::HashMap<String, String>, FavorError> {
+    let mut map = std::collections::HashMap::new();
+    for entry in entries {
+        let (k, v) = entry.split_once('=').ok_or_else(|| {
+            FavorError::Input(format!("Invalid --column-map entry '{entry}'. Expected key=value."))
+        })?;
+        map.insert(k.trim().to_string(), v.trim().to_string());
+    }
+    Ok(map)
+}
+
+fn default_output_dir(genotypes: &std::path::Path) -> PathBuf {
+    let stem = genotypes.file_stem().unwrap_or_default().to_string_lossy();
+    genotypes.with_file_name(format!("{stem}.staar"))
+}
+
+fn blank_to_none(s: Option<String>) -> Option<String> {
+    s.and_then(|s| {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
     })
 }
 
@@ -228,11 +211,7 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), FavorError
     let overhead = 4 * GB;
     let recommended = chr1_geno + overhead;
 
-    let probe_result = store::probe(
-        &config.store_dir,
-        &config.genotypes,
-        &config.annotations,
-    );
+    let probe_result = store::probe(&config.store_dir, &config.genotypes, &config.annotations);
 
     let (cache_status, store_info, recommended_bytes) = match &probe_result.manifest {
         Some(m) => (
@@ -261,6 +240,7 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), FavorError
             "maf_cutoff": config.maf_cutoff,
             "cache_status": cache_status,
             "cache": store_info,
+            "run_mode": format!("{:?}", config.run_mode()),
         }),
         memory: commands::MemoryEstimate {
             minimum: "4G".into(),
@@ -285,4 +265,51 @@ fn parquet_row_count(path: &std::path::Path) -> i64 {
     };
     use parquet::file::reader::FileReader;
     reader.metadata().file_metadata().num_rows()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_mask_categories_ok() {
+        let m = parse_mask_categories(&["coding".into(), "noncoding".into()]).unwrap();
+        assert_eq!(m, vec![MaskCategory::Coding, MaskCategory::Noncoding]);
+    }
+
+    #[test]
+    fn parse_mask_categories_unknown_rejected() {
+        let err = parse_mask_categories(&["bogus".into()]).unwrap_err();
+        match err {
+            FavorError::Input(msg) => assert!(msg.contains("bogus")),
+            _ => panic!("expected Input error"),
+        }
+    }
+
+    #[test]
+    fn parse_column_map_round_trip() {
+        let m = parse_column_map(&["id=IID".into(), "trait=BMI".into()]).unwrap();
+        assert_eq!(m.get("id"), Some(&"IID".to_string()));
+        assert_eq!(m.get("trait"), Some(&"BMI".to_string()));
+    }
+
+    #[test]
+    fn parse_column_map_rejects_bad_entry() {
+        assert!(parse_column_map(&["no_equals_sign".into()]).is_err());
+    }
+
+    #[test]
+    fn blank_to_none_strips_empty() {
+        assert_eq!(blank_to_none(None), None);
+        assert_eq!(blank_to_none(Some(String::new())), None);
+        assert_eq!(blank_to_none(Some("   ".into())), None);
+        assert_eq!(blank_to_none(Some(" foo ".into())), Some("foo".into()));
+    }
+
+    #[test]
+    fn default_output_dir_appends_staar_suffix() {
+        // file_stem only strips the last extension, so .vcf.gz → .vcf → .vcf.staar.
+        let p = default_output_dir(std::path::Path::new("/data/cohort.vcf.gz"));
+        assert_eq!(p, PathBuf::from("/data/cohort.vcf.staar"));
+    }
 }

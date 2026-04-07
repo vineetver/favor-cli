@@ -1,28 +1,44 @@
-//! STAAR analysis pipeline: ensure_store → fit_null_model → score_all → write_results.
+//! STAAR analysis pipeline orchestration.
+//!
+//! Owns `StaarConfig`, `StaarPipeline`, the per-run manifest, and the typed
+//! stage functions. Per-gene and per-window scoring live in `scoring.rs`.
+//!
+//! Stage layout (each is a small function on `StaarPipeline`):
+//! ```text
+//! validate → ensure_store → load_phenotype → fit_null_model
+//!   → ensure_score_cache → run_scoring → write_results
+//! ```
+//! After each stage the manifest is rewritten atomically so an interrupted
+//! run can be inspected to see exactly how far it got.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use faer::Mat;
-use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::column::STAAR_WEIGHTS;
 use crate::data::{AnnotatedSet, VariantSet, VariantSetKind};
 use crate::error::FavorError;
 use crate::ingest::ColumnContract;
 use crate::output::Output;
-use crate::staar::carrier::AnalysisVectors;
-use crate::staar::carrier::sparse_score;
-use crate::staar::masks::{self, MaskGroup, ScangParams};
-use crate::staar::sparse_g::SparseG;
-use crate::staar::model::{augment_covariates, load_known_loci, load_phenotype};
-use crate::staar::output::{write_individual_results, write_results};
-use crate::staar::score;
-use crate::staar::score_cache;
-use crate::staar::store::{self, GenoStoreResult, STAAR_ANNOTATION_COLUMNS};
-use crate::staar::{self, GeneResult, MaskCategory, MaskType, TraitType};
 use crate::resource::Resources;
+use crate::staar::carrier::AnalysisVectors;
+use crate::staar::masks::ScangParams;
+use crate::staar::model::{augment_covariates, load_known_loci, load_phenotype, NullModel};
+use crate::staar::output::{write_individual_results, write_results};
+use crate::staar::score_cache;
+use crate::staar::scoring::{self, ResultSet};
+use crate::staar::store::{self, GenoStoreResult, StoreManifest, STAAR_ANNOTATION_COLUMNS};
+use crate::staar::{
+    self, ancestry::AncestryInfo, MaskCategory, NullModelKind, RunMode, ScoringMode, TraitType,
+};
 use crate::types::{AnnotatedVariant, Chromosome};
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
 
 pub struct StaarConfig {
     pub genotypes: PathBuf,
@@ -36,14 +52,14 @@ pub struct StaarConfig {
     pub individual: bool,
     pub spa: bool,
     pub ancestry_col: Option<String>,
-    /// AI-STAAR ensemble base test count B. Adds 2*(B+1) STAAR runs per gene.
+    /// AI-STAAR ensemble base test count B.
     pub ai_base_tests: usize,
-    /// AI-STAAR ensemble weight RNG seed.
+    /// AI-STAAR ensemble RNG seed.
     pub ai_seed: u64,
     pub scang_params: ScangParams,
-    /// Kinship matrix files for mixed-model analysis. Length L. Empty = no kinship.
+    /// Kinship matrix files for mixed-model analysis. Empty = no kinship.
     pub kinship: Vec<PathBuf>,
-    /// Phenotype column naming a categorical group for heteroscedastic residual variance.
+    /// Phenotype column for heteroscedastic residual variance partition.
     pub kinship_groups: Option<String>,
     pub known_loci: Option<PathBuf>,
     pub emit_sumstats: bool,
@@ -55,275 +71,460 @@ pub struct StaarConfig {
 
 impl StaarConfig {
     pub fn results_dir(&self) -> PathBuf {
-        self.output_dir
-            .join("results")
-            .join(&self.trait_names[0])
+        self.output_dir.join("results").join(&self.trait_names[0])
     }
 
     pub fn sumstats_dir(&self) -> PathBuf {
-        self.output_dir
-            .join("sumstats")
-            .join(&self.trait_names[0])
+        self.output_dir.join("sumstats").join(&self.trait_names[0])
+    }
+
+    /// What this run actually does end-to-end.
+    pub fn run_mode(&self) -> RunMode {
+        if self.emit_sumstats {
+            RunMode::EmitSumstats
+        } else {
+            RunMode::Analyze
+        }
+    }
+
+    /// Choose the scoring backend from the trait type and CLI flags.
+    ///
+    /// Trait type is required because SPA only applies to binary traits;
+    /// for continuous traits with `--spa` we drop back to Standard and warn
+    /// at the call site.
+    pub fn scoring_mode(&self, trait_type: TraitType) -> ScoringMode {
+        if self.ancestry_col.is_some() {
+            ScoringMode::AiStaar
+        } else if self.spa && trait_type == TraitType::Binary {
+            ScoringMode::Spa
+        } else {
+            ScoringMode::Standard
+        }
+    }
+
+    /// Pick the null-model fitter from trait type + kinship presence.
+    pub fn null_model_kind(&self, trait_type: TraitType) -> NullModelKind {
+        let has_kinship = !self.kinship.is_empty() || self.kinship_groups.is_some();
+        match (trait_type, has_kinship) {
+            (TraitType::Continuous, false) => NullModelKind::Glm,
+            (TraitType::Binary, false) => NullModelKind::Logistic,
+            (TraitType::Continuous, true) => NullModelKind::KinshipReml,
+            (TraitType::Binary, true) => NullModelKind::KinshipPql,
+        }
     }
 }
 
-pub type ResultSet = Vec<(MaskType, Vec<GeneResult>)>;
+// ---------------------------------------------------------------------------
+// Run manifest (artifact lifecycle)
+// ---------------------------------------------------------------------------
+
+/// One stage in a `favor staar` run. Order matches execution order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    Validate,
+    EnsureStore,
+    LoadPhenotype,
+    FitNullModel,
+    EmitSumstats,
+    EnsureScoreCache,
+    RunScoring,
+    WriteResults,
+}
+
+impl Stage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Stage::Validate => "validate",
+            Stage::EnsureStore => "ensure_store",
+            Stage::LoadPhenotype => "load_phenotype",
+            Stage::FitNullModel => "fit_null_model",
+            Stage::EmitSumstats => "emit_sumstats",
+            Stage::EnsureScoreCache => "ensure_score_cache",
+            Stage::RunScoring => "run_scoring",
+            Stage::WriteResults => "write_results",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageStatus {
+    InProgress,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageRecord {
+    pub stage: Stage,
+    pub status: StageStatus,
+    pub started_unix: u64,
+    pub completed_unix: Option<u64>,
+}
+
+/// Top-level run manifest written into `{output_dir}/run.json`.
+///
+/// Captures enough state for an operator to ask:
+///   - which run mode this is
+///   - which stages are complete vs in-progress vs failed
+///   - which artifacts were produced
+///
+/// Resumability hook: probe this file at start of `run()` to log which
+/// stages were complete in the last attempt. A future `--resume` can short
+/// circuit completed stages off this manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunManifest {
+    pub favor_version: String,
+    pub run_mode: RunMode,
+    pub trait_name: String,
+    pub config_hash: String,
+    pub started_unix: u64,
+    pub stages: Vec<StageRecord>,
+    pub outputs: RunOutputs,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunOutputs {
+    pub store_dir: Option<PathBuf>,
+    pub score_cache_dir: Option<PathBuf>,
+    pub results_dir: Option<PathBuf>,
+    pub sumstats_dir: Option<PathBuf>,
+}
+
+impl RunManifest {
+    fn new(config: &StaarConfig) -> Self {
+        Self {
+            favor_version: env!("CARGO_PKG_VERSION").to_string(),
+            run_mode: config.run_mode(),
+            trait_name: config.trait_names[0].clone(),
+            config_hash: config_hash(config),
+            started_unix: now_unix(),
+            stages: Vec::new(),
+            outputs: RunOutputs::default(),
+        }
+    }
+
+    fn begin(&mut self, stage: Stage) {
+        self.stages.retain(|r| r.stage != stage);
+        self.stages.push(StageRecord {
+            stage,
+            status: StageStatus::InProgress,
+            started_unix: now_unix(),
+            completed_unix: None,
+        });
+    }
+
+    fn complete(&mut self, stage: Stage) {
+        if let Some(rec) = self.stages.iter_mut().rev().find(|r| r.stage == stage) {
+            rec.status = StageStatus::Completed;
+            rec.completed_unix = Some(now_unix());
+        }
+    }
+
+    fn fail(&mut self, stage: Stage) {
+        if let Some(rec) = self.stages.iter_mut().rev().find(|r| r.stage == stage) {
+            rec.status = StageStatus::Failed;
+            rec.completed_unix = Some(now_unix());
+        }
+    }
+
+    /// Atomic write to `{output_dir}/run.json` (tmp + rename).
+    pub fn write(&self, output_dir: &Path) -> Result<(), FavorError> {
+        let final_path = output_dir.join("run.json");
+        let tmp_path = output_dir.join("run.json.tmp");
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| FavorError::Resource(format!("Serialize run manifest: {e}")))?;
+        std::fs::write(&tmp_path, json).map_err(|e| {
+            FavorError::Resource(format!("Write {}: {e}", tmp_path.display()))
+        })?;
+        std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+            FavorError::Resource(format!(
+                "Rename {} -> {}: {e}",
+                tmp_path.display(),
+                final_path.display()
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// Load an existing manifest if one is present and parses cleanly.
+    pub fn probe(output_dir: &Path) -> Option<Self> {
+        let path = output_dir.join("run.json");
+        let s = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&s).ok()
+    }
+
+    /// Stages that previously completed under this same config.
+    pub fn completed_stages(&self) -> Vec<Stage> {
+        self.stages
+            .iter()
+            .filter(|r| r.status == StageStatus::Completed)
+            .map(|r| r.stage)
+            .collect()
+    }
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Stable hash of the inputs that determine which results a run produces.
+/// Mirrors `score_cache::cache_key` but covers all fields a stage decision
+/// depends on, so a config change invalidates `run.json` cleanly.
+fn config_hash(config: &StaarConfig) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(config.genotypes.to_string_lossy().as_bytes());
+    h.update(b"|");
+    h.update(config.annotations.to_string_lossy().as_bytes());
+    h.update(b"|");
+    h.update(config.phenotype.to_string_lossy().as_bytes());
+    h.update(b"|");
+    for t in &config.trait_names {
+        h.update(t.as_bytes());
+        h.update(b",");
+    }
+    h.update(b"|");
+    let mut covs = config.covariates.clone();
+    covs.sort();
+    for c in &covs {
+        h.update(c.as_bytes());
+        h.update(b",");
+    }
+    h.update(b"|");
+    h.update(config.maf_cutoff.to_le_bytes());
+    h.update(format!("{:?}", config.run_mode()).as_bytes());
+    h.update(b"|");
+    for k in &config.kinship {
+        h.update(k.to_string_lossy().as_bytes());
+        h.update(b",");
+    }
+    if let Some(g) = &config.kinship_groups {
+        h.update(g.as_bytes());
+    }
+    format!("{:x}", h.finalize())
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline state passed between stages
+// ---------------------------------------------------------------------------
+
+pub type Results = ResultSet;
+
+/// Per-run scoring context: fixed once after the null model is fit.
+pub struct ScoringContext {
+    pub analysis: AnalysisVectors,
+    pub scoring_mode: ScoringMode,
+    pub cache_dir: PathBuf,
+    pub ancestry: Option<AncestryInfo>,
+    /// True only when SPA was requested AND the trait is binary. Threaded
+    /// into the AI-STAAR backend so the `--ancestry-col --spa` combination
+    /// keeps using SPA inside the per-population kernel.
+    pub spa_in_ai_staar: bool,
+}
+
+/// Output of `load_phenotype` stage.
+struct PhenoStageOut {
+    y: Mat<f64>,
+    x: Mat<f64>,
+    trait_type: TraitType,
+    n: usize,
+    pheno_mask: Vec<bool>,
+    ancestry: Option<AncestryInfo>,
+    /// Compact sample list aligned to `pheno_mask` (only samples with both
+    /// phenotype and genotype). Used by kinship loaders.
+    compact_samples: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline
+// ---------------------------------------------------------------------------
 
 pub struct StaarPipeline<'a> {
     config: StaarConfig,
     out: &'a dyn Output,
     res: Resources,
-}
-
-struct ScoringContext {
-    analysis: AnalysisVectors,
-    use_spa: bool,
-    cache_dir: PathBuf,
-    ancestry: Option<staar::ancestry::AncestryInfo>,
+    manifest: RunManifest,
 }
 
 impl<'a> StaarPipeline<'a> {
     pub fn new(config: StaarConfig, out: &'a dyn Output) -> Result<Self, FavorError> {
         let res = store::setup_resources(out)?;
-        Ok(Self { config, out, res })
+        let manifest = RunManifest::new(&config);
+        Ok(Self {
+            config,
+            out,
+            res,
+            manifest,
+        })
     }
 
-    pub fn run(self) -> Result<(), FavorError> {
-        std::fs::create_dir_all(&self.config.output_dir)
-            .map_err(|e| FavorError::Resource(format!(
-                "Cannot create output directory '{}': {e}", self.config.output_dir.display()
-            )))?;
+    /// Stage runner. Each stage gates on the previous one returning Ok and
+    /// rewrites `run.json` after every transition.
+    pub fn run(mut self) -> Result<(), FavorError> {
+        std::fs::create_dir_all(&self.config.output_dir).map_err(|e| {
+            FavorError::Resource(format!(
+                "Cannot create output directory '{}': {e}",
+                self.config.output_dir.display()
+            ))
+        })?;
 
-        // Upfront validation: tier check (typed) + column check (string)
-        if self.config.annotations.exists() {
-            // Typed tier check: STAAR needs all 11 annotation weight columns
-            if let Ok(annotated) = AnnotatedSet::open(&self.config.annotations) {
-                let weight_cols: Vec<crate::column::Col> = STAAR_WEIGHTS.to_vec();
-                annotated.supports(&weight_cols)?;
-            }
-
-            // String-based column check: validates raw annotation struct columns
-            let ann_vs = VariantSet::open(&self.config.annotations)?;
-            let contract = ColumnContract {
-                command: "staar",
-                required: STAAR_ANNOTATION_COLUMNS,
-            };
-            let missing = contract.check(ann_vs.columns());
-            if !missing.is_empty() {
-                let tier_hint = match ann_vs.kind() {
-                    Some(VariantSetKind::Annotated { tier: crate::config::Tier::Base }) => {
-                        " Your data was annotated with base tier. Re-run: `favor annotate --full`."
-                    }
-                    _ => " Re-run: `favor annotate --full`.",
-                };
-                return Err(FavorError::DataMissing(format!(
-                    "Missing annotation columns in {}:\n{}\n\
-                     STAAR requires favor-full annotations.{}",
-                    self.config.annotations.display(),
-                    ColumnContract::format_missing(&missing),
-                    tier_hint,
-                )));
+        if let Some(prior) = RunManifest::probe(&self.config.output_dir) {
+            if prior.config_hash == self.manifest.config_hash {
+                let done = prior.completed_stages();
+                if !done.is_empty() {
+                    let labels: Vec<&str> = done.iter().map(|s| s.label()).collect();
+                    self.out.status(&format!(
+                        "  Found prior run.json (same config). Previously completed: {}",
+                        labels.join(", ")
+                    ));
+                }
+            } else {
+                self.out
+                    .warn("  run.json present from a different config — overwriting");
             }
         }
 
-        let store = self.ensure_store()?;
-        // Load variants via VariantIndex (same parquet the scoring path uses)
-        // then convert to AnnotatedVariant for sumstats/individual/result output.
-        let variants = load_rare_variants(
-            &store.store_dir, &store.manifest, self.config.maf_cutoff,
-        )?;
-        let n_rare = variants.len() as i64;
-        let primary_trait = &self.config.trait_names[0];
+        let result = self.run_stages();
+        if result.is_err() {
+            // Keep the manifest as a forensic record on failure.
+            let _ = self.manifest.write(&self.config.output_dir);
+        }
+        result
+    }
 
-        // Phenotype loading
-        let geno_for_pheno = staar::genotype::GenotypeResult {
-            sample_names: store.sample_names.clone(),
-            output_dir: store
-                .geno_output_dir
-                .clone()
-                .unwrap_or_else(|| store.store_dir.clone()),
-        };
-        let pheno = load_phenotype(
-            &store.engine,
-            &self.config.phenotype,
-            &self.config.covariates,
-            &geno_for_pheno,
-            primary_trait,
-            self.config.ancestry_col.as_deref(),
-            self.config.ai_base_tests,
-            self.config.ai_seed,
-            &self.config.column_map,
-            self.out,
-        )?;
-        let (y, mut x, trait_type, n, pheno_mask, ancestry) = (
-            pheno.y,
-            pheno.x,
-            pheno.trait_type,
-            pheno.n,
-            pheno.pheno_mask,
-            pheno.ancestry,
-        );
+    fn run_stages(&mut self) -> Result<(), FavorError> {
+        self.stage(Stage::Validate, |p| p.stage_validate())?;
 
-        if let Some(ref loci_path) = self.config.known_loci {
-            let x_cond = load_known_loci(&store.engine, &geno_for_pheno, loci_path, n, self.out)?;
-            x = augment_covariates(&x, &x_cond);
-            self.out.status(&format!(
-                "  Conditional: {} known loci added as covariates",
-                x_cond.ncols()
-            ));
+        let store = self.stage(Stage::EnsureStore, |p| p.stage_ensure_store())?;
+        self.manifest.outputs.store_dir = Some(store.store_dir.clone());
+        self.manifest.write(&self.config.output_dir)?;
+
+        let pheno = self.stage(Stage::LoadPhenotype, |p| p.stage_load_phenotype(&store))?;
+
+        let null_model = self.stage(Stage::FitNullModel, |p| {
+            p.stage_fit_null_model(&pheno, &store)
+        })?;
+
+        // Sumstats early-exit run mode.
+        if self.config.run_mode() == RunMode::EmitSumstats {
+            self.stage(Stage::EmitSumstats, |p| {
+                p.stage_emit_sumstats(&store, &null_model, &pheno)
+            })?;
+            self.manifest.write(&self.config.output_dir)?;
+            return Ok(());
         }
 
-        // Load kinship matrices and group partition. Both default to empty,
-        // which routes fit_null_model through the existing GLM/IRLS path.
-        let kinships = if self.config.kinship.is_empty() {
-            Vec::new()
-        } else {
-            // Sample order matches `pheno_mask` compaction: only samples with
-            // phenotype + genotype, in genotype-store order.
-            let compact_samples: Vec<String> = store
-                .sample_names
-                .iter()
-                .zip(pheno_mask.iter())
-                .filter_map(|(name, &has)| if has { Some(name.clone()) } else { None })
-                .collect();
-            staar::kinship::load_kinship(&self.config.kinship, &compact_samples, self.out)?
-        };
-        let user_groups = if let Some(ref col) = self.config.kinship_groups {
-            Some(staar::kinship::load_groups(
-                &store.engine,
-                &self.config.phenotype,
-                col,
-                &geno_for_pheno,
-                &pheno_mask,
-                &self.config.column_map,
-                self.out,
-            )?)
-        } else {
-            None
-        };
+        let analysis = AnalysisVectors::from_null_model(&null_model, &pheno.pheno_mask)?;
 
-        // Decide whether to dispatch to the kinship-aware fit. The trigger is
-        // either flag being set; if neither is set, fall through to OLS/IRLS
-        // exactly as before. When --kinship is set without --kinship-groups
-        // we synthesize a single group covering all samples (homoscedastic).
-        let use_kinship = !kinships.is_empty() || user_groups.is_some();
-        let groups_owned: Option<staar::kinship::GroupPartition> = if use_kinship {
-            Some(
-                user_groups
-                    .unwrap_or_else(|| staar::kinship::GroupPartition::single(n)),
-            )
-        } else {
-            None
-        };
-
-        let use_spa = self.config.spa && trait_type == TraitType::Binary;
-        if self.config.spa && trait_type == TraitType::Continuous {
-            self.out
-                .warn("--spa ignored: saddlepoint approximation only applies to binary traits");
-        }
-        if use_spa {
-            self.out
-                .status("  SPA enabled: saddlepoint approximation for Burden and ACAT-V");
-        }
-        if use_kinship && use_spa {
-            self.out.warn(
-                "--spa with --kinship: SPA is applied at the score-test layer; the kinship-aware path provides exact variance via the GLMM projection.",
-            );
-        }
-
-        // Step 2/4: Fit null model
-        let null_model =
-            self.fit_null_model(&y, &x, trait_type, &kinships, groups_owned.as_ref())?;
-
-        // Sumstats export (early exit)
-        if self.config.emit_sumstats {
-            let sumstats_dir = self.config.sumstats_dir();
-            std::fs::create_dir_all(&sumstats_dir)
-                .map_err(|e| FavorError::Resource(format!(
-                    "Cannot create sumstats directory '{}': {e}", sumstats_dir.display()
-                )))?;
-            let meta = staar::meta::StudyMeta {
-                favor_meta_version: 1,
-                trait_type: format!("{trait_type:?}"),
-                trait_name: self.config.trait_names[0].clone(),
-                n_samples: n,
-                sigma2: null_model.sigma2,
-                maf_cutoff: self.config.maf_cutoff,
-                covariates: self.config.covariates.clone(),
-                segment_size: 500_000,
-            };
-            let analysis = AnalysisVectors::from_null_model(&null_model, &pheno_mask)?;
-            return staar::meta::emit_sumstats(
-                &store.store_dir,
-                &analysis,
-                &variants,
-                &sumstats_dir,
-                &meta,
-                self.out,
-            );
-        }
-
-        // Layer 2: Build or load per-phenotype score cache (U/K for all genes)
-        let analysis = AnalysisVectors::from_null_model(&null_model, &pheno_mask)?;
-        let sc_dir = ensure_score_cache(
-            &store.store_dir,
-            &store.manifest,
-            &analysis,
-            &store.manifest.key,
-            primary_trait,
-            &self.config.covariates,
-            self.config.known_loci.as_deref(),
-            &self.config.kinship,
-            self.config.kinship_groups.as_deref(),
-            self.out,
-        )?;
+        let cache_dir = self.stage(Stage::EnsureScoreCache, |p| {
+            p.stage_ensure_score_cache(&store, &analysis)
+        })?;
+        self.manifest.outputs.score_cache_dir = Some(cache_dir.clone());
+        self.manifest.write(&self.config.output_dir)?;
 
         let ctx = ScoringContext {
             analysis,
-            use_spa,
-            cache_dir: sc_dir,
-            ancestry,
+            scoring_mode: self.config.scoring_mode(pheno.trait_type),
+            cache_dir,
+            ancestry: pheno.ancestry.clone(),
+            spa_in_ai_staar: self.config.spa && pheno.trait_type == TraitType::Binary,
         };
+        self.warn_mode_combinations(pheno.trait_type, ctx.scoring_mode);
 
-        // Layer 3: Score tests from cache
-        let (results, individual_pvals) = self.score_all(&store, &ctx)?;
+        let (results, individual_pvals) =
+            self.stage(Stage::RunScoring, |p| p.stage_run_scoring(&store, &ctx))?;
 
-        // Step 4/4: Write results
-        let results_dir = self.config.results_dir();
-        std::fs::create_dir_all(&results_dir)
-            .map_err(|e| FavorError::Resource(format!(
-                "Cannot create results directory '{}': {e}", results_dir.display()
-            )))?;
+        let variants = load_rare_variants(&store.store_dir, &store.manifest, self.config.maf_cutoff)?;
+        let n_rare = variants.len() as i64;
 
-        if self.config.individual && !individual_pvals.is_empty() {
-            write_individual_results(
+        self.stage(Stage::WriteResults, |p| {
+            p.stage_write_results(
+                &results,
                 &individual_pvals,
                 &variants,
-                &results_dir,
-                self.out,
-            )?;
-        }
-
-        write_results(
-            &results,
-            &self.config.trait_names,
-            self.config.maf_cutoff,
-            &results_dir,
-            &null_model,
-            trait_type,
-            n,
-            n_rare,
-            self.out,
-        )?;
+                &null_model,
+                pheno.trait_type,
+                pheno.n,
+                n_rare,
+            )
+        })?;
+        self.manifest.outputs.results_dir = Some(self.config.results_dir());
+        self.manifest.write(&self.config.output_dir)?;
 
         Ok(())
     }
 
+    /// Run one stage with begin/complete/fail bookkeeping and a manifest
+    /// rewrite at every transition.
+    fn stage<T, F>(&mut self, stage: Stage, body: F) -> Result<T, FavorError>
+    where
+        F: FnOnce(&mut Self) -> Result<T, FavorError>,
+    {
+        self.manifest.begin(stage);
+        // Ignore write errors here — the run is already in a directory we
+        // just created. A failure to persist a transient in-progress marker
+        // shouldn't kill the run.
+        let _ = self.manifest.write(&self.config.output_dir);
+        match body(self) {
+            Ok(v) => {
+                self.manifest.complete(stage);
+                let _ = self.manifest.write(&self.config.output_dir);
+                Ok(v)
+            }
+            Err(e) => {
+                self.manifest.fail(stage);
+                let _ = self.manifest.write(&self.config.output_dir);
+                Err(e)
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
-    // Pipeline steps
+    // Stages
     // -----------------------------------------------------------------------
 
-    pub fn ensure_store(&self) -> Result<GenoStoreResult, FavorError> {
+    fn stage_validate(&mut self) -> Result<(), FavorError> {
+        if !self.config.annotations.exists() {
+            return Ok(());
+        }
+
+        // Typed tier check: STAAR needs all 11 annotation weight columns.
+        if let Ok(annotated) = AnnotatedSet::open(&self.config.annotations) {
+            let weight_cols: Vec<crate::column::Col> = STAAR_WEIGHTS.to_vec();
+            annotated.supports(&weight_cols)?;
+        }
+
+        // Raw annotation column contract.
+        let ann_vs = VariantSet::open(&self.config.annotations)?;
+        let contract = ColumnContract {
+            command: "staar",
+            required: STAAR_ANNOTATION_COLUMNS,
+        };
+        let missing = contract.check(ann_vs.columns());
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let tier_hint = match ann_vs.kind() {
+            Some(VariantSetKind::Annotated {
+                tier: crate::config::Tier::Base,
+            }) => " Your data was annotated with base tier. Re-run: `favor annotate --full`.",
+            _ => " Re-run: `favor annotate --full`.",
+        };
+        Err(FavorError::DataMissing(format!(
+            "Missing annotation columns in {}:\n{}\n\
+             STAAR requires favor-full annotations.{}",
+            self.config.annotations.display(),
+            ColumnContract::format_missing(&missing),
+            tier_hint,
+        )))
+    }
+
+    fn stage_ensure_store(&mut self) -> Result<GenoStoreResult, FavorError> {
         let geno_staging_dir = self.config.output_dir.join(".geno_staging");
         store::build_or_load_store(
             &self.config.genotypes,
@@ -336,108 +537,221 @@ impl<'a> StaarPipeline<'a> {
         )
     }
 
-    pub fn fit_null_model(
-        &self,
-        y: &Mat<f64>,
-        x: &Mat<f64>,
-        trait_type: TraitType,
-        kinships: &[staar::kinship::KinshipMatrix],
-        groups: Option<&staar::kinship::GroupPartition>,
-    ) -> Result<staar::model::NullModel, FavorError> {
-        self.out.status("Step 2/4: Fitting null model...");
+    fn stage_load_phenotype(
+        &mut self,
+        store: &GenoStoreResult,
+    ) -> Result<PhenoStageOut, FavorError> {
+        let geno_for_pheno = staar::genotype::GenotypeResult {
+            sample_names: store.sample_names.clone(),
+            output_dir: store
+                .geno_output_dir
+                .clone()
+                .unwrap_or_else(|| store.store_dir.clone()),
+        };
+        let primary_trait = &self.config.trait_names[0];
 
-        if let Some(group_partition) = groups {
-            let state = match trait_type {
-                TraitType::Continuous => {
-                    staar::kinship::fit_reml(y, x, kinships, group_partition, None)?
-                }
-                TraitType::Binary => {
-                    staar::kinship::fit_pql_glmm(y, x, kinships, group_partition, self.out)?
-                }
-            };
+        let pheno = load_phenotype(
+            &store.engine,
+            &self.config.phenotype,
+            &self.config.covariates,
+            &geno_for_pheno,
+            primary_trait,
+            self.config.ancestry_col.as_deref(),
+            self.config.ai_base_tests,
+            self.config.ai_seed,
+            &self.config.column_map,
+            self.out,
+        )?;
+        let mut x = pheno.x;
+
+        if let Some(ref loci_path) = self.config.known_loci {
+            let x_cond =
+                load_known_loci(&store.engine, &geno_for_pheno, loci_path, pheno.n, self.out)?;
+            x = augment_covariates(&x, &x_cond);
             self.out.status(&format!(
-                "  AI-REML converged in {} iterations ({} boundary refits), h² = {:?}",
-                state.n_iter, state.outer_refits, state.h2,
+                "  Conditional: {} known loci added as covariates",
+                x_cond.ncols()
             ));
-            let n = y.nrows();
-            let mut residuals = Mat::<f64>::zeros(n, 1);
-            for i in 0..n {
-                residuals[(i, 0)] = state.p_y[(i, 0)];
-            }
-            return Ok(staar::model::NullModel {
-                residuals,
-                x_matrix: x.to_owned(),
-                xtx_inv: state.cov.clone(),
-                sigma2: 1.0,
-                n_samples: n,
-                fitted_values: None,
-                working_weights: None,
-                kinship: Some(state),
-            });
         }
 
-        let null_model = match trait_type {
-            TraitType::Continuous => staar::model::fit_glm(y, x),
-            TraitType::Binary => staar::model::fit_logistic(y, x, 25),
+        let compact_samples: Vec<String> = store
+            .sample_names
+            .iter()
+            .zip(pheno.pheno_mask.iter())
+            .filter_map(|(name, &has)| if has { Some(name.clone()) } else { None })
+            .collect();
+
+        Ok(PhenoStageOut {
+            y: pheno.y,
+            x,
+            trait_type: pheno.trait_type,
+            n: pheno.n,
+            pheno_mask: pheno.pheno_mask,
+            ancestry: pheno.ancestry,
+            compact_samples,
+        })
+    }
+
+    fn stage_fit_null_model(
+        &mut self,
+        pheno: &PhenoStageOut,
+        store: &GenoStoreResult,
+    ) -> Result<NullModel, FavorError> {
+        self.out.status("Step 2/4: Fitting null model...");
+
+        let kind = self.config.null_model_kind(pheno.trait_type);
+        match kind {
+            NullModelKind::Glm => {
+                let nm = staar::model::fit_glm(&pheno.y, &pheno.x);
+                self.out.status(&format!("  sigma2 = {:.4}", nm.sigma2));
+                Ok(nm)
+            }
+            NullModelKind::Logistic => {
+                let nm = staar::model::fit_logistic(&pheno.y, &pheno.x, 25);
+                self.out.status(&format!("  sigma2 = {:.4}", nm.sigma2));
+                Ok(nm)
+            }
+            NullModelKind::KinshipReml | NullModelKind::KinshipPql => {
+                let kinships = staar::kinship::load_kinship(
+                    &self.config.kinship,
+                    &pheno.compact_samples,
+                    self.out,
+                )?;
+                let groups = if let Some(ref col) = self.config.kinship_groups {
+                    staar::kinship::load_groups(
+                        &store.engine,
+                        &self.config.phenotype,
+                        col,
+                        &staar::genotype::GenotypeResult {
+                            sample_names: store.sample_names.clone(),
+                            output_dir: store
+                                .geno_output_dir
+                                .clone()
+                                .unwrap_or_else(|| store.store_dir.clone()),
+                        },
+                        &pheno.pheno_mask,
+                        &self.config.column_map,
+                        self.out,
+                    )?
+                } else {
+                    staar::kinship::GroupPartition::single(pheno.n)
+                };
+
+                let state = match kind {
+                    NullModelKind::KinshipReml => {
+                        staar::kinship::fit_reml(&pheno.y, &pheno.x, &kinships, &groups, None)?
+                    }
+                    NullModelKind::KinshipPql => staar::kinship::fit_pql_glmm(
+                        &pheno.y,
+                        &pheno.x,
+                        &kinships,
+                        &groups,
+                        self.out,
+                    )?,
+                    _ => unreachable!(),
+                };
+                self.out.status(&format!(
+                    "  AI-REML converged in {} iterations ({} boundary refits), h² = {:?}",
+                    state.n_iter, state.outer_refits, state.h2,
+                ));
+                let n = pheno.y.nrows();
+                let mut residuals = Mat::<f64>::zeros(n, 1);
+                for i in 0..n {
+                    residuals[(i, 0)] = state.p_y[(i, 0)];
+                }
+                Ok(NullModel {
+                    residuals,
+                    x_matrix: pheno.x.clone(),
+                    xtx_inv: state.cov.clone(),
+                    sigma2: 1.0,
+                    n_samples: n,
+                    fitted_values: None,
+                    working_weights: None,
+                    kinship: Some(state),
+                })
+            }
+        }
+    }
+
+    fn stage_emit_sumstats(
+        &mut self,
+        store: &GenoStoreResult,
+        null_model: &NullModel,
+        pheno: &PhenoStageOut,
+    ) -> Result<(), FavorError> {
+        let sumstats_dir = self.config.sumstats_dir();
+        std::fs::create_dir_all(&sumstats_dir).map_err(|e| {
+            FavorError::Resource(format!(
+                "Cannot create sumstats directory '{}': {e}",
+                sumstats_dir.display()
+            ))
+        })?;
+        let variants = load_rare_variants(&store.store_dir, &store.manifest, self.config.maf_cutoff)?;
+        let analysis = AnalysisVectors::from_null_model(null_model, &pheno.pheno_mask)?;
+        let meta = staar::meta::StudyMeta {
+            favor_meta_version: 1,
+            trait_type: format!("{:?}", pheno.trait_type),
+            trait_name: self.config.trait_names[0].clone(),
+            n_samples: pheno.n,
+            sigma2: null_model.sigma2,
+            maf_cutoff: self.config.maf_cutoff,
+            covariates: self.config.covariates.clone(),
+            segment_size: 500_000,
         };
+        staar::meta::emit_sumstats(
+            &store.store_dir,
+            &analysis,
+            &variants,
+            &sumstats_dir,
+            &meta,
+            self.out,
+        )?;
+        self.manifest.outputs.sumstats_dir = Some(sumstats_dir);
+        Ok(())
+    }
+
+    fn stage_ensure_score_cache(
+        &mut self,
+        store: &GenoStoreResult,
+        analysis: &AnalysisVectors,
+    ) -> Result<PathBuf, FavorError> {
+        let key = score_cache::cache_key(
+            &store.manifest.key,
+            &self.config.trait_names[0],
+            &self.config.covariates,
+            self.config.known_loci.as_deref(),
+            &self.config.kinship,
+            self.config.kinship_groups.as_deref(),
+        );
+        let dir = score_cache::cache_dir(&store.store_dir, &key);
+
+        if score_cache::probe(&store.store_dir, &store.manifest, &key) {
+            self.out.status("  Score cache: hit (reusing cached U/K)");
+            return Ok(dir);
+        }
+
         self.out
-            .status(&format!("  sigma2 = {:.4}", null_model.sigma2));
-        Ok(null_model)
+            .status("Step 2b/4: Building score cache (all U/K, no MAF filter)...");
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            FavorError::Resource(format!("Cannot create score cache directory '{}': {e}", dir.display()))
+        })?;
+
+        for ci in &store.manifest.chromosomes {
+            let chrom_dir = store.store_dir.join(format!("chromosome={}", ci.name));
+            let sg = crate::staar::sparse_g::SparseG::open(&chrom_dir)?;
+            let vi = crate::staar::carrier::VariantIndex::load(&chrom_dir)?;
+            score_cache::build_chromosome(&sg, &vi, analysis, &dir, &ci.name, self.out)?;
+        }
+
+        Ok(dir)
     }
 
-}
-
-#[allow(clippy::too_many_arguments)]
-fn ensure_score_cache(
-    store_dir: &Path,
-    manifest: &store::StoreManifest,
-    analysis: &AnalysisVectors,
-    store_key: &str,
-    trait_name: &str,
-    covariates: &[String],
-    known_loci: Option<&Path>,
-    kinship: &[PathBuf],
-    kinship_groups: Option<&str>,
-    out: &dyn Output,
-) -> Result<PathBuf, FavorError> {
-    let key = score_cache::cache_key(
-        store_key,
-        trait_name,
-        covariates,
-        known_loci,
-        kinship,
-        kinship_groups,
-    );
-    let dir = score_cache::cache_dir(store_dir, &key);
-
-    if score_cache::probe(store_dir, manifest, &key) {
-        out.status("  Score cache: hit (reusing cached U/K)");
-        return Ok(dir);
-    }
-
-    out.status("Step 2b/4: Building score cache (all U/K, no MAF filter)...");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| FavorError::Resource(format!(
-            "Cannot create score cache directory '{}': {e}", dir.display()
-        )))?;
-
-    for ci in &manifest.chromosomes {
-        let chrom_dir = store_dir.join(format!("chromosome={}", ci.name));
-        let sg = SparseG::open(&chrom_dir)?;
-        let vi = VariantIndex::load(&chrom_dir)?;
-        score_cache::build_chromosome(&sg, &vi, analysis, &dir, &ci.name, out)?;
-    }
-
-    Ok(dir)
-}
-
-impl<'a> StaarPipeline<'a> {
-    fn score_all(
-        &self,
+    fn stage_run_scoring(
+        &mut self,
         store: &GenoStoreResult,
         ctx: &ScoringContext,
-    ) -> Result<(ResultSet, Vec<(usize, f64)>), FavorError> {
-        run_score_tests(
+    ) -> Result<(Results, Vec<(usize, f64)>), FavorError> {
+        scoring::run_score_tests(
             &store.store_dir,
             &store.manifest,
             &self.config,
@@ -446,21 +760,77 @@ impl<'a> StaarPipeline<'a> {
             self.out,
         )
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_write_results(
+        &mut self,
+        results: &Results,
+        individual_pvals: &[(usize, f64)],
+        variants: &[AnnotatedVariant],
+        null_model: &NullModel,
+        trait_type: TraitType,
+        n: usize,
+        n_rare: i64,
+    ) -> Result<(), FavorError> {
+        let results_dir = self.config.results_dir();
+        std::fs::create_dir_all(&results_dir).map_err(|e| {
+            FavorError::Resource(format!(
+                "Cannot create results directory '{}': {e}",
+                results_dir.display()
+            ))
+        })?;
+
+        if self.config.individual && !individual_pvals.is_empty() {
+            write_individual_results(individual_pvals, variants, &results_dir, self.out)?;
+        }
+
+        write_results(
+            results,
+            &self.config.trait_names,
+            self.config.maf_cutoff,
+            &results_dir,
+            null_model,
+            trait_type,
+            n,
+            n_rare,
+            self.out,
+        )
+    }
+
+    fn warn_mode_combinations(&self, trait_type: TraitType, mode: ScoringMode) {
+        if self.config.spa && trait_type == TraitType::Continuous {
+            self.out
+                .warn("--spa ignored: saddlepoint approximation only applies to binary traits");
+        }
+        if mode == ScoringMode::Spa {
+            self.out
+                .status("  SPA enabled: saddlepoint approximation for Burden and ACAT-V");
+        }
+        let has_kinship = !self.config.kinship.is_empty() || self.config.kinship_groups.is_some();
+        if has_kinship && mode == ScoringMode::Spa {
+            self.out.warn(
+                "--spa with --kinship: SPA is applied at the score-test layer; the kinship-aware path provides exact variance via the GLMM projection.",
+            );
+        }
+    }
 }
 
-use crate::staar::carrier::VariantIndex;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-/// Load rare variants from the store via VariantIndex.
+/// Walk the manifest's chromosomes and collect rare variants for output
+/// writing (sumstats, individual, results headers).
 fn load_rare_variants(
     store_dir: &Path,
-    manifest: &store::StoreManifest,
+    manifest: &StoreManifest,
     maf_cutoff: f64,
 ) -> Result<Vec<AnnotatedVariant>, FavorError> {
     let mut all = Vec::with_capacity(manifest.n_variants);
     for ci in &manifest.chromosomes {
         let chrom: Chromosome = ci.name.parse().unwrap_or(Chromosome::Autosome(1));
         let chrom_dir = store_dir.join(format!("chromosome={}", ci.name));
-        let index = VariantIndex::load(&chrom_dir)?;
+        let index = crate::staar::carrier::VariantIndex::load(&chrom_dir)?;
         for entry in index.all_entries() {
             if entry.maf < maf_cutoff {
                 all.push(entry.to_annotated_variant(chrom));
@@ -470,329 +840,130 @@ fn load_rare_variants(
     Ok(all)
 }
 
-type MaskPredicate = fn(&AnnotatedVariant) -> bool;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn run_score_tests(
-    store_dir: &Path,
-    manifest: &store::StoreManifest,
-    config: &StaarConfig,
-    analysis: &AnalysisVectors,
-    ctx: &ScoringContext,
-    out: &dyn Output,
-) -> Result<(ResultSet, Vec<(usize, f64)>), FavorError> {
-    out.status("Step 3/4: Running score tests (carrier-indexed sparse)...");
-
-    let mut mask_predicates: Vec<(MaskType, MaskPredicate)> = Vec::new();
-    let mut has_windows = false;
-    let mut has_scang = false;
-    for cat in &config.mask_categories {
-        match cat {
-            MaskCategory::Coding => {
-                for &(ref mt, pred) in masks::CODING_MASKS {
-                    mask_predicates.push((mt.clone(), pred));
-                }
-            }
-            MaskCategory::Noncoding => {
-                for &(ref mt, pred) in masks::NONCODING_MASKS {
-                    mask_predicates.push((mt.clone(), pred));
-                }
-            }
-            MaskCategory::SlidingWindow => has_windows = true,
-            MaskCategory::Scang => has_scang = true,
-            MaskCategory::Custom => out.warn("Custom BED: not yet implemented"),
+    fn dummy_config() -> StaarConfig {
+        StaarConfig {
+            genotypes: PathBuf::from("/tmp/g.vcf.gz"),
+            phenotype: PathBuf::from("/tmp/p.tsv"),
+            annotations: PathBuf::from("/tmp/a.annotated"),
+            trait_names: vec!["BMI".into()],
+            covariates: vec!["age".into(), "sex".into()],
+            mask_categories: vec![MaskCategory::Coding],
+            maf_cutoff: 0.01,
+            window_size: 2000,
+            individual: false,
+            spa: false,
+            ancestry_col: None,
+            ai_base_tests: 5,
+            ai_seed: 7590,
+            scang_params: ScangParams {
+                lmin: 40,
+                lmax: 300,
+                step: 10,
+            },
+            kinship: Vec::new(),
+            kinship_groups: None,
+            known_loci: None,
+            emit_sumstats: false,
+            rebuild_store: false,
+            column_map: HashMap::new(),
+            output_dir: PathBuf::from("/tmp/out"),
+            store_dir: PathBuf::from("/tmp/out/store"),
         }
     }
 
-    let mut all_results: ResultSet = mask_predicates
-        .iter()
-        .map(|(mt, _)| (mt.clone(), Vec::new()))
-        .collect();
-
-    let window_idx = if has_windows {
-        all_results.push((MaskType::SlidingWindow, Vec::new()));
-        Some(all_results.len() - 1)
-    } else {
-        None
-    };
-
-    let scang_idx = if has_scang {
-        all_results.push((MaskType::Scang, Vec::new()));
-        Some(all_results.len() - 1)
-    } else {
-        None
-    };
-
-    let individual_pvals: Vec<(usize, f64)> = Vec::new();
-    let maf_cutoff = config.maf_cutoff;
-
-    for ci in &manifest.chromosomes {
-        let chrom_name = &ci.name;
-        let chrom_parsed: Chromosome = chrom_name.parse().unwrap_or(Chromosome::Autosome(1));
-        let chrom_dir = store_dir.join(format!("chromosome={chrom_name}"));
-
-        let sparse_g = SparseG::open(&chrom_dir)?;
-        let variant_index = VariantIndex::load(&chrom_dir)?;
-
-        out.status(&format!(
-            "  chr{chrom_name}: {} variants, {} genes",
-            variant_index.len(),
-            variant_index.n_genes(),
-        ));
-
-        // Layer 3: Gene masks — score from cached U/K
-        if !mask_predicates.is_empty() {
-            let cache = score_cache::load_chromosome(&ctx.cache_dir, chrom_name, &variant_index)?;
-            let all_entries = variant_index.all_entries();
-            let use_spa = ctx.use_spa;
-            let ancestry = ctx.ancestry.as_ref();
-            let n_vcf = analysis.n_vcf_total;
-
-            let gene_names: Vec<&String> = cache.gene_blocks.keys().collect();
-            let per_gene_results: Vec<Vec<(usize, GeneResult)>> = gene_names
-                .par_iter()
-                .filter_map(|gene_name| {
-                    let block = cache.gene_blocks.get(*gene_name)?;
-                    if block.m() < 2 { return None; }
-
-                    // MAF filter
-                    let maf_pass: Vec<usize> = (0..block.m())
-                        .filter(|&local| {
-                            let global = block.variant_offsets[local] as usize;
-                            all_entries[global].maf < maf_cutoff
-                        })
-                        .collect();
-                    if maf_pass.len() < 2 { return None; }
-
-                    let start = maf_pass.iter()
-                        .map(|&l| all_entries[block.variant_offsets[l] as usize].position)
-                        .min().unwrap();
-                    let end = maf_pass.iter()
-                        .map(|&l| all_entries[block.variant_offsets[l] as usize].position)
-                        .max().unwrap();
-
-                    // Large-gene fallback: K not cached, load from SparseG
-                    if !block.has_k() {
-                        let gene_vcfs: Vec<u32> = maf_pass.iter()
-                            .map(|&l| block.variant_offsets[l])
-                            .collect();
-                        let carriers = sparse_g.load_variants(&gene_vcfs);
-                        if carriers.len() < 2 { return None; }
-                        let (full_u, full_k) = sparse_score::score_gene_sparse(&carriers, analysis);
-
-                        let mut results = Vec::new();
-                        for (mask_idx, (_mt, predicate)) in mask_predicates.iter().enumerate() {
-                            let qualifying: Vec<usize> = (0..gene_vcfs.len())
-                                .filter(|&i| {
-                                    let v = gene_vcfs[i] as usize;
-                                    predicate(&all_entries[v].to_annotated_variant_with_gene(chrom_parsed, gene_name))
-                                })
-                                .collect();
-                            if qualifying.len() < 2 { continue; }
-
-                            let mafs: Vec<f64> = qualifying.iter().map(|&i| all_entries[gene_vcfs[i] as usize].maf).collect();
-                            let ann_matrix: Vec<Vec<f64>> = (0..11)
-                                .map(|ch| qualifying.iter().map(|&i| all_entries[gene_vcfs[i] as usize].weights.0[ch]).collect())
-                                .collect();
-
-                            let sr = if let Some(ai) = ancestry {
-                                let subset: Vec<_> = qualifying.iter().map(|&i| carriers[i].clone()).collect();
-                                staar::ancestry::run_ai_staar_gene(&subset, analysis, ai, &ann_matrix, use_spa)
-                            } else if use_spa {
-                                let subset: Vec<_> = qualifying.iter().map(|&i| carriers[i].clone()).collect();
-                                sparse_score::run_staar_sparse(&subset, analysis, &ann_matrix, &mafs, true)
-                            } else {
-                                let (u_sub, k_sub) = sparse_score::slice_sumstats(&full_u, &full_k, &qualifying);
-                                score::run_staar_from_sumstats(&u_sub, &k_sub, &ann_matrix, &mafs, analysis.n_pheno)
-                            };
-
-                            let cmac: u32 = mafs.iter().map(|&maf| (2.0 * maf * n_vcf as f64).round() as u32).sum();
-                            results.push((mask_idx, GeneResult {
-                                ensembl_id: gene_name.to_string(),
-                                gene_symbol: gene_name.to_string(),
-                                chromosome: chrom_parsed,
-                                start, end,
-                                n_variants: qualifying.len() as u32,
-                                cumulative_mac: cmac,
-                                staar: sr,
-                            }));
-                        }
-                        return if results.is_empty() { None } else { Some(results) };
-                    }
-
-                    // Standard cached path: slice U/K for each mask
-                    let mut results = Vec::new();
-                    for (mask_idx, (_mt, predicate)) in mask_predicates.iter().enumerate() {
-                        let qualifying: Vec<usize> = maf_pass.iter()
-                            .filter(|&&local| {
-                                let global = block.variant_offsets[local] as usize;
-                                predicate(&all_entries[global].to_annotated_variant_with_gene(chrom_parsed, gene_name))
-                            })
-                            .copied()
-                            .collect();
-                        if qualifying.len() < 2 { continue; }
-
-                        let mafs: Vec<f64> = qualifying.iter()
-                            .map(|&l| all_entries[block.variant_offsets[l] as usize].maf)
-                            .collect();
-                        let ann_matrix: Vec<Vec<f64>> = (0..11)
-                            .map(|ch| qualifying.iter()
-                                .map(|&l| all_entries[block.variant_offsets[l] as usize].weights.0[ch])
-                                .collect())
-                            .collect();
-
-                        let sr = if let Some(ai) = ancestry {
-                            let mask_vcfs: Vec<u32> = qualifying.iter()
-                                .map(|&l| block.variant_offsets[l])
-                                .collect();
-                            let subset = sparse_g.load_variants(&mask_vcfs);
-                            staar::ancestry::run_ai_staar_gene(&subset, analysis, ai, &ann_matrix, use_spa)
-                        } else if use_spa {
-                            // SPA: load carriers from SparseG for this mask
-                            let mask_vcfs: Vec<u32> = qualifying.iter()
-                                .map(|&l| block.variant_offsets[l])
-                                .collect();
-                            let subset = sparse_g.load_variants(&mask_vcfs);
-                            sparse_score::run_staar_sparse(&subset, analysis, &ann_matrix, &mafs, true)
-                        } else {
-                            let global_indices: Vec<usize> = qualifying.iter()
-                                .map(|&l| block.variant_offsets[l] as usize)
-                                .collect();
-                            let u_sub = score_cache::slice_window_u(&cache, &global_indices);
-                            let k_sub = sparse_score::slice_sumstats_flat(
-                                &block.k_flat, block.m(), &qualifying,
-                            );
-                            score::run_staar_from_sumstats(
-                                &u_sub, &k_sub, &ann_matrix, &mafs, analysis.n_pheno,
-                            )
-                        };
-
-                        let cmac: u32 = qualifying.iter()
-                            .map(|&l| {
-                                let maf = all_entries[block.variant_offsets[l] as usize].maf;
-                                (2.0 * maf * n_vcf as f64).round() as u32
-                            })
-                            .sum();
-
-                        results.push((mask_idx, GeneResult {
-                            ensembl_id: gene_name.to_string(),
-                            gene_symbol: gene_name.to_string(),
-                            chromosome: chrom_parsed,
-                            start, end,
-                            n_variants: qualifying.len() as u32,
-                            cumulative_mac: cmac,
-                            staar: sr,
-                        }));
-                    }
-
-                    if results.is_empty() { None } else { Some(results) }
-                })
-                .collect();
-
-            for gene_results in per_gene_results {
-                for (mask_idx, result) in gene_results {
-                    all_results[mask_idx].1.push(result);
-                }
-            }
-
-            for (idx, (mask_type, _)) in mask_predicates.iter().enumerate() {
-                let n = all_results[idx].1.len();
-                if n > 0 {
-                    out.status(&format!("    {}: {} groups", mask_type.file_stem(), n));
-                }
-            }
-        }
-
-        // Sliding windows and SCANG
-        if window_idx.is_some() || scang_idx.is_some() {
-            let (chrom_variants, global_indices): (Vec<AnnotatedVariant>, Vec<usize>) =
-                variant_index.all_entries().iter().enumerate()
-                    .filter(|(_, e)| e.maf < maf_cutoff)
-                    .map(|(gi, e)| (e.to_annotated_variant(chrom_parsed), gi))
-                    .unzip();
-            let chrom_indices: Vec<usize> = (0..chrom_variants.len()).collect();
-
-            let window_cache = score_cache::load_chromosome(
-                &ctx.cache_dir, chrom_name, &variant_index,
-            )?;
-            let n_vcf = analysis.n_vcf_total;
-            let ancestry = ctx.ancestry.as_ref();
-
-            let score_window = |g: &MaskGroup| -> Option<GeneResult> {
-                let m = g.variant_indices.len();
-                if m < 2 { return None; }
-
-                let win_globals: Vec<usize> = g.variant_indices.iter()
-                    .map(|&ci| global_indices[ci])
-                    .collect();
-
-                let mafs: Vec<f64> = g.variant_indices.iter()
-                    .map(|&ci| chrom_variants[ci].maf)
-                    .collect();
-                let ann_matrix: Vec<Vec<f64>> = (0..11)
-                    .map(|ch| g.variant_indices.iter()
-                        .map(|&ci| chrom_variants[ci].annotation.weights.0[ch])
-                        .collect())
-                    .collect();
-
-                let sr = if let Some(ai) = ancestry {
-                    let win_vcfs: Vec<u32> = win_globals.iter().map(|&i| i as u32).collect();
-                    let carriers = sparse_g.load_variants(&win_vcfs);
-                    staar::ancestry::run_ai_staar_gene(&carriers, analysis, ai, &ann_matrix, ctx.use_spa)
-                } else {
-                    let u_win = score_cache::slice_window_u(&window_cache, &win_globals);
-                    let k_win = score_cache::assemble_window_k(&window_cache, &win_globals);
-                    score::run_staar_from_sumstats(
-                        &u_win, &k_win, &ann_matrix, &mafs, analysis.n_pheno,
-                    )
-                };
-                let cmac: u32 = mafs.iter()
-                    .map(|&maf| (2.0 * maf * n_vcf as f64).round() as u32)
-                    .sum();
-
-                Some(GeneResult {
-                    ensembl_id: g.name.clone(),
-                    gene_symbol: g.name.clone(),
-                    chromosome: g.chromosome,
-                    start: g.start,
-                    end: g.end,
-                    n_variants: m as u32,
-                    cumulative_mac: cmac,
-                    staar: sr,
-                })
-            };
-
-            if let Some(wi) = window_idx {
-                let window_groups = masks::build_sliding_windows(
-                    &chrom_variants, &chrom_indices, chrom_parsed,
-                    config.window_size, config.window_size / 2,
-                );
-                if !window_groups.is_empty() {
-                    let r: Vec<GeneResult> = window_groups.iter()
-                        .filter_map(score_window).collect();
-                    if !r.is_empty() {
-                        out.status(&format!("    sliding_window: {} windows", r.len()));
-                        all_results[wi].1.extend(r);
-                    }
-                }
-            }
-
-            if let Some(si) = scang_idx {
-                let scang_all = masks::build_scang_windows(
-                    &chrom_variants, &chrom_indices, chrom_parsed,
-                    &config.scang_params,
-                );
-                for (wsize, groups) in &scang_all {
-                    let r: Vec<GeneResult> = groups.iter()
-                        .filter_map(score_window).collect();
-                    if !r.is_empty() {
-                        out.status(&format!("    scang L={wsize}: {} windows", r.len()));
-                        all_results[si].1.extend(r);
-                    }
-                }
-            }
-        }
+    #[test]
+    fn run_mode_default_is_analyze() {
+        let c = dummy_config();
+        assert_eq!(c.run_mode(), RunMode::Analyze);
     }
 
-    Ok((all_results, individual_pvals))
+    #[test]
+    fn run_mode_emit_sumstats() {
+        let mut c = dummy_config();
+        c.emit_sumstats = true;
+        assert_eq!(c.run_mode(), RunMode::EmitSumstats);
+    }
+
+    #[test]
+    fn scoring_mode_standard_when_no_special_flags() {
+        let c = dummy_config();
+        assert_eq!(c.scoring_mode(TraitType::Continuous), ScoringMode::Standard);
+        assert_eq!(c.scoring_mode(TraitType::Binary), ScoringMode::Standard);
+    }
+
+    #[test]
+    fn scoring_mode_spa_only_for_binary() {
+        let mut c = dummy_config();
+        c.spa = true;
+        // Continuous: SPA flag is ignored at the mode-selection layer.
+        assert_eq!(c.scoring_mode(TraitType::Continuous), ScoringMode::Standard);
+        assert_eq!(c.scoring_mode(TraitType::Binary), ScoringMode::Spa);
+    }
+
+    #[test]
+    fn scoring_mode_ai_staar_overrides_spa() {
+        let mut c = dummy_config();
+        c.spa = true;
+        c.ancestry_col = Some("super_population".into());
+        assert_eq!(c.scoring_mode(TraitType::Binary), ScoringMode::AiStaar);
+    }
+
+    #[test]
+    fn null_model_kind_dispatch() {
+        let mut c = dummy_config();
+        assert_eq!(c.null_model_kind(TraitType::Continuous), NullModelKind::Glm);
+        assert_eq!(c.null_model_kind(TraitType::Binary), NullModelKind::Logistic);
+        c.kinship.push(PathBuf::from("/no/such/k.tsv"));
+        assert_eq!(c.null_model_kind(TraitType::Continuous), NullModelKind::KinshipReml);
+        assert_eq!(c.null_model_kind(TraitType::Binary), NullModelKind::KinshipPql);
+    }
+
+    #[test]
+    fn run_manifest_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = dummy_config();
+        let mut m = RunManifest::new(&c);
+        m.begin(Stage::Validate);
+        m.complete(Stage::Validate);
+        m.begin(Stage::EnsureStore);
+        m.complete(Stage::EnsureStore);
+        m.outputs.store_dir = Some(PathBuf::from("/tmp/store"));
+        m.write(dir.path()).unwrap();
+
+        let loaded = RunManifest::probe(dir.path()).unwrap();
+        assert_eq!(loaded.config_hash, m.config_hash);
+        assert_eq!(loaded.run_mode, RunMode::Analyze);
+        assert_eq!(loaded.completed_stages(), vec![Stage::Validate, Stage::EnsureStore]);
+        assert_eq!(loaded.outputs.store_dir, Some(PathBuf::from("/tmp/store")));
+    }
+
+    #[test]
+    fn run_manifest_fail_marks_stage() {
+        let mut m = RunManifest::new(&dummy_config());
+        m.begin(Stage::FitNullModel);
+        m.fail(Stage::FitNullModel);
+        let rec = m.stages.last().unwrap();
+        assert_eq!(rec.status, StageStatus::Failed);
+        assert!(rec.completed_unix.is_some());
+    }
+
+    #[test]
+    fn config_hash_changes_with_inputs() {
+        let c1 = dummy_config();
+        let h1 = config_hash(&c1);
+        let mut c2 = dummy_config();
+        c2.maf_cutoff = 0.05;
+        assert_ne!(h1, config_hash(&c2));
+        let mut c3 = dummy_config();
+        c3.emit_sumstats = true;
+        assert_ne!(h1, config_hash(&c3));
+        let mut c4 = dummy_config();
+        c4.covariates = vec!["sex".into(), "age".into()];
+        // Covariate order doesn't matter (sorted before hashing).
+        assert_eq!(h1, config_hash(&c4));
+    }
 }
-
