@@ -41,6 +41,10 @@ pub struct StaarConfig {
     /// AI-STAAR ensemble weight RNG seed.
     pub ai_seed: u64,
     pub scang_params: ScangParams,
+    /// Kinship matrix files for mixed-model analysis. Length L. Empty = no kinship.
+    pub kinship: Vec<PathBuf>,
+    /// Phenotype column naming a categorical group for heteroscedastic residual variance.
+    pub kinship_groups: Option<String>,
     pub known_loci: Option<PathBuf>,
     pub emit_sumstats: bool,
     pub rebuild_store: bool,
@@ -169,6 +173,49 @@ impl<'a> StaarPipeline<'a> {
             ));
         }
 
+        // Load kinship matrices and group partition. Both default to empty,
+        // which routes fit_null_model through the existing GLM/IRLS path.
+        let kinships = if self.config.kinship.is_empty() {
+            Vec::new()
+        } else {
+            // Sample order matches `pheno_mask` compaction: only samples with
+            // phenotype + genotype, in genotype-store order.
+            let compact_samples: Vec<String> = store
+                .sample_names
+                .iter()
+                .zip(pheno_mask.iter())
+                .filter_map(|(name, &has)| if has { Some(name.clone()) } else { None })
+                .collect();
+            staar::kinship::load_kinship(&self.config.kinship, &compact_samples, self.out)?
+        };
+        let user_groups = if let Some(ref col) = self.config.kinship_groups {
+            Some(staar::kinship::load_groups(
+                &store.engine,
+                &self.config.phenotype,
+                col,
+                &geno_for_pheno,
+                &pheno_mask,
+                &self.config.column_map,
+                self.out,
+            )?)
+        } else {
+            None
+        };
+
+        // Decide whether to dispatch to the kinship-aware fit. The trigger is
+        // either flag being set; if neither is set, fall through to OLS/IRLS
+        // exactly as before. When --kinship is set without --kinship-groups
+        // we synthesize a single group covering all samples (homoscedastic).
+        let use_kinship = !kinships.is_empty() || user_groups.is_some();
+        let groups_owned: Option<staar::kinship::GroupPartition> = if use_kinship {
+            Some(
+                user_groups
+                    .unwrap_or_else(|| staar::kinship::GroupPartition::single(n)),
+            )
+        } else {
+            None
+        };
+
         let use_spa = self.config.spa && trait_type == TraitType::Binary;
         if self.config.spa && trait_type == TraitType::Continuous {
             self.out
@@ -178,9 +225,15 @@ impl<'a> StaarPipeline<'a> {
             self.out
                 .status("  SPA enabled: saddlepoint approximation for Burden and ACAT-V");
         }
+        if use_kinship && use_spa {
+            self.out.warn(
+                "--spa with --kinship: SPA is applied at the score-test layer; the kinship-aware path provides exact variance via the GLMM projection.",
+            );
+        }
 
         // Step 2/4: Fit null model
-        let null_model = self.fit_null_model(&y, &x, trait_type)?;
+        let null_model =
+            self.fit_null_model(&y, &x, trait_type, &kinships, groups_owned.as_ref())?;
 
         // Sumstats export (early exit)
         if self.config.emit_sumstats {
@@ -199,7 +252,7 @@ impl<'a> StaarPipeline<'a> {
                 covariates: self.config.covariates.clone(),
                 segment_size: 500_000,
             };
-            let analysis = AnalysisVectors::from_null_model(&null_model, &pheno_mask);
+            let analysis = AnalysisVectors::from_null_model(&null_model, &pheno_mask)?;
             return staar::meta::emit_sumstats(
                 &store.store_dir,
                 &analysis,
@@ -211,7 +264,7 @@ impl<'a> StaarPipeline<'a> {
         }
 
         // Layer 2: Build or load per-phenotype score cache (U/K for all genes)
-        let analysis = AnalysisVectors::from_null_model(&null_model, &pheno_mask);
+        let analysis = AnalysisVectors::from_null_model(&null_model, &pheno_mask)?;
         let sc_dir = ensure_score_cache(
             &store.store_dir,
             &store.manifest,
@@ -220,6 +273,8 @@ impl<'a> StaarPipeline<'a> {
             primary_trait,
             &self.config.covariates,
             self.config.known_loci.as_deref(),
+            &self.config.kinship,
+            self.config.kinship_groups.as_deref(),
             self.out,
         )?;
 
@@ -286,8 +341,41 @@ impl<'a> StaarPipeline<'a> {
         y: &Mat<f64>,
         x: &Mat<f64>,
         trait_type: TraitType,
+        kinships: &[staar::kinship::KinshipMatrix],
+        groups: Option<&staar::kinship::GroupPartition>,
     ) -> Result<staar::model::NullModel, FavorError> {
         self.out.status("Step 2/4: Fitting null model...");
+
+        if let Some(group_partition) = groups {
+            let state = match trait_type {
+                TraitType::Continuous => {
+                    staar::kinship::fit_reml(y, x, kinships, group_partition, None)?
+                }
+                TraitType::Binary => {
+                    staar::kinship::fit_pql_glmm(y, x, kinships, group_partition, self.out)?
+                }
+            };
+            self.out.status(&format!(
+                "  AI-REML converged in {} iterations ({} boundary refits), h² = {:?}",
+                state.n_iter, state.outer_refits, state.h2,
+            ));
+            let n = y.nrows();
+            let mut residuals = Mat::<f64>::zeros(n, 1);
+            for i in 0..n {
+                residuals[(i, 0)] = state.p_y[(i, 0)];
+            }
+            return Ok(staar::model::NullModel {
+                residuals,
+                x_matrix: x.to_owned(),
+                xtx_inv: state.cov.clone(),
+                sigma2: 1.0,
+                n_samples: n,
+                fitted_values: None,
+                working_weights: None,
+                kinship: Some(state),
+            });
+        }
+
         let null_model = match trait_type {
             TraitType::Continuous => staar::model::fit_glm(y, x),
             TraitType::Binary => staar::model::fit_logistic(y, x, 25),
@@ -308,9 +396,18 @@ fn ensure_score_cache(
     trait_name: &str,
     covariates: &[String],
     known_loci: Option<&Path>,
+    kinship: &[PathBuf],
+    kinship_groups: Option<&str>,
     out: &dyn Output,
 ) -> Result<PathBuf, FavorError> {
-    let key = score_cache::cache_key(store_key, trait_name, covariates, known_loci);
+    let key = score_cache::cache_key(
+        store_key,
+        trait_name,
+        covariates,
+        known_loci,
+        kinship,
+        kinship_groups,
+    );
     let dir = score_cache::cache_dir(store_dir, &key);
 
     if score_cache::probe(store_dir, manifest, &key) {

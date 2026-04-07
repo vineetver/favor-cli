@@ -8,11 +8,37 @@
 
 use std::collections::HashMap;
 
-use faer::Mat;
+use faer::linalg::solvers::Solve;
+use faer::{unzip, zip, Mat};
 
 use super::reader::{CarrierEntry, CarrierList};
+use crate::error::FavorError;
+use crate::staar::kinship::{check_memory_budget, KinshipInverse, KinshipState};
 use crate::staar::model::NullModel;
 use crate::staar::score::{self, StaarResult};
+
+/// Walk a gene's carrier lists, calling `visit(variant_idx, pheno_idx, dosage)`
+/// for every non-missing carrier with phenotype data. Encapsulates the
+/// `dosage == 255` skip and the `vcf_to_pheno` remap so the score kernels
+/// don't repeat the same four-line pattern at every phase. `#[inline]` keeps
+/// it as fast as the open-coded loop after monomorphization.
+#[inline]
+fn for_each_carrier(
+    carriers: &[CarrierList],
+    vcf_to_pheno: &[Option<u32>],
+    mut visit: impl FnMut(usize, usize, f64),
+) {
+    for (j, clist) in carriers.iter().enumerate() {
+        for &CarrierEntry { sample_idx, dosage } in &clist.entries {
+            if dosage == 255 {
+                continue;
+            }
+            if let Some(pi) = vcf_to_pheno[sample_idx as usize] {
+                visit(j, pi as usize, dosage as f64);
+            }
+        }
+    }
+}
 
 /// Pre-parsed analysis vectors from the null model, laid out for
 /// cache-friendly carrier-indexed access. Computed once, shared
@@ -23,6 +49,8 @@ use crate::staar::score::{self, StaarResult};
 /// Samples without phenotype are skipped in scoring, not multiplied by zero.
 pub struct AnalysisVectors {
     /// Residuals from null model. Length = `n_pheno`.
+    /// For kinship-aware fits this carries `PY = Σ⁻¹(y - Xα̂)` so the score
+    /// kernel can compute U = G' PY directly.
     pub residuals: Vec<f64>,
     /// Covariate matrix, ROW-major: `x[i * k .. (i+1) * k]`. Length = `n_pheno * k`.
     pub x_row_major: Vec<f64>,
@@ -45,15 +73,32 @@ pub struct AnalysisVectors {
     /// Maps VCF sample index → phenotype index. `None` = no phenotype (skip).
     /// Length = `n_vcf_total`.
     pub vcf_to_pheno: Vec<Option<u32>>,
+    /// Fitted AI-REML state from a kinship-aware null fit. When `Some`, the
+    /// score path dispatches to the kinship-aware kernel and reads Σ⁻¹,
+    /// Σ⁻¹X, and (X'Σ⁻¹X)⁻¹ directly from the faer matrices it owns.
+    pub kinship: Option<KinshipState>,
 }
 
 impl AnalysisVectors {
     /// Build from a fitted NullModel with compact arrays and VCF→pheno remapping.
     /// Arrays stay at `n_pheno` size. No zero-padding.
-    pub fn from_null_model(null: &NullModel, pheno_mask: &[bool]) -> Self {
+    ///
+    /// Returns `FavorError::Resource` if the kinship-aware path would exceed
+    /// the configured dense-matrix memory budget. See
+    /// `crate::staar::kinship::check_memory_budget`.
+    pub fn from_null_model(
+        null: &NullModel,
+        pheno_mask: &[bool],
+    ) -> Result<Self, FavorError> {
         let n_pheno = null.n_samples;
         let n_vcf_total = pheno_mask.len();
         let k = null.x_matrix.ncols();
+
+        // For kinship fits the residuals field stores PY (Σ⁻¹-projected
+        // residual). It is constructed from the kinship state below; otherwise
+        // we copy null.residuals directly.
+        let kinship_state_residuals: Option<&Mat<f64>> =
+            null.kinship.as_ref().map(|s| &s.p_y);
 
         // Compact arrays at n_pheno size
         let mut residuals = Vec::with_capacity(n_pheno);
@@ -76,7 +121,11 @@ impl AnalysisVectors {
             if has_pheno {
                 vcf_to_pheno[vcf_idx] = Some(j);
                 let ji = j as usize;
-                residuals.push(null.residuals[(ji, 0)]);
+                let r_val = match kinship_state_residuals {
+                    Some(py) => py[(ji, 0)],
+                    None => null.residuals[(ji, 0)],
+                };
+                residuals.push(r_val);
                 for c in 0..k {
                     x_row_major.push(null.x_matrix[(ji, c)]);
                 }
@@ -99,7 +148,19 @@ impl AnalysisVectors {
             }
         }
 
-        Self {
+        // The score path holds the kinship state by clone. Dense Σ⁻¹
+        // costs one n²-byte allocation; sparse factor is much smaller.
+        let kinship = match null.kinship.as_ref() {
+            Some(state) => {
+                if matches!(state.inverse, KinshipInverse::Dense(_)) {
+                    check_memory_budget(state.n())?;
+                }
+                Some(state.clone())
+            }
+            None => None,
+        };
+
+        Ok(Self {
             residuals,
             x_row_major,
             xtx_inv,
@@ -110,11 +171,12 @@ impl AnalysisVectors {
             working_weights,
             fitted_values,
             vcf_to_pheno,
-        }
+            kinship,
+        })
     }
 
     pub fn is_binary(&self) -> bool {
-        !self.working_weights.is_empty()
+        !self.working_weights.is_empty() && self.kinship.is_none()
     }
 }
 
@@ -130,47 +192,26 @@ pub fn score_gene_sparse(
     carriers: &[CarrierList],
     analysis: &AnalysisVectors,
 ) -> (Mat<f64>, Mat<f64>) {
+    if let Some(kinship) = analysis.kinship.as_ref() {
+        return score_gene_sparse_kinship(carriers, analysis, kinship);
+    }
     let m = carriers.len();
     let k = analysis.k;
     let is_binary = analysis.is_binary();
 
-    // ── Phase 1: Single pass over carrier lists ──────────────────────
-    // Compute U = G'r and GtX = G'X (or G'WX for binary) simultaneously.
-    // Uses vcf_to_pheno remapping: skip samples without phenotype data.
+    // ── Phase 1: U = G'r and GtX = G'X (or G'WX for binary). One walk
+    // over carriers with both accumulators inside the closure.
     let mut u = vec![0.0f64; m];
     let mut gtx = vec![0.0f64; m * k];
-
-    for (j, clist) in carriers.iter().enumerate() {
-        let u_j = &mut u[j];
+    for_each_carrier(carriers, &analysis.vcf_to_pheno, |j, pi, d| {
+        u[j] += d * analysis.residuals[pi];
+        let x_row = &analysis.x_row_major[pi * k..(pi + 1) * k];
+        let weight = if is_binary { d * analysis.working_weights[pi] } else { d };
         let gtx_row = &mut gtx[j * k..(j + 1) * k];
-
-        for &CarrierEntry { sample_idx, dosage } in &clist.entries {
-            if dosage == 255 {
-                continue; // missing
-            }
-            let pi = match analysis.vcf_to_pheno[sample_idx as usize] {
-                Some(idx) => idx as usize,
-                None => continue, // no phenotype — skip, don't multiply by zero
-            };
-            let d = dosage as f64;
-
-            // Score vector: G'r (residuals already y - μ for binary)
-            *u_j += d * analysis.residuals[pi];
-
-            // G'X for continuous, G'WX for binary
-            let x_row = &analysis.x_row_major[pi * k..(pi + 1) * k];
-            if is_binary {
-                let w_i = analysis.working_weights[pi];
-                for c in 0..k {
-                    gtx_row[c] += d * w_i * x_row[c];
-                }
-            } else {
-                for c in 0..k {
-                    gtx_row[c] += d * x_row[c];
-                }
-            }
+        for c in 0..k {
+            gtx_row[c] += weight * x_row[c];
         }
-    }
+    });
 
     // ── Phase 2: G'G via inverted carrier index ──────────────────────
     // Build sample → variant map, accumulate G'G from each sample's contribution.
@@ -370,7 +411,103 @@ pub(crate) fn null_model_from_analysis(analysis: &AnalysisVectors) -> NullModel 
         } else {
             Some(analysis.working_weights.clone())
         },
+        // SPA / AI-STAAR rebuild paths do not support kinship — they consume
+        // a dense G and a non-mixed-model NullModel. Kinship-aware analyses
+        // route through `score_gene_sparse_kinship` directly.
+        kinship: None,
     }
+}
+
+/// Kinship-aware sparse score kernel.
+///
+/// Computes the GLMM score test for one gene:
+///
+/// ```text
+/// U[j]   = G_j' · PY                              (length m)
+/// K[j,l] = G_j' Σ⁻¹ G_l − (G_j' Σ⁻¹ X) (X'Σ⁻¹X)⁻¹ (X'Σ⁻¹ G_l)
+/// ```
+///
+/// `PY` lives in `analysis.residuals` (the projected response from AI-REML).
+/// Σ⁻¹, Σ⁻¹X, and (X'Σ⁻¹X)⁻¹ come from `kinship` directly — taken by
+/// reference, no `Option` unwrap, so the dispatcher is the only place that
+/// proves the kinship invariant.
+///
+/// Phase 2 builds Σ⁻¹G as a dense column-major faer matrix; each carrier
+/// contribution is a single `zip!`-driven saxpy on a contiguous column.
+/// LLVM auto-vectorizes the inner loop. Σ⁻¹ is symmetric so `sigma_inv.col(pi)`
+/// reads row pi without a transpose.
+pub fn score_gene_sparse_kinship(
+    carriers: &[CarrierList],
+    analysis: &AnalysisVectors,
+    kinship: &KinshipState,
+) -> (Mat<f64>, Mat<f64>) {
+    let m = carriers.len();
+    let k = analysis.k;
+    let n = kinship.n();
+    let sigma_inv_x = &kinship.sigma_inv_x;
+    let cov = &kinship.cov;
+    let vcf_to_pheno = &analysis.vcf_to_pheno;
+
+    // Phase 1: U[j] = Σ_carriers d · PY[pi].
+    let mut u = vec![0.0f64; m];
+    for_each_carrier(carriers, vcf_to_pheno, |j, pi, d| {
+        u[j] += d * analysis.residuals[pi];
+    });
+
+    // Phase 2: sinv_g = Σ⁻¹ G as a dense n×m faer matrix. Two paths to the
+    // same end: dense Σ⁻¹ does a per-carrier saxpy of `Σ⁻¹.col(pi)`; sparse
+    // factor builds a dense G first then does one batched `solve_in_place`
+    // over all m columns.
+    let sinv_g = match &kinship.inverse {
+        KinshipInverse::Dense(sigma_inv) => {
+            let mut sinv_g = Mat::<f64>::zeros(n, m);
+            for_each_carrier(carriers, vcf_to_pheno, |j, pi, d| {
+                let col_j = sinv_g.as_mut().col_mut(j);
+                let src = sigma_inv.col(pi);
+                zip!(col_j, src).for_each(|unzip!(out, src_v)| {
+                    *out += d * *src_v;
+                });
+            });
+            sinv_g
+        }
+        KinshipInverse::Sparse(factor) => {
+            // Build the sparse genotype matrix as a dense n×m faer Mat (each
+            // column is mostly zero). One batched sparse Cholesky solve
+            // produces Σ⁻¹·G with cost O(nnz_L · m), independent of n.
+            let mut g = Mat::<f64>::zeros(n, m);
+            for_each_carrier(carriers, vcf_to_pheno, |j, pi, d| {
+                g[(pi, j)] = d;
+            });
+            factor.llt.solve_in_place(&mut g);
+            g
+        }
+    };
+
+    // Phase 3: gsg[j, l] = (G^T Σ⁻¹ G)[j, l] = Σ_{carriers c of l} d_c · sinv_g[pi_c, j].
+    let mut gsg = Mat::<f64>::zeros(m, m);
+    for_each_carrier(carriers, vcf_to_pheno, |l, pi, d| {
+        for j in 0..m {
+            gsg[(j, l)] += d * sinv_g[(pi, j)];
+        }
+    });
+
+    // Phase 4: gx[j, c] = Σ_{carriers of j} d · (Σ⁻¹X)[pi, c]. k is small
+    // (≤ 10) so a per-element accumulator is fine.
+    let mut gx = Mat::<f64>::zeros(m, k);
+    for_each_carrier(carriers, vcf_to_pheno, |j, pi, d| {
+        for c in 0..k {
+            gx[(j, c)] += d * sigma_inv_x[(pi, c)];
+        }
+    });
+
+    // K = gsg − gx · cov · gxᵀ.  Two faer matmuls; cov is k × k so the
+    // intermediate is k × m and the final correction is m × m.
+    let cov_gxt = cov * gx.transpose();
+    let correction = &gx * &cov_gxt;
+    let k_mat = gsg - correction;
+
+    let u_mat = Mat::from_fn(m, 1, |i, _| u[i]);
+    (u_mat, k_mat)
 }
 
 /// Compute U/σ² from carrier lists (Phase 1 of score_gene_sparse).
@@ -468,7 +605,7 @@ mod tests {
         let u_dense = g_dense.transpose() * &null.residuals;
         let k_dense = null.compute_kernel(&g_dense);
 
-        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; null.n_samples]);
+        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; null.n_samples]).unwrap();
         let carriers: Vec<CarrierList> = carrier_lists
             .into_iter()
             .map(|entries| CarrierList { entries })
@@ -531,7 +668,7 @@ mod tests {
         let u_dense = g_dense.transpose() * &null.residuals;
         let k_dense = null.compute_kernel(&g_dense);
 
-        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; null.n_samples]);
+        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; null.n_samples]).unwrap();
         let carriers: Vec<CarrierList> = carrier_lists
             .into_iter()
             .map(|entries| CarrierList { entries })
@@ -687,7 +824,7 @@ mod tests {
     fn sparse_path_matches_oracle() {
         let d = synthetic_continuous();
         let null = model::fit_glm(&d.y, &d.x);
-        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; null.n_samples]);
+        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; null.n_samples]).unwrap();
         let sparse = run_staar_sparse(&d.carriers, &analysis, &d.ann, &d.mafs, false);
         let expected = oracle(&d.g, &null, &d.ann, &d.mafs);
         assert_staar_eq(&sparse, &expected);
@@ -709,7 +846,7 @@ mod tests {
         }
 
         let null = model::fit_glm(&y, &x);
-        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; null.n_samples]);
+        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; null.n_samples]).unwrap();
 
         // Single variant with MAC=1
         let carriers = vec![
@@ -742,6 +879,7 @@ mod tests {
             working_weights: Vec::new(),
             fitted_values: Vec::new(),
             vcf_to_pheno: (0..10).map(|i| Some(i as u32)).collect(),
+            kinship: None,
         };
 
         let carriers: Vec<CarrierList> = Vec::new();
@@ -778,7 +916,7 @@ mod tests {
         }
 
         let null = model::fit_glm(&y, &x);
-        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; n]);
+        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; n]).unwrap();
         let carriers: Vec<CarrierList> = carrier_lists.into_iter()
             .map(|entries| CarrierList { entries }).collect();
         let (u_full, k_full) = score_gene_sparse(&carriers, &analysis);
@@ -827,7 +965,7 @@ mod tests {
         }
 
         let null = model::fit_glm(&y, &x);
-        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; n]);
+        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; n]).unwrap();
         let carriers: Vec<CarrierList> = carrier_lists.into_iter()
             .map(|entries| CarrierList { entries }).collect();
 
@@ -895,7 +1033,7 @@ mod tests {
         let u_dense = g_dense.transpose() * &null.residuals;
         let k_dense = null.compute_kernel(&g_dense);
 
-        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; n]);
+        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; n]).unwrap();
         let carriers: Vec<CarrierList> = carrier_lists.into_iter()
             .map(|entries| CarrierList { entries }).collect();
         let (u_sparse, k_sparse) = score_gene_sparse(&carriers, &analysis);
@@ -940,7 +1078,7 @@ mod tests {
         }
 
         let null = model::fit_glm(&y, &x);
-        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; n]);
+        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; n]).unwrap();
         let carriers: Vec<CarrierList> = carrier_lists.into_iter()
             .map(|entries| CarrierList { entries }).collect();
 
@@ -995,7 +1133,7 @@ mod tests {
         }
 
         let null = model::fit_glm(&y, &x);
-        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; n]);
+        let analysis = AnalysisVectors::from_null_model(&null, &vec![true; n]).unwrap();
 
         let cl = CarrierList { entries };
 

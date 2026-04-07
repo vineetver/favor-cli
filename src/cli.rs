@@ -197,6 +197,16 @@ pub enum Command {
         #[arg(long, default_value = "10")]
         scang_step: usize,
 
+        /// Kinship matrix file(s) for mixed-model analysis (TSV: sample_i sample_j kinship).
+        /// Pass multiple files comma-separated to combine matrices (e.g. population GRM + pedigree).
+        #[arg(long, value_delimiter = ',')]
+        kinship: Vec<PathBuf>,
+
+        /// Phenotype column naming a categorical group for heteroscedastic residual variance.
+        /// Each distinct level becomes a separate τ_e component in the AI-REML fit.
+        #[arg(long)]
+        kinship_groups: Option<String>,
+
         /// Known loci file for conditional analysis (one chr:pos:ref:alt per line)
         #[arg(long)]
         known_loci: Option<PathBuf>,

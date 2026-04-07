@@ -335,6 +335,7 @@ mod tests {
             working_weights: Vec::new(),
             fitted_values: Vec::new(),
             vcf_to_pheno: (0..6).map(|i| Some(i as u32)).collect(),
+            kinship: None,
         };
         let ancestry = AncestryInfo::new(vec![0, 0, 0, 1, 1, 1], 2, 0, 7590);
         let carriers = vec![
@@ -375,6 +376,7 @@ mod tests {
             working_weights: Vec::new(),
             fitted_values: Vec::new(),
             vcf_to_pheno: vec![Some(0), None, Some(1), Some(2)],
+            kinship: None,
         };
         let ancestry = AncestryInfo::new(vec![0, 0, 1], 2, 0, 7590);
         let carriers = vec![CarrierList {
@@ -556,7 +558,7 @@ mod tests {
         }
         let null = model::fit_glm(&y, &x);
         let pheno_mask = vec![true; n];
-        let analysis = AnalysisVectors::from_null_model(&null, &pheno_mask);
+        let analysis = AnalysisVectors::from_null_model(&null, &pheno_mask).unwrap();
 
         let mut carriers: Vec<CarrierList> =
             (0..m).map(|_| CarrierList { entries: Vec::new() }).collect();

@@ -74,15 +74,23 @@ pub struct ChromScoreCache {
     pub gene_blocks: HashMap<String, GeneKBlock>,
 }
 
-/// SHA-256 of (store_key, trait_name, sorted covariates, known_loci path).
+/// SHA-256 of (store_key, trait_name, sorted covariates, known_loci path,
+/// sorted canonicalized kinship paths, kinship_groups column name).
+///
+/// Kinship paths are canonicalized and sorted before hashing so reordered
+/// `--kinship a.tsv,b.tsv` invocations hit the same cache (sum is commutative).
+/// If canonicalize fails (file does not exist), the raw path is used.
+///
 /// Invalidated by: new VCF, new annotations, different trait, different covariates,
-/// different --known-loci file.
-/// NOT invalidated by: MAF cutoff, mask definitions, SPA flag.
+/// different --known-loci file, different --kinship set, different --kinship-groups column.
+/// NOT invalidated by: MAF cutoff, mask definitions, SPA flag, kinship file order.
 pub fn cache_key(
     store_key: &str,
     trait_name: &str,
     covariates: &[String],
     known_loci: Option<&Path>,
+    kinship: &[PathBuf],
+    kinship_groups: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(store_key.as_bytes());
@@ -98,6 +106,24 @@ pub fn cache_key(
     hasher.update(b"|");
     if let Some(p) = known_loci {
         hasher.update(p.to_string_lossy().as_bytes());
+    }
+    hasher.update(b"|");
+    let mut canonical: Vec<String> = kinship
+        .iter()
+        .map(|p| {
+            std::fs::canonicalize(p)
+                .map(|c| c.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| p.to_string_lossy().into_owned())
+        })
+        .collect();
+    canonical.sort();
+    for c in &canonical {
+        hasher.update(c.as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"|");
+    if let Some(g) = kinship_groups {
+        hasher.update(g.as_bytes());
     }
     format!("{:x}", hasher.finalize())
 }
@@ -648,31 +674,66 @@ mod tests {
     #[test]
     fn cache_key_invalidation() {
         let covs = vec!["age".to_string(), "sex".to_string()];
+        let no_kin: Vec<PathBuf> = Vec::new();
 
-        let k1 = cache_key("store1", "BMI", &covs, None);
-        let k2 = cache_key("store1", "BMI", &covs, None);
+        let k1 = cache_key("store1", "BMI", &covs, None, &no_kin, None);
+        let k2 = cache_key("store1", "BMI", &covs, None, &no_kin, None);
         assert_eq!(k1, k2, "same inputs should produce same key");
 
         // Different trait
-        let k3 = cache_key("store1", "LDL", &covs, None);
+        let k3 = cache_key("store1", "LDL", &covs, None, &no_kin, None);
         assert_ne!(k1, k3);
 
         // Different covariates
-        let k4 = cache_key("store1", "BMI", &["age".to_string()], None);
+        let k4 = cache_key("store1", "BMI", &["age".to_string()], None, &no_kin, None);
         assert_ne!(k1, k4);
 
         // Covariate order doesn't matter
         let covs_rev = vec!["sex".to_string(), "age".to_string()];
-        let k5 = cache_key("store1", "BMI", &covs_rev, None);
+        let k5 = cache_key("store1", "BMI", &covs_rev, None, &no_kin, None);
         assert_eq!(k1, k5, "covariate order should not affect key");
 
         // known_loci changes key
-        let k6 = cache_key("store1", "BMI", &covs, Some(Path::new("/path/to/loci.tsv")));
+        let k6 = cache_key(
+            "store1", "BMI", &covs,
+            Some(Path::new("/path/to/loci.tsv")),
+            &no_kin, None,
+        );
         assert_ne!(k1, k6, "known_loci should change cache key");
 
         // Different known_loci path changes key
-        let k7 = cache_key("store1", "BMI", &covs, Some(Path::new("/other/loci.tsv")));
+        let k7 = cache_key(
+            "store1", "BMI", &covs,
+            Some(Path::new("/other/loci.tsv")),
+            &no_kin, None,
+        );
         assert_ne!(k6, k7);
+
+        // Kinship paths change key
+        let kin_a = vec![PathBuf::from("/no/such/a.tsv")];
+        let kin_b = vec![PathBuf::from("/no/such/b.tsv")];
+        let kin_ab = vec![
+            PathBuf::from("/no/such/a.tsv"),
+            PathBuf::from("/no/such/b.tsv"),
+        ];
+        let kin_ba = vec![
+            PathBuf::from("/no/such/b.tsv"),
+            PathBuf::from("/no/such/a.tsv"),
+        ];
+        let k_kin_a = cache_key("store1", "BMI", &covs, None, &kin_a, None);
+        let k_kin_b = cache_key("store1", "BMI", &covs, None, &kin_b, None);
+        let k_kin_ab = cache_key("store1", "BMI", &covs, None, &kin_ab, None);
+        let k_kin_ba = cache_key("store1", "BMI", &covs, None, &kin_ba, None);
+        assert_ne!(k1, k_kin_a, "adding kinship should change key");
+        assert_ne!(k_kin_a, k_kin_b, "different kinship file should change key");
+        assert_eq!(
+            k_kin_ab, k_kin_ba,
+            "kinship file order should not affect key (commutative sum)"
+        );
+
+        // kinship_groups column changes key
+        let k_groups = cache_key("store1", "BMI", &covs, None, &no_kin, Some("batch"));
+        assert_ne!(k1, k_groups, "adding kinship_groups should change key");
     }
 
     /// Verify that validate_header rejects truncated files.

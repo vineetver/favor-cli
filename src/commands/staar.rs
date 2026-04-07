@@ -35,6 +35,8 @@ pub fn run(
     scang_lmin: usize,
     scang_lmax: usize,
     scang_step: usize,
+    kinship: Vec<PathBuf>,
+    kinship_groups: Option<String>,
     known_loci: Option<PathBuf>,
     emit_sumstats: bool,
     rebuild_store: bool,
@@ -47,7 +49,8 @@ pub fn run(
         genotypes, phenotype, trait_names, covariates, annotations, masks,
         maf_cutoff, window_size, individual, spa,
         ancestry_col, ai_base_tests, ai_seed,
-        scang_lmin, scang_lmax, scang_step, known_loci, emit_sumstats,
+        scang_lmin, scang_lmax, scang_step, kinship, kinship_groups,
+        known_loci, emit_sumstats,
         rebuild_store, column_map, output_path,
     )?;
 
@@ -77,6 +80,8 @@ fn validate_and_parse(
     scang_lmin: usize,
     scang_lmax: usize,
     scang_step: usize,
+    kinship: Vec<PathBuf>,
+    kinship_groups: Option<String>,
     known_loci: Option<PathBuf>,
     emit_sumstats: bool,
     rebuild_store: bool,
@@ -169,6 +174,18 @@ fn validate_and_parse(
         if trimmed.is_empty() { None } else { Some(trimmed) }
     });
 
+    for kp in &kinship {
+        if !kp.exists() {
+            return Err(FavorError::DataMissing(format!(
+                "Kinship file not found: '{}'", kp.display()
+            )));
+        }
+    }
+    let kinship_groups = kinship_groups.and_then(|s| {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() { None } else { Some(trimmed) }
+    });
+
     Ok(StaarConfig {
         genotypes,
         phenotype,
@@ -188,6 +205,8 @@ fn validate_and_parse(
             lmax: scang_lmax,
             step: scang_step,
         },
+        kinship,
+        kinship_groups,
         known_loci,
         emit_sumstats,
         rebuild_store,

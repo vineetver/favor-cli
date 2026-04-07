@@ -12,6 +12,7 @@ use crate::error::FavorError;
 use crate::output::Output;
 use crate::staar;
 use crate::staar::genotype::GenotypeResult;
+use crate::staar::kinship::KinshipState;
 
 pub struct PhenotypeData {
     pub y: Mat<f64>,
@@ -404,7 +405,7 @@ pub fn augment_covariates(x: &Mat<f64>, x_cond: &Mat<f64>) -> Mat<f64> {
 pub struct NullModel {
     pub residuals: Mat<f64>,
     pub x_matrix: Mat<f64>,
-    /// (X'X)^{-1} for continuous, (X'WX)^{-1} for binary.
+    /// (X'X)^{-1} for continuous, (X'WX)^{-1} for binary, (X'Σ⁻¹X)⁻¹ when kinship is set.
     pub xtx_inv: Mat<f64>,
     pub sigma2: f64,
     pub n_samples: usize,
@@ -412,6 +413,9 @@ pub struct NullModel {
     pub fitted_values: Option<Vec<f64>>,
     /// Working weights W_i = μ_i(1 - μ_i). Binary traits only.
     pub working_weights: Option<Vec<f64>>,
+    /// Kinship-aware variance components and projection. Set when `--kinship`
+    /// is in use; the score path then dispatches to the kinship-aware kernel.
+    pub kinship: Option<KinshipState>,
 }
 
 impl NullModel {
@@ -509,6 +513,7 @@ pub fn fit_glm(y: &Mat<f64>, x: &Mat<f64>) -> NullModel {
         n_samples: n,
         fitted_values: None,
         working_weights: None,
+        kinship: None,
     }
 }
 
@@ -599,5 +604,6 @@ pub fn fit_logistic(y: &Mat<f64>, x: &Mat<f64>, max_iter: usize) -> NullModel {
         n_samples: n,
         fitted_values: Some(fitted),
         working_weights: Some(w_final),
+        kinship: None,
     }
 }
