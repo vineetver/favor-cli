@@ -386,6 +386,7 @@ pub struct AiStep {
 ///
 /// where `V_l = K_l` for kinship components and `V_g = diag(1/W) over g`
 /// for group components.
+#[allow(clippy::too_many_arguments)]
 pub fn ai_step(
     y: &Mat<f64>,
     x: &Mat<f64>,
@@ -593,6 +594,7 @@ fn solve_dtau(ai: &Mat<f64>, score: &[f64], fixtau: &[bool]) -> Vec<f64> {
 /// criterion is met or `REML_MAX_ITER` is exhausted. Step-halving is
 /// applied per upstream `glmmkin.R:362-366` whenever the Newton step
 /// would push a free τ negative.
+#[allow(clippy::too_many_arguments)]
 fn converge<B: SolverBuilder>(
     y: &Mat<f64>,
     x: &Mat<f64>,
@@ -752,9 +754,9 @@ pub fn run_reml<B: SolverBuilder>(
 
     for refit_iter in 0..REML_MAX_OUTER_REFITS {
         let mut changed = false;
-        for i in 0..n_comp {
-            if !fixtau[i] && state.tau.as_slice()[i] < BOUNDARY_FACTOR * REML_TOL {
-                fixtau[i] = true;
+        for (i, fixed) in fixtau.iter_mut().enumerate().take(n_comp) {
+            if !*fixed && state.tau.as_slice()[i] < BOUNDARY_FACTOR * REML_TOL {
+                *fixed = true;
                 changed = true;
             }
         }
@@ -763,8 +765,8 @@ pub fn run_reml<B: SolverBuilder>(
             return Ok(state);
         }
         let mut tau_refit = state.tau.clone();
-        for i in 0..n_comp {
-            if fixtau[i] {
+        for (i, &fixed) in fixtau.iter().enumerate().take(n_comp) {
+            if fixed {
                 tau_refit.as_slice_mut()[i] = 0.0;
             }
         }

@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 //! Exact selected inversion of Σ via the Takahashi recursion.
 //!
 //! Replaces the Hutchinson stochastic trace estimator with an exact

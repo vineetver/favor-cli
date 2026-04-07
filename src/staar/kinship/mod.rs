@@ -15,30 +15,30 @@
 //!
 //! ## Module layout
 //!
-//! - [`types`]   `KinshipMatrix` (Dense | Sparse), `GroupPartition`,
-//!               `VarianceComponents`, `KinshipState`, `KinshipInverse`.
-//! - [`load`]    TSV → `KinshipMatrix` and phenotype-column → `GroupPartition`.
-//! - [`budget`]  Dense memory cap + dense/sparse path selector.
-//! - [`reml`]    Shared AI-REML algorithm: `SigmaSolver`, `SolverBuilder`,
-//!               `ai_step`, `run_reml`. Read this file to understand the
-//!               math; both backends use it.
-//! - [`dense`]   Dense backend: `DenseBuilder`, `assemble_sigma`,
-//!               `trace_p_k_dense`, `fit_reml_dense` entry point.
-//! - [`sparse`]  Sparse backend: `SparseBuilder`, `trace_p_k_sparse`,
-//!               `fit_reml_sparse` entry point. Submodules `assembler`
-//!               (cached pattern + symbolic Cholesky) and `hutchinson`
-//!               (stochastic trace estimators, fallback until #26 #27).
-//! - [`pql`]     Binary GLMM PQL outer loop wrapping `fit_reml`.
+//! - [`types`] — `KinshipMatrix` (Dense | Sparse), `GroupPartition`,
+//!   `VarianceComponents`, `KinshipState`, `KinshipInverse`.
+//! - [`load`] — TSV → `KinshipMatrix` and phenotype-column → `GroupPartition`.
+//! - [`budget`] — Dense memory cap + dense/sparse path selector.
+//! - [`reml`] — Shared AI-REML algorithm: `SigmaSolver`, `SolverBuilder`,
+//!   `ai_step`, `run_reml`. Read this file to understand the math; both
+//!   backends use it.
+//! - [`dense`] — Dense backend: `DenseBuilder`, `assemble_sigma`,
+//!   `trace_p_k_dense`, `fit_reml_dense` entry point.
+//! - [`sparse`] — Sparse backend: `TakahashiBuilder` (default),
+//!   `HutchinsonBuilder` (fallback), `fit_reml_sparse` entry point.
+//!   Submodules `assembler` (cached pattern + symbolic Cholesky),
+//!   `takahashi` (exact selected inversion), `hutchinson` (stochastic
+//!   estimators kept as fallback).
+//! - [`pql`] — Binary GLMM PQL outer loop wrapping `fit_reml`.
 //!
 //! ## Path selection
 //!
 //! `fit_reml` picks dense vs sparse at entry:
-//!  - All kinships dense → dense path always.
-//!  - At least one kinship sparse AND dense working set fits → dense
-//!    (cheap and exact, sparse kinships are pre-promoted).
-//!  - At least one kinship sparse AND dense working set exceeds budget →
-//!    sparse path; the trace term uses Hutchinson today and will use
-//!    Takahashi selected inversion once #26 #27 lands.
+//! - All kinships dense → dense path always.
+//! - At least one kinship sparse AND dense working set fits → dense
+//!   (cheap and exact, sparse kinships are pre-promoted).
+//! - At least one kinship sparse AND dense working set exceeds budget →
+//!   sparse path with the Takahashi backend (1:1 with upstream R).
 //!
 //! Statistical outputs (h², α, p-values) are identical across paths to
 //! within numerical noise. The dense path is bit-identical to GMMAT.
@@ -125,8 +125,8 @@ pub fn fit_reml(
         / (n as f64 - 1.0).max(1.0);
     let mut init_tau = VarianceComponents::zeros(l, g);
     let warm = y_var / n_comp as f64;
-    for li in 0..l {
-        let mean_diag = kinships[li].mean_diagonal();
+    for (li, kin) in kinships.iter().enumerate() {
+        let mean_diag = kin.mean_diagonal();
         let scale = if mean_diag > 0.0 { mean_diag } else { 1.0 };
         init_tau.set_kinship(li, warm / scale);
     }
