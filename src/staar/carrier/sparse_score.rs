@@ -12,7 +12,7 @@ use faer::linalg::solvers::Solve;
 use faer::{unzip, zip, Mat};
 
 use super::reader::{CarrierEntry, CarrierList};
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::staar::kinship::{check_memory_budget, KinshipInverse, KinshipState};
 use crate::staar::model::NullModel;
 use crate::staar::score::{self, StaarResult};
@@ -83,13 +83,13 @@ impl AnalysisVectors {
     /// Build from a fitted NullModel with compact arrays and VCF→pheno remapping.
     /// Arrays stay at `n_pheno` size. No zero-padding.
     ///
-    /// Returns `FavorError::Resource` if the kinship-aware path would exceed
+    /// Returns `CohortError::Resource` if the kinship-aware path would exceed
     /// the configured dense-matrix memory budget. See
     /// `crate::staar::kinship::check_memory_budget`.
     pub fn from_null_model(
         null: &NullModel,
         pheno_mask: &[bool],
-    ) -> Result<Self, FavorError> {
+    ) -> Result<Self, CohortError> {
         let n_pheno = null.n_samples;
         let n_vcf_total = pheno_mask.len();
         let k = null.x_matrix.ncols();

@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use crate::column;
 use crate::data::{VariantSet, VariantSetKind};
 use crate::engine::DfEngine;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement};
 use crate::output::Output;
 use crate::resource::Resources;
@@ -38,7 +38,7 @@ pub struct StoreManifest {
     pub n_variants: usize,
     pub chromosomes: Vec<ChromInfo>,
     pub created_at: String,
-    pub favor_version: String,
+    pub cohort_version: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -50,15 +50,15 @@ pub struct ChromInfo {
 /// Content-based file fingerprint: SHA-256 of (first 1MB + last 1MB + file size).
 /// Survives path renames and HPC scratch migrations — only invalidates when
 /// actual file content changes.
-fn file_content_fingerprint(path: &Path) -> Result<Vec<u8>, FavorError> {
+fn file_content_fingerprint(path: &Path) -> Result<Vec<u8>, CohortError> {
     use std::io::{Read as IoRead, Seek, SeekFrom};
     const CHUNK: u64 = 1024 * 1024;
 
     let mut f = File::open(path)
-        .map_err(|e| FavorError::Resource(format!("open {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("open {}: {e}", path.display())))?;
     let size = f
         .metadata()
-        .map_err(|e| FavorError::Resource(format!("stat {}: {e}", path.display())))?
+        .map_err(|e| CohortError::Resource(format!("stat {}: {e}", path.display())))?
         .len();
 
     let mut hasher = Sha256::new();
@@ -68,18 +68,18 @@ fn file_content_fingerprint(path: &Path) -> Result<Vec<u8>, FavorError> {
     let head = CHUNK.min(size) as usize;
     let mut buf = vec![0u8; head];
     f.read_exact(&mut buf)
-        .map_err(|e| FavorError::Resource(format!("read {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("read {}: {e}", path.display())))?;
     hasher.update(&buf);
 
     // Last 1MB (skip if file <= 1MB since it's already fully read)
     if size > CHUNK {
         let tail_start = size.saturating_sub(CHUNK);
         f.seek(SeekFrom::Start(tail_start))
-            .map_err(|e| FavorError::Resource(format!("seek {}: {e}", path.display())))?;
+            .map_err(|e| CohortError::Resource(format!("seek {}: {e}", path.display())))?;
         let tail_len = (size - tail_start) as usize;
         buf.resize(tail_len, 0);
         f.read_exact(&mut buf)
-            .map_err(|e| FavorError::Resource(format!("read {}: {e}", path.display())))?;
+            .map_err(|e| CohortError::Resource(format!("read {}: {e}", path.display())))?;
         hasher.update(&buf);
     }
 
@@ -87,14 +87,14 @@ fn file_content_fingerprint(path: &Path) -> Result<Vec<u8>, FavorError> {
 }
 
 /// For annotation directories, fingerprint the meta.json file.
-fn dir_fingerprint(path: &Path) -> Result<Vec<u8>, FavorError> {
+fn dir_fingerprint(path: &Path) -> Result<Vec<u8>, CohortError> {
     let meta_path = path.join("meta.json");
     if meta_path.exists() {
         return file_content_fingerprint(&meta_path);
     }
     // Fallback: hash the directory's own mtime+size (stat only)
     let meta = fs::metadata(path)
-        .map_err(|e| FavorError::Resource(format!("stat {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("stat {}: {e}", path.display())))?;
     let mtime = meta
         .modified()
         .unwrap_or(SystemTime::UNIX_EPOCH)
@@ -106,7 +106,7 @@ fn dir_fingerprint(path: &Path) -> Result<Vec<u8>, FavorError> {
     Ok(hasher.finalize().to_vec())
 }
 
-pub fn compute_key(vcf_path: &Path, annotations_path: &Path) -> Result<String, FavorError> {
+pub fn compute_key(vcf_path: &Path, annotations_path: &Path) -> Result<String, CohortError> {
     let vcf_fp = file_content_fingerprint(vcf_path)?;
     let ann_fp = if annotations_path.is_dir() {
         dir_fingerprint(annotations_path)?
@@ -285,7 +285,7 @@ impl GenoStoreResult {
     }
 }
 
-pub fn setup_resources(out: &dyn Output) -> Result<Resources, FavorError> {
+pub fn setup_resources(out: &dyn Output) -> Result<Resources, CohortError> {
     let resources = Resources::detect_configured();
 
     out.status(&format!(
@@ -312,7 +312,7 @@ pub fn build_or_load_store(
     rebuild_store: bool,
     res: &Resources,
     out: &dyn Output,
-) -> Result<GenoStoreResult, FavorError> {
+) -> Result<GenoStoreResult, CohortError> {
     let probe_result = if rebuild_store {
         StoreProbe {
             store_dir: store_dir.to_path_buf(),
@@ -347,7 +347,7 @@ pub fn build_or_load_store_with_probe(
     probe_result: StoreProbe,
     res: &Resources,
     out: &dyn Output,
-) -> Result<GenoStoreResult, FavorError> {
+) -> Result<GenoStoreResult, CohortError> {
     if let Some(manifest) = probe_result.manifest {
         out.status(&format!(
             "Using cached genotype store ({} variants x {} samples)",
@@ -405,7 +405,7 @@ pub fn build_or_load_store_with_probe(
     ));
 
     if n_all == 0 {
-        return Err(FavorError::Analysis(format!(
+        return Err(CohortError::Analysis(format!(
             "No variants found after joining genotypes ({}) with annotations ({}). \
              Check that both use the same genome build and allele normalization.",
             genotypes.display(),
@@ -424,10 +424,10 @@ pub fn build_or_load_store_with_probe(
     })
 }
 
-fn read_sample_names(store_dir: &Path) -> Result<Vec<String>, FavorError> {
+fn read_sample_names(store_dir: &Path) -> Result<Vec<String>, CohortError> {
     let path = store_dir.join("samples.txt");
     let content = std::fs::read_to_string(&path)
-        .map_err(|e| FavorError::Resource(format!("Read {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Read {}: {e}", path.display())))?;
     Ok(content.lines().map(|s| s.to_string()).collect())
 }
 
@@ -435,7 +435,7 @@ pub fn run_annotation_join(
     annotations: &Path,
     geno: &crate::staar::genotype::GenotypeResult,
     res: &Resources,
-) -> Result<DfEngine, FavorError> {
+) -> Result<DfEngine, CohortError> {
     let engine = DfEngine::new(res)?;
 
     let ann_vs = VariantSet::open(annotations)?;
@@ -458,12 +458,12 @@ pub fn run_annotation_join(
         let tier_hint = match ann_vs.kind() {
             Some(VariantSetKind::Annotated {
                 tier: crate::config::Tier::Base,
-            }) => " Your data was annotated with base tier. Re-run: `favor annotate --full`.",
-            _ => " Re-run: `favor annotate --full`.",
+            }) => " Your data was annotated with base tier. Re-run: `cohort annotate --full`.",
+            _ => " Re-run: `cohort annotate --full`.",
         };
-        return Err(FavorError::DataMissing(format!(
+        return Err(CohortError::DataMissing(format!(
             "Missing annotation columns in {}:\n{}\n\
-             STAAR requires favor-full annotations.{}",
+             STAAR requires FAVOR full-tier annotations.{}",
             annotations.display(),
             ColumnContract::format_missing(&missing),
             tier_hint,
@@ -491,11 +491,11 @@ pub fn build(
     vcf_path: &Path,
     annotations_path: &Path,
     out: &dyn Output,
-) -> Result<StoreManifest, FavorError> {
+) -> Result<StoreManifest, CohortError> {
     let staging = staging_path(store_dir)?;
     finish_interrupted_swap(&staging, store_dir)?;
     fs::create_dir_all(&staging).map_err(|e| {
-        FavorError::Resource(format!("Cannot create '{}': {e}", staging.display()))
+        CohortError::Resource(format!("Cannot create '{}': {e}", staging.display()))
     })?;
 
     let key = compute_key(vcf_path, annotations_path)?;
@@ -503,7 +503,7 @@ pub fn build(
 
     let samples_path = staging.join("samples.txt");
     fs::write(&samples_path, geno_result.sample_names.join("\n")).map_err(|e| {
-        FavorError::Resource(format!("Cannot write '{}': {e}", samples_path.display()))
+        CohortError::Resource(format!("Cannot write '{}': {e}", samples_path.display()))
     })?;
 
     let chroms = engine.query_strings(&column::distinct_chroms_sql())?;
@@ -518,7 +518,7 @@ pub fn build(
 
         let chrom_dir = staging.join(format!("chromosome={chrom}"));
         fs::create_dir_all(&chrom_dir).map_err(|e| {
-            FavorError::Resource(format!("Cannot create '{}': {e}", chrom_dir.display()))
+            CohortError::Resource(format!("Cannot create '{}': {e}", chrom_dir.display()))
         })?;
 
         let geno_path = format!(
@@ -549,11 +549,11 @@ pub fn build(
         n_variants: total_variants,
         chromosomes: chrom_infos,
         created_at: now_string(),
-        favor_version: env!("CARGO_PKG_VERSION").to_string(),
+        cohort_version: env!("CARGO_PKG_VERSION").to_string(),
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| FavorError::Resource(format!("Manifest serialize: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Manifest serialize: {e}")))?;
     write_atomic(&staging.join("manifest.json"), manifest_json.as_bytes())?;
 
     atomic_dir_swap(&staging, store_dir)?;
@@ -568,15 +568,15 @@ pub fn build(
 
 /// `{store_dir}.staging` — sibling so the recovery code finds it without
 /// an extra config knob.
-pub fn staging_path(store_dir: &Path) -> Result<PathBuf, FavorError> {
+pub fn staging_path(store_dir: &Path) -> Result<PathBuf, CohortError> {
     let parent = store_dir.parent().ok_or_else(|| {
-        FavorError::Resource(format!(
+        CohortError::Resource(format!(
             "store dir '{}' has no parent",
             store_dir.display()
         ))
     })?;
     let name = store_dir.file_name().ok_or_else(|| {
-        FavorError::Resource(format!(
+        CohortError::Resource(format!(
             "store dir '{}' has no file name",
             store_dir.display()
         ))
@@ -589,17 +589,17 @@ pub fn staging_path(store_dir: &Path) -> Result<PathBuf, FavorError> {
 /// Replace `final_path` with `staging`. Not strictly atomic — there's a
 /// window between `remove_dir_all` and `rename` where neither exists; a
 /// crash there is recovered by `finish_interrupted_swap` on the next run.
-pub fn atomic_dir_swap(staging: &Path, final_path: &Path) -> Result<(), FavorError> {
+pub fn atomic_dir_swap(staging: &Path, final_path: &Path) -> Result<(), CohortError> {
     if final_path.exists() {
         fs::remove_dir_all(final_path).map_err(|e| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "remove old store {}: {e}",
                 final_path.display()
             ))
         })?;
     }
     fs::rename(staging, final_path).map_err(|e| {
-        FavorError::Resource(format!(
+        CohortError::Resource(format!(
             "rename {} -> {}: {e}",
             staging.display(),
             final_path.display()
@@ -616,14 +616,14 @@ pub fn atomic_dir_swap(staging: &Path, final_path: &Path) -> Result<(), FavorErr
 /// - staging exists with no manifest: prior build died mid-way, the
 ///   contents are garbage. Wipe it.
 /// - staging absent: nothing to do.
-pub fn finish_interrupted_swap(staging: &Path, final_path: &Path) -> Result<(), FavorError> {
+pub fn finish_interrupted_swap(staging: &Path, final_path: &Path) -> Result<(), CohortError> {
     if !staging.exists() {
         return Ok(());
     }
     let staging_complete = staging.join("manifest.json").exists();
     if staging_complete && !final_path.exists() {
         fs::rename(staging, final_path).map_err(|e| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "finish swap {} -> {}: {e}",
                 staging.display(),
                 final_path.display()
@@ -633,7 +633,7 @@ pub fn finish_interrupted_swap(staging: &Path, final_path: &Path) -> Result<(), 
         return Ok(());
     }
     fs::remove_dir_all(staging).map_err(|e| {
-        FavorError::Resource(format!(
+        CohortError::Resource(format!(
             "remove stale staging {}: {e}",
             staging.display()
         ))
@@ -662,19 +662,19 @@ pub fn fsync_parent(path: &Path) {
 
 /// Write `bytes` to `path` atomically: write to `path.tmp`, fsync the file,
 /// rename, then fsync the parent directory so the rename survives a crash.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FavorError> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CohortError> {
     use std::io::Write;
     let tmp = tmp_path(path);
     {
         let mut f = File::create(&tmp)
-            .map_err(|e| FavorError::Resource(format!("create {}: {e}", tmp.display())))?;
+            .map_err(|e| CohortError::Resource(format!("create {}: {e}", tmp.display())))?;
         f.write_all(bytes)
-            .map_err(|e| FavorError::Resource(format!("write {}: {e}", tmp.display())))?;
+            .map_err(|e| CohortError::Resource(format!("write {}: {e}", tmp.display())))?;
         f.sync_all()
-            .map_err(|e| FavorError::Resource(format!("fsync {}: {e}", tmp.display())))?;
+            .map_err(|e| CohortError::Resource(format!("fsync {}: {e}", tmp.display())))?;
     }
     fs::rename(&tmp, path).map_err(|e| {
-        FavorError::Resource(format!(
+        CohortError::Resource(format!(
             "rename {} -> {}: {e}",
             tmp.display(),
             path.display()

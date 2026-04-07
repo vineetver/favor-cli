@@ -1,4 +1,4 @@
-//! Canonical object model for FAVOR.
+//! Canonical object model for COHORT.
 //!
 //! One struct per concept. Downstream code composes these types — no parallel
 //! structs, no field duplication, no `Vec<f64>` where `[f64; 11]` suffices.

@@ -18,7 +18,7 @@ use faer::Mat;
 
 use crate::column::STAAR_WEIGHTS;
 use crate::data::{AnnotatedSet, VariantSet, VariantSetKind};
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::ingest::ColumnContract;
 use crate::output::Output;
 use crate::resource::Resources;
@@ -195,7 +195,7 @@ pub struct StaarPipeline<'a> {
 }
 
 impl<'a> StaarPipeline<'a> {
-    pub fn new(config: StaarConfig, out: &'a dyn Output) -> Result<Self, FavorError> {
+    pub fn new(config: StaarConfig, out: &'a dyn Output) -> Result<Self, CohortError> {
         let res = store::setup_resources(out)?;
         let manifest = config.new_run_manifest();
         Ok(Self {
@@ -209,9 +209,9 @@ impl<'a> StaarPipeline<'a> {
 
     /// Stage runner. Each stage gates on the previous one returning Ok and
     /// rewrites `run.json` after every transition.
-    pub fn run(mut self) -> Result<(), FavorError> {
+    pub fn run(mut self) -> Result<(), CohortError> {
         std::fs::create_dir_all(&self.config.output_dir).map_err(|e| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "Cannot create output directory '{}': {e}",
                 self.config.output_dir.display()
             ))
@@ -247,7 +247,7 @@ impl<'a> StaarPipeline<'a> {
         result
     }
 
-    fn run_stages(&mut self) -> Result<(), FavorError> {
+    fn run_stages(&mut self) -> Result<(), CohortError> {
         self.stage(Stage::Validate, |p| p.stage_validate())?;
 
         let store = self.stage(Stage::EnsureStore, |p| p.stage_ensure_store())?;
@@ -322,9 +322,9 @@ impl<'a> StaarPipeline<'a> {
     ///     error to the caller.
     ///   - `fail` write is best-effort: we already have a real error to
     ///     return; a secondary fsync failure shouldn't mask it.
-    fn stage<T, F>(&mut self, stage: Stage, body: F) -> Result<T, FavorError>
+    fn stage<T, F>(&mut self, stage: Stage, body: F) -> Result<T, CohortError>
     where
-        F: FnOnce(&mut Self) -> Result<T, FavorError>,
+        F: FnOnce(&mut Self) -> Result<T, CohortError>,
     {
         self.manifest.begin(stage);
         let _ = self.manifest.write(&self.config.output_dir);
@@ -342,13 +342,13 @@ impl<'a> StaarPipeline<'a> {
         }
     }
 
-    fn stage_validate(&mut self) -> Result<(), FavorError> {
+    fn stage_validate(&mut self) -> Result<(), CohortError> {
         // `build_config` already verified the annotation path exists; if it
         // disappeared between then and now we want a hard error, not silent
         // skip — surface the missing-file message rather than no-op.
         if !self.config.annotations.exists() {
-            return Err(FavorError::Input(format!(
-                "Annotations no longer at '{}'. Re-run `favor annotate` or check the path.",
+            return Err(CohortError::Input(format!(
+                "Annotations no longer at '{}'. Re-run `cohort annotate` or check the path.",
                 self.config.annotations.display()
             )));
         }
@@ -372,19 +372,19 @@ impl<'a> StaarPipeline<'a> {
         let tier_hint = match ann_vs.kind() {
             Some(VariantSetKind::Annotated {
                 tier: crate::config::Tier::Base,
-            }) => " Your data was annotated with base tier. Re-run: `favor annotate --full`.",
-            _ => " Re-run: `favor annotate --full`.",
+            }) => " Your data was annotated with base tier. Re-run: `cohort annotate --full`.",
+            _ => " Re-run: `cohort annotate --full`.",
         };
-        Err(FavorError::DataMissing(format!(
+        Err(CohortError::DataMissing(format!(
             "Missing annotation columns in {}:\n{}\n\
-             STAAR requires favor-full annotations.{}",
+             STAAR requires FAVOR full-tier annotations.{}",
             self.config.annotations.display(),
             ColumnContract::format_missing(&missing),
             tier_hint,
         )))
     }
 
-    fn stage_ensure_store(&mut self) -> Result<GenoStoreResult, FavorError> {
+    fn stage_ensure_store(&mut self) -> Result<GenoStoreResult, CohortError> {
         // One probe — the recorded cache decision and the path actually
         // taken in `build_or_load_store_with_probe` are sourced from the
         // same StoreProbe so they cannot drift.
@@ -443,7 +443,7 @@ impl<'a> StaarPipeline<'a> {
     fn stage_load_phenotype(
         &mut self,
         store: &GenoStoreResult,
-    ) -> Result<PhenoStageOut, FavorError> {
+    ) -> Result<PhenoStageOut, CohortError> {
         let genotype_result = store.to_genotype_result();
         let primary_trait = &self.config.trait_names[0];
 
@@ -494,7 +494,7 @@ impl<'a> StaarPipeline<'a> {
         &mut self,
         pheno: &PhenoStageOut,
         store: &GenoStoreResult,
-    ) -> Result<NullModel, FavorError> {
+    ) -> Result<NullModel, CohortError> {
         self.out.status("Fitting null model...");
 
         match self.config.null_model_kind(pheno.trait_type) {
@@ -522,7 +522,7 @@ impl<'a> StaarPipeline<'a> {
         kind: NullModelKind,
         pheno: &PhenoStageOut,
         store: &GenoStoreResult,
-    ) -> Result<NullModel, FavorError> {
+    ) -> Result<NullModel, CohortError> {
         let kinships = staar::kinship::load_kinship(
             &self.config.kinship,
             &pheno.compact_samples,
@@ -581,10 +581,10 @@ impl<'a> StaarPipeline<'a> {
         store: &GenoStoreResult,
         null_model: &NullModel,
         pheno: &PhenoStageOut,
-    ) -> Result<(), FavorError> {
+    ) -> Result<(), CohortError> {
         let sumstats_dir = self.config.sumstats_dir();
         std::fs::create_dir_all(&sumstats_dir).map_err(|e| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "Cannot create sumstats directory '{}': {e}",
                 sumstats_dir.display()
             ))
@@ -592,7 +592,7 @@ impl<'a> StaarPipeline<'a> {
         let variants = load_rare_variants(&store.store_dir, &store.manifest, self.config.maf_cutoff)?;
         let analysis = AnalysisVectors::from_null_model(null_model, &pheno.pheno_mask)?;
         let meta = staar::meta::StudyMeta {
-            favor_meta_version: 1,
+            cohort_meta_version: 1,
             trait_type: format!("{:?}", pheno.trait_type),
             trait_name: self.config.trait_names[0].clone(),
             n_samples: pheno.n,
@@ -617,7 +617,7 @@ impl<'a> StaarPipeline<'a> {
         &mut self,
         store: &GenoStoreResult,
         analysis: &AnalysisVectors,
-    ) -> Result<PathBuf, FavorError> {
+    ) -> Result<PathBuf, CohortError> {
         let key = score_cache::cache_key(
             &store.manifest.key,
             &self.config.trait_names[0],
@@ -650,7 +650,7 @@ impl<'a> StaarPipeline<'a> {
         self.out
             .status("Building score cache (all U/K, no MAF filter)...");
         std::fs::create_dir_all(&dir).map_err(|e| {
-            FavorError::Resource(format!("Cannot create score cache directory '{}': {e}", dir.display()))
+            CohortError::Resource(format!("Cannot create score cache directory '{}': {e}", dir.display()))
         })?;
 
         for ci in &store.manifest.chromosomes {
@@ -667,7 +667,7 @@ impl<'a> StaarPipeline<'a> {
         &mut self,
         store: &GenoStoreResult,
         ctx: &ScoringContext,
-    ) -> Result<ScoringOutput, FavorError> {
+    ) -> Result<ScoringOutput, CohortError> {
         let (results, individual_pvals) = scoring::run_score_tests(
             &store.store_dir,
             &store.manifest,
@@ -690,10 +690,10 @@ impl<'a> StaarPipeline<'a> {
         trait_type: TraitType,
         n: usize,
         n_rare: i64,
-    ) -> Result<(), FavorError> {
+    ) -> Result<(), CohortError> {
         let results_dir = self.config.results_dir();
         std::fs::create_dir_all(&results_dir).map_err(|e| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "Cannot create results directory '{}': {e}",
                 results_dir.display()
             ))
@@ -739,7 +739,7 @@ fn load_rare_variants(
     store_dir: &Path,
     manifest: &StoreManifest,
     maf_cutoff: f64,
-) -> Result<Vec<AnnotatedVariant>, FavorError> {
+) -> Result<Vec<AnnotatedVariant>, CohortError> {
     let mut all = Vec::with_capacity(manifest.n_variants);
     for ci in &manifest.chromosomes {
         let chrom: Chromosome = ci.name.parse().unwrap_or(Chromosome::Autosome(1));

@@ -14,7 +14,7 @@ use serde_json::json;
 use crate::column::{Col, STAAR_WEIGHTS};
 use crate::commands::MetaStaarConfig;
 use crate::engine::DfEngine;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::resource::Resources;
 use crate::staar::masks::MaskGroup;
@@ -30,9 +30,9 @@ pub fn handle(
     output_path: Option<PathBuf>,
     out: &dyn Output,
     dry_run: bool,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     if studies.is_empty() {
-        return Err(FavorError::Input(
+        return Err(CohortError::Input(
             "--studies is required. Provide comma-separated paths to MetaSTAAR summary stat directories.".into(),
         ));
     }
@@ -65,7 +65,7 @@ pub fn run(
     output_path: Option<PathBuf>,
     out: &dyn Output,
     dry_run: bool,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     handle(
         studies,
         masks,
@@ -77,7 +77,7 @@ pub fn run(
     )
 }
 
-fn emit_dry_run(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), FavorError> {
+fn emit_dry_run(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), CohortError> {
     let study_handles = staar::meta::load_studies(&config.study_dirs)?;
     let k = study_handles.len();
     let total_n: usize = study_handles.iter().map(|s| s.meta.n_samples).sum();
@@ -93,13 +93,13 @@ fn emit_dry_run(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), FavorE
 }
 
 /// Core meta-STAAR pipeline: load studies → merge → score → write → report.
-pub fn run_meta_staar(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), FavorError> {
+pub fn run_meta_staar(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), CohortError> {
     let studies = staar::meta::load_studies(&config.study_dirs)?;
     let resources = setup_resources(&studies, out)?;
     let engine = DfEngine::new(&resources)?;
 
     std::fs::create_dir_all(&config.output_dir).map_err(|e| {
-        FavorError::Resource(format!(
+        CohortError::Resource(format!(
             "Cannot create '{}': {e}",
             config.output_dir.display()
         ))
@@ -122,7 +122,7 @@ pub fn run_meta_staar(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), 
 fn setup_resources(
     studies: &[staar::meta::StudyHandle],
     out: &dyn Output,
-) -> Result<Resources, FavorError> {
+) -> Result<Resources, CohortError> {
     let k = studies.len();
     let total_n: usize = studies.iter().map(|s| s.meta.n_samples).sum();
 
@@ -156,7 +156,7 @@ fn run_all_chromosomes(
     config: &MetaStaarConfig,
     engine: &DfEngine,
     out: &dyn Output,
-) -> Result<Vec<(MaskType, Vec<GeneResult>)>, FavorError> {
+) -> Result<Vec<(MaskType, Vec<GeneResult>)>, CohortError> {
     let k = studies.len();
     let chromosomes = discover_chromosomes(&studies[0].path);
     let mut all_results: Vec<(MaskType, Vec<GeneResult>)> = Vec::new();
@@ -320,7 +320,7 @@ fn write_meta_results(
     all_mask_results: &[(MaskType, Vec<GeneResult>)],
     output_dir: &std::path::Path,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     out.status("Writing MetaSTAAR results...");
     let channels: Vec<&str> = STAAR_WEIGHTS
         .iter()
@@ -342,7 +342,7 @@ fn write_mask_results(
     channels: &[&str],
     output_dir: &std::path::Path,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let out_path = output_dir.join(format!("{}.parquet", mask_type.file_stem()));
     let n_channels = channels.len();
 
@@ -357,18 +357,18 @@ fn write_mask_results(
     let (schema, batch) = build_result_batch(&sorted, channels, n_channels)?;
 
     let file = File::create(&out_path)
-        .map_err(|e| FavorError::Resource(format!("Create {}: {e}", out_path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Create {}: {e}", out_path.display())))?;
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
         .build();
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))
-        .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet writer: {e}")))?;
     writer
         .write(&batch)
-        .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet write: {e}")))?;
     writer
         .close()
-        .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
 
     let n_sig = results.iter().filter(|r| r.staar.staar_o < 2.5e-6).count();
     out.success(&format!(
@@ -385,7 +385,7 @@ fn build_result_batch(
     sorted: &[&GeneResult],
     channels: &[&str],
     n_channels: usize,
-) -> Result<(Arc<Schema>, RecordBatch), FavorError> {
+) -> Result<(Arc<Schema>, RecordBatch), CohortError> {
     let nr = sorted.len();
     let mut b_ensembl = StringBuilder::with_capacity(nr, nr * 16);
     let mut b_symbol = StringBuilder::with_capacity(nr, nr * 12);
@@ -500,7 +500,7 @@ fn build_result_batch(
     }
 
     let batch = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
 
     Ok((schema, batch))
 }

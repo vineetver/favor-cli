@@ -6,7 +6,7 @@ use super::{Analysis, BuildGuess, CoordBase, Delimiter};
 use crate::config::Config;
 use crate::data::AnnotationDb;
 use crate::engine::DfEngine;
-use crate::error::FavorError;
+use crate::error::CohortError;
 
 const PROBE_CHROMS: &[&str] = &["1", "2", "22", "10", "X"];
 
@@ -17,7 +17,7 @@ pub fn detect_build_and_coords(
     input_path: &Path,
     engine: &DfEngine,
     config: &Config,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let chr_col = match &analysis.chr_col {
         Some(c) => c.clone(),
         None => return Ok(()),
@@ -51,7 +51,7 @@ fn probe_all_chroms(
     pos_col: &str,
     ann_db: &AnnotationDb,
     analysis: &mut Analysis,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     for probe_chrom in PROBE_CHROMS {
         let probe_parquet = match ann_db.chrom_parquet(probe_chrom) {
             Some(p) => p,
@@ -92,7 +92,7 @@ fn probe_chromosome(
     pos_col: &str,
     chrom: &str,
     annotation_path: &std::path::Path,
-) -> Result<Option<(f64, f64)>, FavorError> {
+) -> Result<Option<(f64, f64)>, CohortError> {
     let ann_table = format!("_ann_probe_{chrom}");
     engine.register_parquet_file(&ann_table, annotation_path)?;
 

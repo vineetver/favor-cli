@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 
 pub fn run(
@@ -9,8 +9,8 @@ pub fn run(
     _disease: Option<String>,
     _output_path: Option<PathBuf>,
     _output: &dyn Output,
-) -> Result<(), FavorError> {
-    Err(FavorError::Input(
+) -> Result<(), CohortError> {
+    Err(CohortError::Input(
         "interpret: not yet implemented".to_string(),
     ))
 }

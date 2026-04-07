@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use super::Pack;
 use crate::cli::DataAction;
 use crate::config::{Config, Tier};
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 
 pub const REMOTE_BASE_URL: &str =
@@ -76,9 +76,9 @@ struct PackManifestV1 {
 }
 
 /// Parse a manifest body, handling both v1 (files as u64) and v2 (files as FileEntry).
-fn parse_pack_manifest(body: &str) -> Result<PackManifest, FavorError> {
+fn parse_pack_manifest(body: &str) -> Result<PackManifest, CohortError> {
     let raw: Value = serde_json::from_str(body)
-        .map_err(|e| FavorError::Resource(format!("Invalid manifest JSON: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Invalid manifest JSON: {e}")))?;
 
     let schema_version = raw
         .get("schema_version")
@@ -86,22 +86,22 @@ fn parse_pack_manifest(body: &str) -> Result<PackManifest, FavorError> {
         .unwrap_or(1) as u32;
 
     if schema_version > MANIFEST_SCHEMA_VERSION {
-        return Err(FavorError::Resource(format!(
+        return Err(CohortError::Resource(format!(
             "Manifest schema version {schema_version} requires a newer CLI (this CLI supports up to v{MANIFEST_SCHEMA_VERSION}). \
-             Update favor or download the latest release."
+             Update cohort or download the latest release."
         )));
     }
 
     if schema_version >= 2 {
         // v2: files are {size, sha256}
         let manifest: PackManifest = serde_json::from_str(body)
-            .map_err(|e| FavorError::Resource(format!("Invalid v2 manifest: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Invalid v2 manifest: {e}")))?;
         return Ok(manifest);
     }
 
     // v1: files are bare u64 sizes
     let v1: PackManifestV1 = serde_json::from_str(body)
-        .map_err(|e| FavorError::Resource(format!("Invalid v1 manifest: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Invalid v1 manifest: {e}")))?;
     Ok(PackManifest {
         schema_version: 1,
         pack_id: v1.pack_id,
@@ -250,20 +250,20 @@ impl PackFileState {
     }
 }
 
-fn fetch_annotation_manifest(tier: Tier) -> Result<AnnotationManifest, FavorError> {
+fn fetch_annotation_manifest(tier: Tier) -> Result<AnnotationManifest, CohortError> {
     let remote_path = remote_tier_path(tier);
     let url = format!("{REMOTE_BASE_URL}/{remote_path}/manifest.json");
 
     let response = ureq::get(&url)
         .call()
-        .map_err(|e| FavorError::Resource(format!("Failed to fetch manifest: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Failed to fetch manifest: {e}")))?;
 
     let body = response
         .into_body()
         .read_to_string()
-        .map_err(|e| FavorError::Resource(format!("Failed to read manifest: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Failed to read manifest: {e}")))?;
     let manifest: AnnotationManifest = serde_json::from_str(&body)
-        .map_err(|e| FavorError::Resource(format!("Invalid manifest JSON: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Invalid manifest JSON: {e}")))?;
 
     Ok(manifest)
 }
@@ -313,7 +313,7 @@ fn assess_local_annotations(data_dir: &Path, manifest: &AnnotationManifest) -> V
         .collect()
 }
 
-fn build_data_state(config: &Config) -> Result<DataState, FavorError> {
+fn build_data_state(config: &Config) -> Result<DataState, CohortError> {
     let tier = config.data.tier;
     let data_dir = config.annotations_dir();
 
@@ -328,7 +328,7 @@ fn build_data_state(config: &Config) -> Result<DataState, FavorError> {
     })
 }
 
-pub fn fetch_pack_manifest(pack_id: &str) -> Result<PackManifest, FavorError> {
+pub fn fetch_pack_manifest(pack_id: &str) -> Result<PackManifest, CohortError> {
     let pack = super::Pack::find(pack_id);
     let base = pack
         .map(|p| p.base_url(REMOTE_BASE_URL))
@@ -336,7 +336,7 @@ pub fn fetch_pack_manifest(pack_id: &str) -> Result<PackManifest, FavorError> {
     let url = format!("{base}/packs/{pack_id}/manifest.json");
 
     let response = ureq::get(&url).call().map_err(|e| {
-        FavorError::Resource(format!(
+        CohortError::Resource(format!(
             "Failed to fetch pack manifest for '{pack_id}': {e}"
         ))
     })?;
@@ -344,13 +344,13 @@ pub fn fetch_pack_manifest(pack_id: &str) -> Result<PackManifest, FavorError> {
     let body = response
         .into_body()
         .read_to_string()
-        .map_err(|e| FavorError::Resource(format!("Failed to read pack manifest: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Failed to read pack manifest: {e}")))?;
 
     let manifest = parse_pack_manifest(&body)?;
 
     // Cross-check: manifest pack_id must match requested pack_id
     if manifest.pack_id != pack_id {
-        return Err(FavorError::Resource(format!(
+        return Err(CohortError::Resource(format!(
             "Manifest pack_id '{}' does not match requested '{pack_id}'",
             manifest.pack_id,
         )));
@@ -360,9 +360,9 @@ pub fn fetch_pack_manifest(pack_id: &str) -> Result<PackManifest, FavorError> {
     if manifest.schema_version >= 2 {
         if let Some(pack) = Pack::find(pack_id) {
             if manifest.base_dir != pack.base_dir {
-                return Err(FavorError::Resource(format!(
+                return Err(CohortError::Resource(format!(
                     "Manifest base_dir '{}' does not match CLI registry '{}' for pack '{}'. \
-                     This indicates a publish/registry mismatch — re-run `favor data publish`.",
+                     This indicates a publish/registry mismatch — re-run `cohort data publish`.",
                     manifest.base_dir, pack.base_dir, pack_id,
                 )));
             }
@@ -403,7 +403,7 @@ fn assess_pack_state(local_base: &Path, manifest: &PackManifest) -> Vec<PackFile
     states
 }
 
-pub fn run(action: DataAction, output: &dyn Output) -> Result<(), FavorError> {
+pub fn run(action: DataAction, output: &dyn Output) -> Result<(), CohortError> {
     match action {
         DataAction::Status => status(output),
         DataAction::Pull {
@@ -431,7 +431,7 @@ pub fn run(action: DataAction, output: &dyn Output) -> Result<(), FavorError> {
     }
 }
 
-fn status(output: &dyn Output) -> Result<(), FavorError> {
+fn status(output: &dyn Output) -> Result<(), CohortError> {
     let config = Config::load_configured()?;
 
     let state = build_data_state(&config)?;
@@ -526,7 +526,7 @@ fn status(output: &dyn Output) -> Result<(), FavorError> {
     Ok(())
 }
 
-fn pull(full: bool, dry_run: bool, yes: bool, output: &dyn Output) -> Result<(), FavorError> {
+fn pull(full: bool, dry_run: bool, yes: bool, output: &dyn Output) -> Result<(), CohortError> {
     let mut config = Config::load_configured()?;
 
     if full && config.data.tier != Tier::Full {
@@ -644,14 +644,14 @@ fn pull(full: bool, dry_run: bool, yes: bool, output: &dyn Output) -> Result<(),
     } else {
         let remaining = final_state.needs_download().len();
         output.warn(&format!(
-            "{remaining} chromosomes still incomplete. Run `favor data pull` to retry.",
+            "{remaining} chromosomes still incomplete. Run `cohort data pull` to retry.",
         ));
     }
 
     Ok(())
 }
 
-fn ensure_pack_registered(config: &mut Config, pack: &Pack) -> Result<(), FavorError> {
+fn ensure_pack_registered(config: &mut Config, pack: &Pack) -> Result<(), CohortError> {
     if !pack.always_installed && !config.data.packs.contains(&pack.id.to_string()) {
         config.data.packs.push(pack.id.to_string());
         config.save()?;
@@ -664,10 +664,10 @@ pub fn pull_pack(
     dry_run: bool,
     yes: bool,
     output: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let pack = Pack::find(pack_id).ok_or_else(|| {
         let available: Vec<_> = Pack::all().iter().map(|p| p.id).collect();
-        FavorError::Input(format!(
+        CohortError::Input(format!(
             "Unknown pack '{}'. Available: {}",
             pack_id,
             available.join(", "),
@@ -803,19 +803,19 @@ pub fn pull_pack(
     } else {
         let remaining = final_states.len() - final_valid;
         output.warn(&format!(
-            "{remaining} files incomplete. Run `favor data pull --pack {pack_id}` to retry."
+            "{remaining} files incomplete. Run `cohort data pull --pack {pack_id}` to retry."
         ));
     }
 
     Ok(())
 }
 
-fn pull_all_packs(dry_run: bool, yes: bool, output: &dyn Output) -> Result<(), FavorError> {
+fn pull_all_packs(dry_run: bool, yes: bool, output: &dyn Output) -> Result<(), CohortError> {
     let config = Config::load_configured()?;
 
     if config.data.packs.is_empty() {
         output
-            .warn("No packs configured. Use `favor data pull --pack <name>` or run `favor setup`.");
+            .warn("No packs configured. Use `cohort data pull --pack <name>` or run `cohort setup`.");
         return Ok(());
     }
 
@@ -839,12 +839,12 @@ fn verify(
     pack_filter: Option<String>,
     checksums: bool,
     output: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let config = Config::load_configured()?;
 
     let packs_to_verify: Vec<&Pack> = if let Some(ref id) = pack_filter {
         let pack =
-            Pack::find(id).ok_or_else(|| FavorError::Input(format!("Unknown pack '{id}'")))?;
+            Pack::find(id).ok_or_else(|| CohortError::Input(format!("Unknown pack '{id}'")))?;
         vec![pack]
     } else {
         // Verify all installed packs
@@ -1007,15 +1007,15 @@ fn verify(
     if all_ok {
         output.success("All packs verified.");
     } else {
-        return Err(FavorError::DataMissing(
-            "Verification failed. Run `favor data pull` to fix.".to_string(),
+        return Err(CohortError::DataMissing(
+            "Verification failed. Run `cohort data pull` to fix.".to_string(),
         ));
     }
 
     Ok(())
 }
 
-pub fn sha256_file(path: &Path) -> Result<String, FavorError> {
+pub fn sha256_file(path: &Path) -> Result<String, CohortError> {
     let mut hasher = Sha256::new();
     let mut file = std::fs::File::open(path)?;
     let mut buf = [0u8; 256 * 1024];
@@ -1049,7 +1049,7 @@ fn download_with_retry(
     label: &str,
     show_progress: bool,
     output: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let mut offset = resume_from;
 
     for attempt in 1..=MAX_RETRIES {
@@ -1081,7 +1081,7 @@ fn download_chunk(
     expected_size: u64,
     label: &str,
     show_progress: bool,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let mut request = ureq::get(url);
     if offset > 0 {
         request = request.header("Range", &format!("bytes={offset}-"));
@@ -1089,7 +1089,7 @@ fn download_chunk(
 
     let response = request
         .call()
-        .map_err(|e| FavorError::Resource(format!("Download failed: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Download failed: {e}")))?;
 
     let actual_offset = if offset > 0 && response.status() != 206 {
         // Server doesn't support Range — must start from scratch.
@@ -1125,7 +1125,7 @@ fn download_chunk(
     loop {
         let n = reader
             .read(&mut buf)
-            .map_err(|e| FavorError::Resource(format!("Read error: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Read error: {e}")))?;
         if n == 0 {
             break;
         }

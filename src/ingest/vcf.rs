@@ -20,18 +20,18 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 use crate::data::VariantSetWriter;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 
 /// Open a VCF (plain or BGZF-compressed) for buffered reading.
 /// For BGZF files, `threads` decompression workers run in parallel.
-pub fn open_vcf(path: &Path, threads: usize) -> Result<Box<dyn BufRead + Send>, FavorError> {
+pub fn open_vcf(path: &Path, threads: usize) -> Result<Box<dyn BufRead + Send>, CohortError> {
     let is_bgzf = path
         .extension()
         .map(|e| e == "gz" || e == "bgz")
         .unwrap_or(false);
     let file = File::open(path)
-        .map_err(|e| FavorError::Input(format!("Cannot open '{}': {e}", path.display())))?;
+        .map_err(|e| CohortError::Input(format!("Cannot open '{}': {e}", path.display())))?;
 
     if is_bgzf {
         let workers = NonZeroUsize::new(threads.max(1))
@@ -135,7 +135,7 @@ impl BatchBuilder {
         self.count
     }
 
-    fn finish(&mut self) -> Result<RecordBatch, FavorError> {
+    fn finish(&mut self) -> Result<RecordBatch, CohortError> {
         let batch = RecordBatch::try_new(
             Arc::new(vcf_schema()),
             vec![
@@ -148,7 +148,7 @@ impl BatchBuilder {
                 Arc::new(self.filter.finish()),
             ],
         )
-        .map_err(|e| FavorError::Analysis(format!("Arrow batch error: {e}")))?;
+        .map_err(|e| CohortError::Analysis(format!("Arrow batch error: {e}")))?;
 
         self.count = 0;
         Ok(batch)
@@ -290,7 +290,7 @@ pub fn ingest_vcfs(
     memory_budget: u64,
     threads: usize,
     output: &dyn Output,
-) -> Result<VcfIngestResult, FavorError> {
+) -> Result<VcfIngestResult, CohortError> {
     let batch_size = derive_batch_size(memory_budget);
     output.status(&format!(
         "  Batch size: {} variants/chrom ({:.1}G memory)",
@@ -324,7 +324,7 @@ pub fn ingest_vcfs(
         {
             let mut hr = vcf_reader.header_reader();
             std::io::copy(&mut hr, &mut std::io::sink()).map_err(|e| {
-                FavorError::Input(format!(
+                CohortError::Input(format!(
                     "Skip VCF header in {}: {e}",
                     input_path.display()
                 ))
@@ -343,7 +343,7 @@ pub fn ingest_vcfs(
         );
         for result in vcf_reader.records() {
             let record = result.map_err(|e| {
-                FavorError::Analysis(format!("VCF parse error in {}: {e}", input_path.display()))
+                CohortError::Analysis(format!("VCF parse error in {}: {e}", input_path.display()))
             })?;
 
             process_record(
@@ -370,11 +370,11 @@ pub fn ingest_vcfs(
             let rb = cw.batch.finish()?;
             cw.writer
                 .write(&rb)
-                .map_err(|e| FavorError::Resource(format!("Parquet write error: {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Parquet write error: {e}")))?;
         }
         cw.writer
             .close()
-            .map_err(|e| FavorError::Resource(format!("Parquet close error: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Parquet close error: {e}")))?;
         let path = vs_writer.chrom_path(chrom)?;
         let size = std::fs::metadata(&path).map_or(0, |m| m.len());
         vs_writer.register_chrom(chrom, cw.count, size);
@@ -395,7 +395,7 @@ fn get_or_create_writer<'a>(
     props: &WriterProperties,
     batch_size: usize,
     output: &dyn Output,
-) -> Result<&'a mut ChromWriter, FavorError> {
+) -> Result<&'a mut ChromWriter, CohortError> {
     use std::collections::hash_map::Entry;
     match writers.entry(chrom) {
         Entry::Occupied(e) => Ok(e.into_mut()),
@@ -403,10 +403,10 @@ fn get_or_create_writer<'a>(
             output.status(&format!("  chr{chrom}..."));
             let path = vs_writer.chrom_path(chrom)?;
             let f = File::create(&path).map_err(|err| {
-                FavorError::Resource(format!("Cannot create '{}': {err}", path.display()))
+                CohortError::Resource(format!("Cannot create '{}': {err}", path.display()))
             })?;
             let w = ArrowWriter::try_new(f, schema.clone(), Some(props.clone()))
-                .map_err(|err| FavorError::Resource(format!("Parquet writer init: {err}")))?;
+                .map_err(|err| CohortError::Resource(format!("Parquet writer init: {err}")))?;
             Ok(e.insert(ChromWriter {
                 batch: BatchBuilder::new(batch_size),
                 writer: w,
@@ -429,7 +429,7 @@ fn process_record(
     filtered_contigs: &mut u64,
     multiallelic_split: &mut u64,
     output: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let raw_chrom = record.reference_sequence_name();
     let chrom = match normalize_chrom(raw_chrom) {
         Some(c) => c,
@@ -507,7 +507,7 @@ fn process_record(
             let rb = cw.batch.finish()?;
             cw.writer
                 .write(&rb)
-                .map_err(|e| FavorError::Resource(format!("Parquet write error: {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Parquet write error: {e}")))?;
         }
     }
     Ok(())

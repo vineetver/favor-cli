@@ -59,7 +59,7 @@ use faer::sparse::linalg::cholesky::simplicial::{
 use faer::sparse::{SparseColMat, SparseColMatRef, SymbolicSparseColMatRef};
 use faer::{Conj, MatMut, Par};
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 
 /// Cached symbolic Cholesky for the Σ pattern. Built once per `fit_reml`
 /// call by [`SymbolicTakahashi::new`]; reused across every AI iteration.
@@ -72,7 +72,7 @@ impl SymbolicTakahashi {
     /// Build the symbolic factor from the union pattern of Σ. The
     /// pattern must be square, symmetric (full storage), and contain
     /// the diagonal at every column.
-    pub fn new(pattern: SymbolicSparseColMatRef<'_, u32>) -> Result<Self, FavorError> {
+    pub fn new(pattern: SymbolicSparseColMatRef<'_, u32>) -> Result<Self, CohortError> {
         let n = pattern.nrows();
         let nnz = pattern.row_idx().len();
 
@@ -86,7 +86,7 @@ impl SymbolicTakahashi {
             factorize_simplicial_symbolic_cholesky_scratch::<u32>(n),
         ]);
         let mut pre_buf = MemBuffer::try_new(pre_req).map_err(|_| {
-            FavorError::Resource("Takahashi symbolic scratch alloc failed".into())
+            CohortError::Resource("Takahashi symbolic scratch alloc failed".into())
         })?;
         let stack = MemStack::new(&mut pre_buf);
 
@@ -104,7 +104,7 @@ impl SymbolicTakahashi {
             stack,
         )
         .map_err(|e| {
-            FavorError::Analysis(format!(
+            CohortError::Analysis(format!(
                 "Takahashi symbolic Cholesky failed (Σ pattern structurally singular?): {e:?}"
             ))
         })?;
@@ -128,14 +128,14 @@ impl TakahashiNumeric {
     pub fn factor(
         symbolic: &SymbolicTakahashi,
         sigma: SparseColMatRef<'_, u32, f64>,
-    ) -> Result<Self, FavorError> {
+    ) -> Result<Self, CohortError> {
         let n = symbolic.n;
         let nnz_l = symbolic.symbolic.len_val();
         let mut l_values = vec![0.0_f64; nnz_l];
 
         let req = factorize_simplicial_numeric_llt_scratch::<u32, f64>(n);
         let mut buf = MemBuffer::try_new(req).map_err(|_| {
-            FavorError::Resource("Takahashi numeric scratch alloc failed".into())
+            CohortError::Resource("Takahashi numeric scratch alloc failed".into())
         })?;
         let stack = MemStack::new(&mut buf);
 
@@ -147,7 +147,7 @@ impl TakahashiNumeric {
             stack,
         )
         .map_err(|e| {
-            FavorError::Analysis(format!(
+            CohortError::Analysis(format!(
                 "sparse Σ Cholesky failed at current τ (matrix not positive definite): {e:?}"
             ))
         })?;
@@ -248,7 +248,7 @@ impl SelectedInverse {
 fn compute_selected_inverse(
     symbolic: &SymbolicSimplicialCholesky<u32>,
     l_values: &[f64],
-) -> Result<SelectedInverse, FavorError> {
+) -> Result<SelectedInverse, CohortError> {
     let n = symbolic.nrows();
     let col_ptr: Vec<u32> = symbolic.col_ptr().to_vec();
     let row_idx: Vec<u32> = symbolic.row_idx().to_vec();
@@ -259,7 +259,7 @@ fn compute_selected_inverse(
     for j in 0..n {
         let s = col_ptr[j] as usize;
         if s >= nnz || row_idx[s] as usize != j {
-            return Err(FavorError::Internal(anyhow::anyhow!(
+            return Err(CohortError::Internal(anyhow::anyhow!(
                 "Cholesky factor column {j} does not start with the diagonal entry"
             )));
         }
@@ -272,7 +272,7 @@ fn compute_selected_inverse(
         let e = col_ptr[j + 1] as usize;
         let l_jj = l_values[s];
         if l_jj == 0.0 || !l_jj.is_finite() {
-            return Err(FavorError::Internal(anyhow::anyhow!(
+            return Err(CohortError::Internal(anyhow::anyhow!(
                 "Cholesky diagonal at column {j} is zero or non-finite: {l_jj}"
             )));
         }
@@ -299,7 +299,7 @@ fn compute_selected_inverse(
                 match slice_lc.binary_search(&(lr as u32)) {
                     Ok(p) => sum += l_kp_j * values[cs_lc + p],
                     Err(_) => {
-                        return Err(FavorError::Internal(anyhow::anyhow!(
+                        return Err(CohortError::Internal(anyhow::anyhow!(
                             "Takahashi precondition violated: Z[{lr}, {lc}] not in L pattern \
                              (kp={kp}, i={i_row}, j={j})"
                         )))

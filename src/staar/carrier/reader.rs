@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::types::{
     AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation, RegionType,
     RegulatoryFlags,
@@ -122,7 +122,7 @@ pub struct VariantIndex {
 
 impl VariantIndex {
     /// Load from variants.parquet + membership.parquet in a chromosome directory.
-    pub fn load(chrom_dir: &Path) -> Result<Self, FavorError> {
+    pub fn load(chrom_dir: &Path) -> Result<Self, CohortError> {
         let entries = load_variant_entries(chrom_dir)?;
         let gene_variants = load_membership(chrom_dir)?;
 
@@ -236,21 +236,21 @@ impl VariantIndex {
     }
 }
 
-fn load_variant_entries(chrom_dir: &Path) -> Result<Vec<VariantIndexEntry>, FavorError> {
+fn load_variant_entries(chrom_dir: &Path) -> Result<Vec<VariantIndexEntry>, CohortError> {
     use arrow::array::{BooleanArray, Float64Array, Int32Array, StringArray, UInt32Array};
 
     let pq_path = chrom_dir.join("variants.parquet");
     let file = File::open(&pq_path)
-        .map_err(|e| FavorError::Resource(format!("Open {}: {e}", pq_path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Open {}: {e}", pq_path.display())))?;
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| FavorError::Resource(format!("Parquet open: {e}")))?
+        .map_err(|e| CohortError::Resource(format!("Parquet open: {e}")))?
         .build()
-        .map_err(|e| FavorError::Resource(format!("Parquet reader: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet reader: {e}")))?;
 
     let mut entries = Vec::new();
 
     for batch_result in reader {
-        let batch = batch_result.map_err(|e| FavorError::Resource(format!("Read: {e}")))?;
+        let batch = batch_result.map_err(|e| CohortError::Resource(format!("Read: {e}")))?;
         let n = batch.num_rows();
 
         // Schema: variant_vcf(0), position(1), ref(2), alt(3), vid(4), maf(5),
@@ -370,21 +370,21 @@ fn load_variant_entries(chrom_dir: &Path) -> Result<Vec<VariantIndexEntry>, Favo
     Ok(entries)
 }
 
-fn load_membership(chrom_dir: &Path) -> Result<HashMap<String, Vec<u32>>, FavorError> {
+fn load_membership(chrom_dir: &Path) -> Result<HashMap<String, Vec<u32>>, CohortError> {
     use arrow::array::{StringArray, UInt32Array};
 
     let pq_path = chrom_dir.join("membership.parquet");
     let file = File::open(&pq_path)
-        .map_err(|e| FavorError::Resource(format!("Open {}: {e}", pq_path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Open {}: {e}", pq_path.display())))?;
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| FavorError::Resource(format!("Parquet open: {e}")))?
+        .map_err(|e| CohortError::Resource(format!("Parquet open: {e}")))?
         .build()
-        .map_err(|e| FavorError::Resource(format!("Parquet reader: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet reader: {e}")))?;
 
     let mut gene_variants: HashMap<String, Vec<u32>> = HashMap::new();
 
     for batch_result in reader {
-        let batch = batch_result.map_err(|e| FavorError::Resource(format!("Read: {e}")))?;
+        let batch = batch_result.map_err(|e| CohortError::Resource(format!("Read: {e}")))?;
         let vvcf_arr = batch
             .column(0)
             .as_any()

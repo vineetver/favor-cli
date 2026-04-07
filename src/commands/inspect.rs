@@ -4,10 +4,10 @@ use parquet::file::reader::FileReader;
 
 use crate::config::{Config, DirProbe, Tier};
 use crate::data::AnnotationDb;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 
-pub fn schema(table: Option<String>, out: &dyn Output) -> Result<(), FavorError> {
+pub fn schema(table: Option<String>, out: &dyn Output) -> Result<(), CohortError> {
     let config = Config::load_configured()?;
 
     match table.as_deref() {
@@ -18,7 +18,7 @@ pub fn schema(table: Option<String>, out: &dyn Output) -> Result<(), FavorError>
     }
 }
 
-fn list_tables(config: &Config, out: &dyn Output) -> Result<(), FavorError> {
+fn list_tables(config: &Config, out: &dyn Output) -> Result<(), CohortError> {
     let probe = DirProbe::scan(&config.root_dir());
     let mut tables = Vec::new();
 
@@ -61,7 +61,7 @@ fn list_tables(config: &Config, out: &dyn Output) -> Result<(), FavorError> {
 
     if tissue_names.is_empty() {
         out.status(
-            "No tissue tables installed. Run `favor data pull --pack eqtl` to add tissue data.",
+            "No tissue tables installed. Run `cohort data pull --pack eqtl` to add tissue data.",
         );
     }
 
@@ -69,13 +69,13 @@ fn list_tables(config: &Config, out: &dyn Output) -> Result<(), FavorError> {
     Ok(())
 }
 
-fn describe_tier(config: &Config, tier: Tier, out: &dyn Output) -> Result<(), FavorError> {
+fn describe_tier(config: &Config, tier: Tier, out: &dyn Output) -> Result<(), CohortError> {
     let ann_db = AnnotationDb::open_tier(tier, &config.root_dir())?;
     let sample = match ann_db.chrom_parquet("1") {
         Some(p) => p,
         None => {
-            return Err(FavorError::DataMissing(format!(
-                "{} tier chromosome=1 not found. Run `favor data pull{}` first.",
+            return Err(CohortError::DataMissing(format!(
+                "{} tier chromosome=1 not found. Run `cohort data pull{}` first.",
                 tier,
                 if tier == Tier::Full { " --full" } else { "" },
             )))
@@ -98,11 +98,11 @@ fn describe_tier(config: &Config, tier: Tier, out: &dyn Output) -> Result<(), Fa
     Ok(())
 }
 
-fn describe_tissue_table(config: &Config, name: &str, out: &dyn Output) -> Result<(), FavorError> {
+fn describe_tissue_table(config: &Config, name: &str, out: &dyn Output) -> Result<(), CohortError> {
     let table_dir = config.tissue_dir().join(name);
     if !table_dir.is_dir() {
-        return Err(FavorError::DataMissing(format!(
-            "Tissue table '{}' not found. Run `favor schema` to list available tables.",
+        return Err(CohortError::DataMissing(format!(
+            "Tissue table '{}' not found. Run `cohort schema` to list available tables.",
             name,
         )));
     }
@@ -129,11 +129,11 @@ struct ColumnInfo {
     col_type: String,
 }
 
-fn describe_parquet(path: &std::path::Path) -> Result<Vec<ColumnInfo>, FavorError> {
+fn describe_parquet(path: &std::path::Path) -> Result<Vec<ColumnInfo>, CohortError> {
     let file = std::fs::File::open(path)
-        .map_err(|e| FavorError::Resource(format!("Cannot open {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Cannot open {}: {e}", path.display())))?;
     let reader = parquet::file::reader::SerializedFileReader::new(file)
-        .map_err(|e| FavorError::Resource(format!("Bad parquet {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Bad parquet {}: {e}", path.display())))?;
     let schema = reader.metadata().file_metadata().schema_descr();
     Ok(schema
         .columns()
@@ -145,10 +145,10 @@ fn describe_parquet(path: &std::path::Path) -> Result<Vec<ColumnInfo>, FavorErro
         .collect())
 }
 
-fn find_first_parquet(table_dir: &std::path::Path) -> Result<std::path::PathBuf, FavorError> {
+fn find_first_parquet(table_dir: &std::path::Path) -> Result<std::path::PathBuf, CohortError> {
     let entries: Vec<_> = std::fs::read_dir(table_dir)
         .map_err(|e| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "Cannot read directory '{}': {e}",
                 table_dir.display()
             ))
@@ -168,13 +168,13 @@ fn find_first_parquet(table_dir: &std::path::Path) -> Result<std::path::PathBuf,
         }
     }
 
-    Err(FavorError::DataMissing(format!(
+    Err(CohortError::DataMissing(format!(
         "No parquet files found in {}. The table may be empty or corrupted.",
         table_dir.display(),
     )))
 }
 
-pub fn manifest(output: &dyn Output) -> Result<(), FavorError> {
+pub fn manifest(output: &dyn Output) -> Result<(), CohortError> {
     let config = Config::load_configured()?;
 
     let has_data = config.has_annotations();
@@ -183,7 +183,7 @@ pub fn manifest(output: &dyn Output) -> Result<(), FavorError> {
     let manifest = json!({
         "commands": [
             {"name": "ingest",    "status": "available",   "description": "Normalize VCF/TSV to canonical parquet with vid"},
-            {"name": "annotate",  "status": if has_data { "available" } else { "unavailable" }, "requires": "annotation data", "reason": if !has_data { "run `favor setup` then `favor data pull`" } else { "" }},
+            {"name": "annotate",  "status": if has_data { "available" } else { "unavailable" }, "requires": "annotation data", "reason": if !has_data { "run `cohort setup` then `cohort data pull`" } else { "" }},
             {"name": "enrich",    "status": if has_tissue { "available" } else { "unavailable" }, "requires": "tissue data", "reason": if !has_tissue { "no tissue/ directory found in root" } else { "" }},
             {"name": "interpret", "status": if has_data { "available" } else { "unavailable" }, "requires": "annotated variants"},
             {"name": "staar",     "status": if has_data { "available" } else { "unavailable" }, "requires": "genotypes + annotated variants"},

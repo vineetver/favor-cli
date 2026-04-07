@@ -129,7 +129,7 @@ fn draw_tier(frame: &mut Frame, selected: usize) {
         ])
         .split(area);
 
-    let title = Paragraph::new("  FAVOR Setup — Annotation Tier")
+    let title = Paragraph::new("  COHORT Setup — Annotation Tier")
         .style(Style::default().fg(Color::Cyan).bold())
         .block(Block::default().padding(Padding::top(1)));
     frame.render_widget(title, layout[0]);
@@ -765,7 +765,7 @@ fn draw_pack_selector(
         ])
         .split(area);
 
-    let title = Paragraph::new("  FAVOR Setup — Add-on Packs")
+    let title = Paragraph::new("  COHORT Setup — Add-on Packs")
         .style(Style::default().fg(Color::Cyan).bold())
         .block(Block::default().padding(Padding::top(1)));
     frame.render_widget(title, layout[0]);
@@ -844,7 +844,7 @@ fn draw_pack_selector(
     let summary_text = if selected_count > 0 {
         format!("  Selected: {selected_count} packs ({total_gb:.0} GB)")
     } else {
-        "  No packs selected (you can add them later with `favor data pull --pack <name>`)"
+        "  No packs selected (you can add them later with `cohort data pull --pack <name>`)"
             .to_string()
     };
     let summary = Paragraph::new(summary_text).style(Style::default().fg(Color::Yellow));
@@ -923,7 +923,7 @@ fn draw_environment(frame: &mut Frame, selected: usize) {
         ])
         .split(area);
 
-    let title = Paragraph::new("  FAVOR Setup — Environment")
+    let title = Paragraph::new("  COHORT Setup — Environment")
         .style(Style::default().fg(Color::Cyan).bold())
         .block(Block::default().padding(Padding::top(1)));
     frame.render_widget(title, layout[0]);
@@ -1107,7 +1107,7 @@ fn draw_memory_budget(
         ])
         .split(area);
 
-    let title = Paragraph::new("  FAVOR Setup — Memory Budget")
+    let title = Paragraph::new("  COHORT Setup — Memory Budget")
         .style(Style::default().fg(Color::Cyan).bold())
         .block(Block::default().padding(Padding::top(1)));
     frame.render_widget(title, layout[0]);

@@ -7,18 +7,18 @@ use crate::commands::{self, IngestConfig};
 use crate::config::Config;
 use crate::data::{VariantSetKind, VariantSetWriter};
 use crate::engine::DfEngine;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::ingest::format::FormatRegistry;
 use crate::ingest::{self, BuildGuess, InputFormat};
 use crate::output::Output;
 use crate::resource::Resources;
 
 /// Resolve inputs: expand directories to their VCF/parquet contents, validate all exist.
-fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, FavorError> {
+fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, CohortError> {
     let mut resolved = Vec::new();
     for p in raw {
         if !p.exists() {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "File not found: {}",
                 p.display()
             )));
@@ -26,10 +26,10 @@ fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, FavorError> {
         if p.is_dir() {
             let mut found = Vec::new();
             for entry in std::fs::read_dir(&p)
-                .map_err(|e| FavorError::Input(format!("Cannot read dir '{}': {e}", p.display())))?
+                .map_err(|e| CohortError::Input(format!("Cannot read dir '{}': {e}", p.display())))?
             {
                 let entry =
-                    entry.map_err(|e| FavorError::Input(format!("Dir entry error: {e}")))?;
+                    entry.map_err(|e| CohortError::Input(format!("Dir entry error: {e}")))?;
                 let name = entry.file_name().to_string_lossy().to_lowercase();
                 if name.ends_with(".vcf.gz")
                     || name.ends_with(".vcf.bgz")
@@ -45,7 +45,7 @@ fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, FavorError> {
                 }
             }
             if found.is_empty() {
-                return Err(FavorError::Input(format!(
+                return Err(CohortError::Input(format!(
                     "No supported files in directory '{}'. Expected .vcf.gz, .tsv, .csv, or .parquet.",
                     p.display()
                 )));
@@ -57,7 +57,7 @@ fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, FavorError> {
         }
     }
     if resolved.is_empty() {
-        return Err(FavorError::Input("No input files specified.".into()));
+        return Err(CohortError::Input("No input files specified.".into()));
     }
     Ok(resolved)
 }
@@ -70,7 +70,7 @@ pub fn handle(
     build_override: Option<GenomeBuild>,
     out: &dyn Output,
     dry_run: bool,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let inputs = resolve_inputs(raw_inputs)?;
 
     let first = &inputs[0];
@@ -114,11 +114,11 @@ pub fn run(
     build_override: Option<GenomeBuild>,
     out: &dyn Output,
     dry_run: bool,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     handle(raw_inputs, output, emit_sql, build_override, out, dry_run)
 }
 
-fn run_ingest_dry(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorError> {
+fn run_ingest_dry(config: &IngestConfig, out: &dyn Output) -> Result<(), CohortError> {
     let first = &config.inputs[0];
     let mut analysis = ingest::analyze(first)?;
     validate_all_same_format(&config.inputs, &analysis)?;
@@ -150,7 +150,7 @@ fn run_ingest_dry(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorEr
 }
 
 /// Core ingest pipeline: detect → validate → ingest → report.
-pub fn run_ingest(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorError> {
+pub fn run_ingest(config: &IngestConfig, out: &dyn Output) -> Result<(), CohortError> {
     let first = &config.inputs[0];
     let mut analysis = ingest::analyze(first)?;
     validate_all_same_format(&config.inputs, &analysis)?;
@@ -169,7 +169,7 @@ pub fn run_ingest(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorEr
 fn validate_all_same_format(
     inputs: &[PathBuf],
     analysis: &ingest::Analysis,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     if inputs.len() <= 1 {
         return Ok(());
     }
@@ -178,7 +178,7 @@ fn validate_all_same_format(
     for p in &inputs[1..] {
         let detected = registry.detect(p)?;
         if detected.format != analysis.format {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "Mixed formats: {} is {:?} but {} is {} ({:?}). All inputs must share the same format.",
                 first.display(), analysis.format, p.display(), detected.handler_name, detected.format,
             )));
@@ -187,7 +187,7 @@ fn validate_all_same_format(
     Ok(())
 }
 
-fn ingest_vcf(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorError> {
+fn ingest_vcf(config: &IngestConfig, out: &dyn Output) -> Result<(), CohortError> {
     let first = &config.inputs[0];
 
     if config.emit_sql {
@@ -195,7 +195,7 @@ fn ingest_vcf(config: &IngestConfig, out: &dyn Output) -> Result<(), FavorError>
         let script = ingest::sql::generate_script(&analysis, first, &config.output);
         let script_path = config.output.with_extension("ingest.sql");
         std::fs::write(&script_path, &script).map_err(|e| {
-            FavorError::Resource(format!("Cannot write '{}': {e}", script_path.display()))
+            CohortError::Resource(format!("Cannot write '{}': {e}", script_path.display()))
         })?;
         out.status(&format!("VCF hint script: {}", script_path.display()));
         return Ok(());
@@ -261,17 +261,17 @@ fn emit_sql_script(
     config: &IngestConfig,
     analysis: &ingest::Analysis,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let first = &config.inputs[0];
     let script = ingest::sql::generate_script(analysis, first, &config.output);
     let script_path = config.output.with_extension("ingest.sql");
     std::fs::write(&script_path, &script).map_err(|e| {
-        FavorError::Resource(format!("Cannot write '{}': {e}", script_path.display()))
+        CohortError::Resource(format!("Cannot write '{}': {e}", script_path.display()))
     })?;
 
     if analysis.needs_intervention() {
         out.warn("Cannot auto-ingest -- ambiguities detected. Edit the script, then re-run:");
-        out.warn(&format!("  favor ingest {}", first.display()));
+        out.warn(&format!("  cohort ingest {}", first.display()));
     } else {
         out.status(&format!("SQL script written to: {}", script_path.display()));
     }
@@ -295,7 +295,7 @@ fn ingest_tabular(
     config: &IngestConfig,
     analysis: &ingest::Analysis,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let first = &config.inputs[0];
     out.status("Ingesting...");
 
@@ -334,7 +334,7 @@ fn register_tabular_inputs(
     engine: &DfEngine,
     inputs: &[PathBuf],
     analysis: &ingest::Analysis,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let delimiter = analysis.delimiter.unwrap_or(ingest::Delimiter::Tab);
     match analysis.format {
         InputFormat::Tabular => {
@@ -378,7 +378,7 @@ fn apply_build_override(
     analysis: &mut ingest::Analysis,
     config: &IngestConfig,
     first: &std::path::Path,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     match config.build_override {
         Some(GenomeBuild::Hg19) => {
             analysis.build_guess = BuildGuess::Hg19 {

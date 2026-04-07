@@ -19,15 +19,15 @@ jobs:
       matrix:
         include:
           - os: ubuntu-22.04
-            artifact: favor-x86_64-linux
+            artifact: cohort-x86_64-linux
             container: quay.io/pypa/manylinux_2_28_x86_64
           - os: macos-14
-            artifact: favor-aarch64-macos
+            artifact: cohort-aarch64-macos
           - os: macos-15
-            artifact: favor-x86_64-macos
+            artifact: cohort-x86_64-macos
             target: x86_64-apple-darwin
           - os: windows-latest
-            artifact: favor-x86_64-windows
+            artifact: cohort-x86_64-windows
 
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container || '' }}
@@ -88,11 +88,11 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           if [ -n "${{ matrix.target }}" ]; then
-            BIN=target/${{ matrix.target }}/release/favor
+            BIN=target/${{ matrix.target }}/release/cohort
           else
-            BIN=target/release/favor
+            BIN=target/release/cohort
           fi
-          tar czf ${{ matrix.artifact }}.tar.gz -C $(dirname $BIN) favor
+          tar czf ${{ matrix.artifact }}.tar.gz -C $(dirname $BIN) cohort
           shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256 2>/dev/null \
             || sha256sum ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
 
@@ -100,7 +100,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/release/favor.exe -DestinationPath ${{ matrix.artifact }}.zip
+          Compress-Archive -Path target/release/cohort.exe -DestinationPath ${{ matrix.artifact }}.zip
           (Get-FileHash ${{ matrix.artifact }}.zip -Algorithm SHA256).Hash + "  ${{ matrix.artifact }}.zip" `
             | Out-File ${{ matrix.artifact }}.zip.sha256
 

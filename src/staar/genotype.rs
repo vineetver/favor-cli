@@ -21,7 +21,7 @@ use parquet::file::properties::WriterProperties;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::ingest::vcf::{normalize_chrom, open_vcf, parsimony_normalize};
 use crate::output::Output;
 
@@ -44,12 +44,12 @@ pub fn extract_genotypes(
     available_memory: u64,
     threads: usize,
     output: &dyn Output,
-) -> Result<GenotypeResult, FavorError> {
+) -> Result<GenotypeResult, CohortError> {
     let reader = open_vcf(vcf_path, threads)?;
     let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
     let header = vcf_reader
         .read_header()
-        .map_err(|e| FavorError::Input(format!("VCF header: {e}")))?;
+        .map_err(|e| CohortError::Input(format!("VCF header: {e}")))?;
 
     let sample_names: Vec<String> = header
         .sample_names()
@@ -58,7 +58,7 @@ pub fn extract_genotypes(
         .collect();
     let n_samples = sample_names.len();
     if n_samples == 0 {
-        return Err(FavorError::Input(
+        return Err(CohortError::Input(
             "VCF has no samples. STAAR requires a multi-sample VCF.".into(),
         ));
     }
@@ -77,7 +77,7 @@ pub fn extract_genotypes(
     let schema = Arc::new(packed_schema(n_samples));
     let geno_dir = output_dir.join("genotypes");
     std::fs::create_dir_all(&geno_dir).map_err(|e| {
-        FavorError::Resource(format!("Cannot create '{}': {e}", geno_dir.display()))
+        CohortError::Resource(format!("Cannot create '{}': {e}", geno_dir.display()))
     })?;
 
     let props = WriterProperties::builder()
@@ -96,7 +96,7 @@ pub fn extract_genotypes(
     let pb = output.progress(0, "extracting genotypes");
     for result in vcf_reader.records() {
         let record = result.map_err(|e| {
-            FavorError::Analysis(format!("VCF parse error in '{}': {e}", vcf_path.display()))
+            CohortError::Analysis(format!("VCF parse error in '{}': {e}", vcf_path.display()))
         })?;
         process_record(
             &record, n_samples, &mut state, &schema, &props, &geno_dir, output,
@@ -108,13 +108,13 @@ pub fn extract_genotypes(
     flush(&mut state, &schema)?;
     if let Some(w) = state.writer.take() {
         w.close()
-            .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
     }
 
     // Write sample names sidecar (order matters for unpacking dosages)
     let sidecar = geno_dir.join("samples.txt");
     std::fs::write(&sidecar, sample_names.join("\n"))
-        .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", sidecar.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Cannot write '{}': {e}", sidecar.display())))?;
 
     // Write metadata — this is the last step so partial extractions are detectable
     let meta = GenotypeMeta {
@@ -127,9 +127,9 @@ pub fn extract_genotypes(
     std::fs::write(
         &meta_path,
         serde_json::to_string_pretty(&meta)
-            .map_err(|e| FavorError::Resource(format!("JSON serialize: {e}")))?,
+            .map_err(|e| CohortError::Resource(format!("JSON serialize: {e}")))?,
     )
-    .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", meta_path.display())))?;
+    .map_err(|e| CohortError::Resource(format!("Cannot write '{}': {e}", meta_path.display())))?;
 
     output.success(&format!(
         "Extracted {} variants × {} samples → packed dosage lists",
@@ -150,12 +150,12 @@ struct ExtractState {
     chromosomes: Vec<String>,
 }
 
-fn flush(state: &mut ExtractState, schema: &Arc<Schema>) -> Result<(), FavorError> {
+fn flush(state: &mut ExtractState, schema: &Arc<Schema>) -> Result<(), CohortError> {
     if state.batch.count > 0 {
         if let Some(w) = state.writer.as_mut() {
             let rb = state.batch.finish(schema)?;
             w.write(&rb)
-                .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Parquet write: {e}")))?;
         }
     }
     Ok(())
@@ -168,22 +168,22 @@ fn switch_chrom(
     props: &WriterProperties,
     geno_dir: &Path,
     output: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     flush(state, schema)?;
     if let Some(w) = state.writer.take() {
         w.close()
-            .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
     }
     let chr_dir = geno_dir.join(format!("chromosome={chrom}"));
     std::fs::create_dir_all(&chr_dir)
-        .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", chr_dir.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Cannot create '{}': {e}", chr_dir.display())))?;
     let parquet_path = chr_dir.join("data.parquet");
     let f = File::create(&parquet_path).map_err(|e| {
-        FavorError::Resource(format!("Cannot create '{}': {e}", parquet_path.display()))
+        CohortError::Resource(format!("Cannot create '{}': {e}", parquet_path.display()))
     })?;
     state.writer = Some(
         ArrowWriter::try_new(f, schema.clone(), Some(props.clone()))
-            .map_err(|e| FavorError::Resource(format!("Writer init: {e}")))?,
+            .map_err(|e| CohortError::Resource(format!("Writer init: {e}")))?,
     );
     state.current_chrom = Some(chrom.to_string());
     state.chromosomes.push(chrom.to_string());
@@ -199,7 +199,7 @@ fn process_record(
     props: &WriterProperties,
     geno_dir: &Path,
     output: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let raw_chrom = record.reference_sequence_name();
     let chrom = match normalize_chrom(raw_chrom) {
         Some(c) => c,
@@ -340,7 +340,7 @@ impl PackedBatchBuilder {
         self.count >= self.capacity
     }
 
-    fn finish(&mut self, schema: &Arc<Schema>) -> Result<RecordBatch, FavorError> {
+    fn finish(&mut self, schema: &Arc<Schema>) -> Result<RecordBatch, CohortError> {
         let columns: Vec<ArrayRef> = vec![
             Arc::new(self.chromosome.finish()),
             Arc::new(self.position.finish()),
@@ -351,7 +351,7 @@ impl PackedBatchBuilder {
         ];
         self.count = 0;
         RecordBatch::try_new(schema.clone(), columns)
-            .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))
+            .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))
     }
 }
 
@@ -419,13 +419,13 @@ fn gt_to_dosage_slow(gt: &[u8], alt_index: u8) -> f32 {
     dose
 }
 
-pub fn read_sample_names(vcf_path: &Path) -> Result<Vec<String>, FavorError> {
+pub fn read_sample_names(vcf_path: &Path) -> Result<Vec<String>, CohortError> {
     // Header-only read — single decompression thread is sufficient.
     let reader = open_vcf(vcf_path, 1)?;
     let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
     let header = vcf_reader
         .read_header()
-        .map_err(|e| FavorError::Input(format!("VCF header: {e}")))?;
+        .map_err(|e| CohortError::Input(format!("VCF header: {e}")))?;
     Ok(header
         .sample_names()
         .iter()
@@ -442,7 +442,7 @@ pub fn load(
     geno_path: &str,
     positions: &[u32],
     n_samples: usize,
-) -> Result<Vec<f64>, FavorError> {
+) -> Result<Vec<f64>, CohortError> {
     use arrow::array::{Array, Float64Array, ListArray};
     engine.register_parquet_file("_geno_load", std::path::Path::new(geno_path))?;
     let pos_str = positions
@@ -463,7 +463,7 @@ pub fn load(
             .as_any()
             .downcast_ref::<ListArray>()
             .ok_or_else(|| {
-                FavorError::Analysis("Genotype parquet missing list-typed dosages column".into())
+                CohortError::Analysis("Genotype parquet missing list-typed dosages column".into())
             })?;
         for i in 0..batch.num_rows() {
             if vi >= n_variants {
@@ -474,7 +474,7 @@ pub fn load(
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| {
-                    FavorError::Analysis("Dosage list elements are not Float64".into())
+                    CohortError::Analysis("Dosage list elements are not Float64".into())
                 })?;
             let base = vi * n_samples;
             for si in 0..n_samples.min(dosages.len()) {

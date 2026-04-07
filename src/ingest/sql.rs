@@ -99,7 +99,7 @@ pub fn copy_statement(select_sql: &str, output_path: &Path) -> String {
 fn write_header(sql: &mut String, analysis: &Analysis, input_path: &Path, output_path: &Path) {
     let _ = writeln!(
         sql,
-        "-- FAVOR ingest: {} -> {}",
+        "-- COHORT ingest: {} -> {}",
         input_path.display(),
         output_path.display()
     );
@@ -247,5 +247,5 @@ fn write_parquet_select(sql: &mut String, _analysis: &Analysis) {
 
 fn write_vcf_stub(sql: &mut String) {
     let _ = writeln!(sql, "-- VCF ingestion uses the streaming parser, not SQL.");
-    let _ = writeln!(sql, "-- Run: favor ingest <file.vcf.gz>");
+    let _ = writeln!(sql, "-- Run: cohort ingest <file.vcf.gz>");
 }

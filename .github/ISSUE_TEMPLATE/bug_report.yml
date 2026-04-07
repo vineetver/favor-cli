@@ -15,7 +15,7 @@ body:
       label: Steps to reproduce
       value: |
         ```bash
-        favor <command> ...
+        cohort <command> ...
         ```
   - type: textarea
     id: expected
@@ -24,8 +24,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: FAVOR version
-      placeholder: "favor --version"
+      label: COHORT version
+      placeholder: "cohort --version"
     validations:
       required: true
   - type: dropdown

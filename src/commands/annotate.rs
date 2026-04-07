@@ -7,7 +7,7 @@ use crate::config::{Config, Tier};
 use crate::data::{parquet_column_names, parquet_row_count, AnnotationDb};
 use crate::data::{VariantSet, VariantSetKind, VariantSetWriter};
 use crate::engine::DfEngine;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement, JoinKey};
 use crate::output::Output;
 use crate::resource::Resources;
@@ -44,10 +44,10 @@ pub fn handle(
     full: bool,
     out: &dyn Output,
     dry_run: bool,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     if !input.exists() {
-        return Err(FavorError::Input(format!(
-            "Variant set not found: '{}'. Run `favor ingest <file>` first to produce one.",
+        return Err(CohortError::Input(format!(
+            "Variant set not found: '{}'. Run `cohort ingest <file>` first to produce one.",
             input.display()
         )));
     }
@@ -92,11 +92,11 @@ pub fn run(
     full: bool,
     out: &dyn Output,
     dry_run: bool,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     handle(input, output_path, full, out, dry_run)
 }
 
-fn emit_dry_run(config: &AnnotateConfig, out: &dyn Output) -> Result<(), FavorError> {
+fn emit_dry_run(config: &AnnotateConfig, out: &dyn Output) -> Result<(), CohortError> {
     let input_vs = VariantSet::open(&config.input)?;
     let plan = commands::DryRunPlan {
         command: "annotate".into(),
@@ -114,7 +114,7 @@ fn emit_dry_run(config: &AnnotateConfig, out: &dyn Output) -> Result<(), FavorEr
 }
 
 /// Core annotate pipeline: open → validate → join → report.
-pub fn run_annotate(config: &AnnotateConfig, out: &dyn Output) -> Result<(), FavorError> {
+pub fn run_annotate(config: &AnnotateConfig, out: &dyn Output) -> Result<(), CohortError> {
     let input = VariantSet::open(&config.input)?;
     validate_input(&input)?;
     let db = AnnotationDb::open_tier(config.tier, &config.data_root)?;
@@ -133,7 +133,7 @@ pub fn run_annotate(config: &AnnotateConfig, out: &dyn Output) -> Result<(), Fav
         resources.environment()
     ));
     out.status(&format!(
-        "Annotating against favor-{} ({})...",
+        "Annotating against cohort-{} ({})...",
         config.tier,
         config.tier.size_human()
     ));
@@ -142,22 +142,22 @@ pub fn run_annotate(config: &AnnotateConfig, out: &dyn Output) -> Result<(), Fav
     report_result(&result, config, &engine, &input, &db, out)
 }
 
-fn validate_input(input: &VariantSet) -> Result<(), FavorError> {
+fn validate_input(input: &VariantSet) -> Result<(), CohortError> {
     let contract = ColumnContract {
         command: "annotate",
         required: ANNOTATE_JOIN_COLUMNS,
     };
     let missing = contract.check(input.columns());
     if !missing.is_empty() {
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "Missing required columns for annotation join:\n{}\n\
-             Re-ingest your data: favor ingest <file>",
+             Re-ingest your data: cohort ingest <file>",
             ColumnContract::format_missing(&missing)
         )));
     }
     if input.count() == 0 {
-        return Err(FavorError::Input(format!(
-            "Input '{}' has 0 variants. Check that `favor ingest` completed successfully.",
+        return Err(CohortError::Input(format!(
+            "Input '{}' has 0 variants. Check that `cohort ingest` completed successfully.",
             input.root().display()
         )));
     }
@@ -176,7 +176,7 @@ fn annotate_join(
     engine: &DfEngine,
     output_path: &std::path::Path,
     out: &dyn Output,
-) -> Result<AnnotateResult, FavorError> {
+) -> Result<AnnotateResult, CohortError> {
     let join_key = input.join_key();
     let input_count = input.count() as i64;
 
@@ -236,7 +236,7 @@ fn join_per_chromosome(
     input_struct_expr: &str,
     writer: &mut VariantSetWriter,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let exact_allele = input.join_key() == JoinKey::ChromPosRefAlt;
     let chroms = input.chromosomes();
     let total = chroms.len();
@@ -318,7 +318,7 @@ fn join_via_rsid(
     output_path: &std::path::Path,
     writer: &mut VariantSetWriter,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     out.status("  Resolving rsids across all chromosomes...");
 
     engine.register_parquet_dir("_user", input.root())?;
@@ -372,7 +372,7 @@ fn report_result(
     input: &VariantSet,
     db: &AnnotationDb,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let match_rate = if result.input_count > 0 {
         result.output_count as f64 / result.input_count as f64
     } else {
@@ -390,7 +390,7 @@ fn report_result(
             "diagnostic": diagnostic.message,
             "suggested_fix": diagnostic.suggested_fix,
         }));
-        return Err(FavorError::Analysis(format!(
+        return Err(CohortError::Analysis(format!(
             "0 variants matched annotations. {}",
             diagnostic.message
         )));
@@ -450,12 +450,12 @@ fn diagnose_zero_matches(
     engine: &DfEngine,
     input_vs: &VariantSet,
     annotations_dir: &std::path::Path,
-) -> Result<Diagnostic, FavorError> {
+) -> Result<Diagnostic, CohortError> {
     let chr1_path = annotations_dir.join("chromosome=1/sorted.parquet");
     if !chr1_path.exists() {
         return Ok(Diagnostic {
             message: "Annotations incomplete — chromosome=1 not found.".into(),
-            suggested_fix: "favor data pull".into(),
+            suggested_fix: "cohort data pull".into(),
         });
     }
 
@@ -471,7 +471,7 @@ fn diagnose_zero_matches(
             message:
                 "Chromosome names have 'chr' prefix — annotations use bare numbers. Re-ingest."
                     .into(),
-            suggested_fix: "favor ingest <original_file>".into(),
+            suggested_fix: "cohort ingest <original_file>".into(),
         });
     }
 
@@ -488,7 +488,7 @@ fn diagnose_zero_matches(
         return Ok(Diagnostic {
             message: "No positions match hg38 annotations. Input may be hg19 or different build."
                 .into(),
-            suggested_fix: "favor ingest <original_file> --build hg19 --emit-sql".into(),
+            suggested_fix: "cohort ingest <original_file> --build hg19 --emit-sql".into(),
         });
     }
 
@@ -534,6 +534,6 @@ fn diagnose_zero_matches(
             "Positions match but alleles differ — likely a normalization mismatch. \
              Re-ingest to apply parsimony normalization.{detail}"
         ),
-        suggested_fix: "favor ingest <original_file>".into(),
+        suggested_fix: "cohort ingest <original_file>".into(),
     })
 }

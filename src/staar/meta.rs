@@ -27,7 +27,7 @@ use super::GeneResult;
 use crate::column::{Col, STAAR_WEIGHTS};
 use crate::data::parquet_column_names;
 use crate::engine::DfEngine;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement};
 use crate::output::Output;
 use crate::types::{
@@ -67,7 +67,7 @@ const META_SUMSTATS_COLUMNS: &[ColumnRequirement] = &[
 pub fn load_all_segments(
     study: &StudyHandle,
     chrom: &str,
-) -> Result<HashMap<i32, SegmentCov>, FavorError> {
+) -> Result<HashMap<i32, SegmentCov>, CohortError> {
     let seg_path = study
         .path
         .join(format!("chromosome={chrom}/segments.parquet"));
@@ -83,58 +83,58 @@ pub fn load_all_segments(
     };
     let missing = contract.check(&cols);
     if !missing.is_empty() {
-        return Err(FavorError::Analysis(format!(
+        return Err(CohortError::Analysis(format!(
             "Invalid summary statistics in {}:\n{}\n\
-             Re-export with: `favor staar --emit-sumstats`",
+             Re-export with: `cohort staar --emit-sumstats`",
             seg_path.display(),
             ColumnContract::format_missing(&missing),
         )));
     }
 
     let file = File::open(&seg_path)
-        .map_err(|e| FavorError::Analysis(format!("Cannot open {}: {e}", seg_path.display())))?;
+        .map_err(|e| CohortError::Analysis(format!("Cannot open {}: {e}", seg_path.display())))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| FavorError::Analysis(format!("Bad parquet {}: {e}", seg_path.display())))?
+        .map_err(|e| CohortError::Analysis(format!("Bad parquet {}: {e}", seg_path.display())))?
         .build()
         .map_err(|e| {
-            FavorError::Analysis(format!("Parquet reader error {}: {e}", seg_path.display()))
+            CohortError::Analysis(format!("Parquet reader error {}: {e}", seg_path.display()))
         })?;
 
     let mut result = HashMap::new();
     for batch in reader {
-        let batch = batch.map_err(|e| FavorError::Analysis(format!("Parquet read error: {e}")))?;
+        let batch = batch.map_err(|e| CohortError::Analysis(format!("Parquet read error: {e}")))?;
         let n = batch.num_rows();
 
         let seg_ids = batch
             .column_by_name("segment_id")
-            .ok_or_else(|| FavorError::Analysis("Missing segment_id column".into()))?
+            .ok_or_else(|| CohortError::Analysis("Missing segment_id column".into()))?
             .as_any()
             .downcast_ref::<Int32Array>()
-            .ok_or_else(|| FavorError::Analysis("segment_id is not Int32".into()))?;
+            .ok_or_else(|| CohortError::Analysis("segment_id is not Int32".into()))?;
         let positions_col = batch
             .column_by_name("positions")
-            .ok_or_else(|| FavorError::Analysis("Missing positions column".into()))?
+            .ok_or_else(|| CohortError::Analysis("Missing positions column".into()))?
             .as_any()
             .downcast_ref::<ListArray>()
-            .ok_or_else(|| FavorError::Analysis("positions is not List".into()))?;
+            .ok_or_else(|| CohortError::Analysis("positions is not List".into()))?;
         let refs_col = batch
             .column_by_name("refs")
-            .ok_or_else(|| FavorError::Analysis("Missing refs column".into()))?
+            .ok_or_else(|| CohortError::Analysis("Missing refs column".into()))?
             .as_any()
             .downcast_ref::<ListArray>()
-            .ok_or_else(|| FavorError::Analysis("refs is not List".into()))?;
+            .ok_or_else(|| CohortError::Analysis("refs is not List".into()))?;
         let alts_col = batch
             .column_by_name("alts")
-            .ok_or_else(|| FavorError::Analysis("Missing alts column".into()))?
+            .ok_or_else(|| CohortError::Analysis("Missing alts column".into()))?
             .as_any()
             .downcast_ref::<ListArray>()
-            .ok_or_else(|| FavorError::Analysis("alts is not List".into()))?;
+            .ok_or_else(|| CohortError::Analysis("alts is not List".into()))?;
         let cov_col = batch
             .column_by_name("cov_lower")
-            .ok_or_else(|| FavorError::Analysis("Missing cov_lower column".into()))?
+            .ok_or_else(|| CohortError::Analysis("Missing cov_lower column".into()))?
             .as_any()
             .downcast_ref::<ListArray>()
-            .ok_or_else(|| FavorError::Analysis("cov_lower is not List".into()))?;
+            .ok_or_else(|| CohortError::Analysis("cov_lower is not List".into()))?;
 
         for row in 0..n {
             let seg_id = seg_ids.value(row);
@@ -143,7 +143,7 @@ pub fn load_all_segments(
             let pos_vals = pos_arr
                 .as_any()
                 .downcast_ref::<Int32Array>()
-                .ok_or_else(|| FavorError::Analysis("positions inner is not Int32".into()))?;
+                .ok_or_else(|| CohortError::Analysis("positions inner is not Int32".into()))?;
             let positions: Vec<u32> = (0..pos_vals.len())
                 .map(|i| pos_vals.value(i) as u32)
                 .collect();
@@ -164,7 +164,7 @@ pub fn load_all_segments(
             let cov_vals = cov_arr
                 .as_any()
                 .downcast_ref::<Float64Array>()
-                .ok_or_else(|| FavorError::Analysis("cov_lower inner is not Float64".into()))?;
+                .ok_or_else(|| CohortError::Analysis("cov_lower inner is not Float64".into()))?;
             let cov_lower: Vec<f64> = (0..cov_vals.len()).map(|i| cov_vals.value(i)).collect();
 
             let mut pos_index: HashMap<u32, Vec<usize>> = HashMap::new();
@@ -233,28 +233,28 @@ impl SegmentCov {
 }
 
 /// Load and validate study directories.
-pub fn load_studies(paths: &[std::path::PathBuf]) -> Result<Vec<StudyHandle>, FavorError> {
+pub fn load_studies(paths: &[std::path::PathBuf]) -> Result<Vec<StudyHandle>, CohortError> {
     let mut studies = Vec::with_capacity(paths.len());
     for path in paths {
         let meta_path = path.join("meta_staar.json");
         if !meta_path.exists() {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "Not a MetaSTAAR study directory: {}. Missing meta_staar.json. \
-                 Run `favor staar --emit-sumstats` first.",
+                 Run `cohort staar --emit-sumstats` first.",
                 path.display()
             )));
         }
         let content = std::fs::read_to_string(&meta_path)?;
         let meta: StudyMeta = serde_json::from_str(&content).map_err(|e| {
-            FavorError::Input(format!(
+            CohortError::Input(format!(
                 "Invalid meta_staar.json in {}: {e}",
                 path.display()
             ))
         })?;
-        if meta.favor_meta_version != 1 {
-            return Err(FavorError::Input(format!(
+        if meta.cohort_meta_version != 1 {
+            return Err(CohortError::Input(format!(
                 "Unsupported meta version {} in {}. Expected 1.",
-                meta.favor_meta_version,
+                meta.cohort_meta_version,
                 path.display()
             )));
         }
@@ -265,7 +265,7 @@ pub fn load_studies(paths: &[std::path::PathBuf]) -> Result<Vec<StudyHandle>, Fa
     }
 
     if studies.len() < 2 {
-        return Err(FavorError::Input(
+        return Err(CohortError::Input(
             "MetaSTAAR requires at least 2 studies.".into(),
         ));
     }
@@ -274,13 +274,13 @@ pub fn load_studies(paths: &[std::path::PathBuf]) -> Result<Vec<StudyHandle>, Fa
     let first_seg = studies[0].meta.segment_size;
     for s in &studies[1..] {
         if s.meta.trait_type != *first_type {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "Trait type mismatch: {} vs {}. All studies must have the same trait type.",
                 first_type, s.meta.trait_type
             )));
         }
         if s.meta.segment_size != first_seg {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "Segment size mismatch: {} vs {}. All studies must use the same segment size.",
                 first_seg, s.meta.segment_size
             )));
@@ -296,7 +296,7 @@ pub fn merge_chromosome(
     studies: &[StudyHandle],
     chrom: &str,
     maf_cutoff: f64,
-) -> Result<Vec<MetaVariant>, FavorError> {
+) -> Result<Vec<MetaVariant>, CohortError> {
     let mut union_parts = Vec::new();
     for (idx, study) in studies.iter().enumerate() {
         let var_path = study
@@ -389,12 +389,12 @@ pub fn merge_chromosome(
         let col = |i: usize| batch.column(i);
         let i32_col = |i: usize| {
             col(i).as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
-                FavorError::Analysis(format!("_meta_variants col {i}: expected Int32"))
+                CohortError::Analysis(format!("_meta_variants col {i}: expected Int32"))
             })
         };
         let i64_col = |i: usize| {
             col(i).as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                FavorError::Analysis(format!("_meta_variants col {i}: expected Int64"))
+                CohortError::Analysis(format!("_meta_variants col {i}: expected Int64"))
             })
         };
         let f64_col = |i: usize| {
@@ -402,7 +402,7 @@ pub fn merge_chromosome(
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| {
-                    FavorError::Analysis(format!("_meta_variants col {i}: expected Float64"))
+                    CohortError::Analysis(format!("_meta_variants col {i}: expected Float64"))
                 })
         };
         let str_col = |i: usize| {
@@ -410,7 +410,7 @@ pub fn merge_chromosome(
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| {
-                    FavorError::Analysis(format!("_meta_variants col {i}: expected Utf8"))
+                    CohortError::Analysis(format!("_meta_variants col {i}: expected Utf8"))
                 })
         };
         let bool_col = |i: usize| {
@@ -418,7 +418,7 @@ pub fn merge_chromosome(
                 .as_any()
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| {
-                    FavorError::Analysis(format!("_meta_variants col {i}: expected Boolean"))
+                    CohortError::Analysis(format!("_meta_variants col {i}: expected Boolean"))
                 })
         };
 
@@ -691,7 +691,7 @@ const MAX_SEGMENT_VARIANTS: usize = 2000;
 
 #[derive(Serialize, Deserialize)]
 pub struct StudyMeta {
-    pub favor_meta_version: u32,
+    pub cohort_meta_version: u32,
     pub trait_type: String,
     pub trait_name: String,
     pub n_samples: usize,
@@ -712,7 +712,7 @@ pub fn emit_sumstats(
     output_dir: &Path,
     meta: &StudyMeta,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     out.status("MetaSTAAR: computing summary statistics (carrier-indexed)...");
 
     let chrom_set: Vec<String> = variants
@@ -735,7 +735,7 @@ pub fn emit_sumstats(
 
         let dir = output_dir.join(format!("chromosome={chrom}"));
         std::fs::create_dir_all(&dir)
-            .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", dir.display())))?;
+            .map_err(|e| CohortError::Resource(format!("Cannot create '{}': {e}", dir.display())))?;
 
         let chrom_dir = store_dir.join(format!("chromosome={chrom}"));
         let sparse_g = SparseG::open(&chrom_dir)?;
@@ -753,10 +753,10 @@ pub fn emit_sumstats(
     }
 
     let meta_json = serde_json::to_string_pretty(meta)
-        .map_err(|e| FavorError::Resource(format!("Failed to serialize meta_staar.json: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Failed to serialize meta_staar.json: {e}")))?;
     let meta_path = output_dir.join("meta_staar.json");
     std::fs::write(&meta_path, meta_json).map_err(|e| {
-        FavorError::Resource(format!("Cannot write '{}': {e}", meta_path.display()))
+        CohortError::Resource(format!("Cannot write '{}': {e}", meta_path.display()))
     })?;
 
     out.success(&format!("Summary statistics -> {}", output_dir.display()));
@@ -773,7 +773,7 @@ fn emit_chromosome_sparse(
     chrom: &str,
     dir: &Path,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let n = analysis.n_pheno;
 
     // Build position-based segments (same binning as v1 for output compat)
@@ -1029,7 +1029,7 @@ fn write_variants_parquet(
     b_ccre_prom: &mut BooleanBuilder,
     b_ccre_enh: &mut BooleanBuilder,
     b_weights: &mut [Float64Builder; 11],
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let schema = Arc::new(variant_schema());
     let mut columns: Vec<ArrayRef> = vec![
         Arc::new(b_position.finish()),
@@ -1056,18 +1056,18 @@ fn write_variants_parquet(
     }
 
     let batch = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
 
     let file = File::create(dir.join("variants.parquet"))
-        .map_err(|e| FavorError::Resource(format!("Create variants.parquet: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Create variants.parquet: {e}")))?;
     let mut writer = ArrowWriter::try_new(file, schema, Some(parquet_props()))
-        .map_err(|e| FavorError::Resource(format!("Parquet writer init: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet writer init: {e}")))?;
     writer
         .write(&batch)
-        .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet write: {e}")))?;
     writer
         .close()
-        .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
 
     Ok(())
 }
@@ -1080,7 +1080,7 @@ fn write_segments_parquet(
     s_refs: &mut ListBuilder<StringBuilder>,
     s_alts: &mut ListBuilder<StringBuilder>,
     s_cov_lower: &mut ListBuilder<Float64Builder>,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let schema = Arc::new(segment_schema());
     let columns: Vec<ArrayRef> = vec![
         Arc::new(s_segment_id.finish()),
@@ -1092,18 +1092,18 @@ fn write_segments_parquet(
     ];
 
     let batch = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
 
     let file = File::create(dir.join("segments.parquet"))
-        .map_err(|e| FavorError::Resource(format!("Create segments.parquet: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Create segments.parquet: {e}")))?;
     let mut writer = ArrowWriter::try_new(file, schema, Some(parquet_props()))
-        .map_err(|e| FavorError::Resource(format!("Parquet writer init: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet writer init: {e}")))?;
     writer
         .write(&batch)
-        .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet write: {e}")))?;
     writer
         .close()
-        .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
 
     Ok(())
 }

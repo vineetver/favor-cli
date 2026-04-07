@@ -146,7 +146,7 @@ fn cgroup_threads() -> Option<usize> {
 }
 
 fn detect_threads(config_threads: Option<usize>) -> usize {
-    env_usize("FAVOR_THREADS")
+    env_usize("COHORT_THREADS")
         .or_else(|| env_usize("SLURM_CPUS_PER_TASK"))
         .or(config_threads)
         .or_else(cgroup_threads)

@@ -1,7 +1,7 @@
 use std::fmt;
 
 #[derive(Debug)]
-pub enum FavorError {
+pub enum CohortError {
     Input(String),
     DataMissing(String),
     Resource(String),
@@ -9,7 +9,7 @@ pub enum FavorError {
     Internal(anyhow::Error),
 }
 
-impl FavorError {
+impl CohortError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Input(_) => 1,
@@ -31,7 +31,7 @@ impl FavorError {
     }
 }
 
-impl fmt::Display for FavorError {
+impl fmt::Display for CohortError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Input(msg)
@@ -43,25 +43,25 @@ impl fmt::Display for FavorError {
     }
 }
 
-impl From<anyhow::Error> for FavorError {
+impl From<anyhow::Error> for CohortError {
     fn from(err: anyhow::Error) -> Self {
         Self::Internal(err)
     }
 }
 
-impl From<std::io::Error> for FavorError {
+impl From<std::io::Error> for CohortError {
     fn from(err: std::io::Error) -> Self {
         Self::Internal(err.into())
     }
 }
 
-impl From<toml::de::Error> for FavorError {
+impl From<toml::de::Error> for CohortError {
     fn from(err: toml::de::Error) -> Self {
         Self::Internal(err.into())
     }
 }
 
-impl From<toml::ser::Error> for FavorError {
+impl From<toml::ser::Error> for CohortError {
     fn from(err: toml::ser::Error) -> Self {
         Self::Internal(err.into())
     }

@@ -15,7 +15,7 @@
 use faer::prelude::Solve;
 use faer::Mat;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::staar::kinship::reml::{
     frob_inner, run_reml, SigmaSolver, SolverBuilder,
 };
@@ -75,7 +75,7 @@ pub struct DenseBuilder<'a> {
 }
 
 impl<'a> SolverBuilder for DenseBuilder<'a> {
-    fn build(&self, tau: &VarianceComponents) -> Result<SigmaSolver, FavorError> {
+    fn build(&self, tau: &VarianceComponents) -> Result<SigmaSolver, CohortError> {
         let sigma = assemble_sigma(self.n, tau, self.kinships, self.groups, self.weights);
         let sigma_inv = invert_dense(&sigma);
         Ok(SigmaSolver::Dense(sigma_inv))
@@ -140,7 +140,7 @@ pub fn fit_reml_dense(
     groups: &GroupPartition,
     weights: &[f64],
     init_tau: VarianceComponents,
-) -> Result<KinshipState, FavorError> {
+) -> Result<KinshipState, CohortError> {
     let n = y.nrows();
     let builder = DenseBuilder {
         n,

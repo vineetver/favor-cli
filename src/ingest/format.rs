@@ -6,7 +6,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 use parquet::file::reader::FileReader;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 
 use super::{sniff_delimiter, Delimiter, InputFormat};
 
@@ -34,7 +34,7 @@ pub trait FormatHandler: Send + Sync {
     fn detect(&self, path: &Path, header: &[u8]) -> DetectResult;
 
     /// What columns does this format produce?
-    fn schema(&self, path: &Path) -> Result<Schema, FavorError>;
+    fn schema(&self, path: &Path) -> Result<Schema, CohortError>;
 
     /// The InputFormat enum variant this handler maps to.
     fn input_format(&self) -> InputFormat;
@@ -82,7 +82,7 @@ impl FormatHandler for VcfHandler {
         DetectResult::No
     }
 
-    fn schema(&self, _path: &Path) -> Result<Schema, FavorError> {
+    fn schema(&self, _path: &Path) -> Result<Schema, CohortError> {
         Ok(Schema::new(vec![
             Field::new("chromosome", DataType::Utf8, false),
             Field::new("position", DataType::Int32, false),
@@ -120,11 +120,11 @@ impl FormatHandler for ParquetHandler {
         DetectResult::No
     }
 
-    fn schema(&self, path: &Path) -> Result<Schema, FavorError> {
+    fn schema(&self, path: &Path) -> Result<Schema, CohortError> {
         let file = std::fs::File::open(path)
-            .map_err(|e| FavorError::Input(format!("Cannot open '{}': {e}", path.display())))?;
+            .map_err(|e| CohortError::Input(format!("Cannot open '{}': {e}", path.display())))?;
         let reader = parquet::file::reader::SerializedFileReader::new(file)
-            .map_err(|e| FavorError::Input(format!("Bad parquet '{}': {e}", path.display())))?;
+            .map_err(|e| CohortError::Input(format!("Bad parquet '{}': {e}", path.display())))?;
         let parquet_schema = reader.metadata().file_metadata().schema_descr();
         let fields: Vec<Field> = parquet_schema
             .root_schema()
@@ -167,7 +167,7 @@ impl FormatHandler for TsvHandler {
         DetectResult::No
     }
 
-    fn schema(&self, path: &Path) -> Result<Schema, FavorError> {
+    fn schema(&self, path: &Path) -> Result<Schema, CohortError> {
         let delim = sniff_delimiter(path)?;
         let headers = super::read_headers(path, delim)?;
         let fields: Vec<Field> = headers
@@ -208,7 +208,7 @@ impl FormatHandler for CsvHandler {
         DetectResult::No
     }
 
-    fn schema(&self, path: &Path) -> Result<Schema, FavorError> {
+    fn schema(&self, path: &Path) -> Result<Schema, CohortError> {
         let headers = super::read_headers(path, Delimiter::Comma)?;
         let fields: Vec<Field> = headers
             .iter()
@@ -243,11 +243,11 @@ impl FormatRegistry {
     }
 
     /// Detect the best handler for a file using extension + content sniffing.
-    pub fn detect(&self, path: &Path) -> Result<Detected, FavorError> {
+    pub fn detect(&self, path: &Path) -> Result<Detected, CohortError> {
         let mut header = [0u8; 8192];
         let n = std::fs::File::open(path)
             .and_then(|mut f| std::io::Read::read(&mut f, &mut header))
-            .map_err(|e| FavorError::Input(format!("Cannot read '{}': {e}", path.display())))?;
+            .map_err(|e| CohortError::Input(format!("Cannot read '{}': {e}", path.display())))?;
 
         let mut best: Option<(&dyn FormatHandler, f32)> = None;
         for handler in &self.handlers {
@@ -264,7 +264,7 @@ impl FormatRegistry {
                 delimiter: h.delimiter(path),
                 handler_name: h.name(),
             }),
-            None => Err(FavorError::Input(format!(
+            None => Err(CohortError::Input(format!(
                 "Cannot detect format for '{}'. Supported formats: {}",
                 path.display(),
                 self.handlers
