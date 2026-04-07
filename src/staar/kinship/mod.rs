@@ -1,30 +1,44 @@
 //! Kinship-aware AI-REML and PQL for the STAAR null model.
 //!
-//! Ports `GMMAT::glmmkin` from upstream R (`hanchenphd/GMMAT`):
-//!  - `glmmkin.ai`         — inner AI iteration  (`R/glmmkin.R:281-422`)
-//!  - `glmmkin.fit`        — outer boundary-refit loop (`R/glmmkin.R:187-210`)
-//!  - PQL outer loop       — binary GLMM via working pseudo-response
+//! Ports `GMMAT::glmmkin` from upstream R
+//! (`hanchenphd/GMMAT@473b342 R/glmmkin.R`):
+//!  - `glmmkin.fit` (family + boundary refit) → `reml::run_reml`
+//!  - `glmmkin.ai`  (AI iteration loop)        → `reml::run_reml`
+//!  - `R_fitglmm_ai_dense` (dense AI step)     → `reml::ai_step` + `dense::DenseBuilder`
+//!  - `R_fitglmm_ai`       (sparse AI step)    → `reml::ai_step` + `sparse::SparseBuilder`
+//!  - PQL outer loop                            → `pql::fit_pql_glmm`
+//!
+//! Cross-checked against GENESIS `R/runAIREMLgaussian.R` (the AI-REML
+//! formulas) and `R/iterateAIREMLworkingY.R` (the PQL outer loop
+//! structure we follow). See `UPSTREAM.md` for the pinned SHAs and the
+//! function map.
 //!
 //! ## Module layout
 //!
-//! - [`types`]   — `KinshipMatrix` (Dense | Sparse), `GroupPartition`,
-//!                 `VarianceComponents`, `KinshipState`.
-//! - [`budget`]  — dense memory cap + dense/sparse path selector.
-//! - [`dense`]   — dense AI-REML kernel (small/medium n).
-//! - [`sparse`]  — sparse AI-REML kernel (faer `Llt`, Hutchinson trace,
-//!                 Takahashi selected inversion).
-//! - [`pql`]     — binary GLMM PQL outer loop (works on top of either path).
-//! - [`load`]    — TSV → matrix and phenotype-column → group loaders.
+//! - [`types`]   `KinshipMatrix` (Dense | Sparse), `GroupPartition`,
+//!               `VarianceComponents`, `KinshipState`, `KinshipInverse`.
+//! - [`load`]    TSV → `KinshipMatrix` and phenotype-column → `GroupPartition`.
+//! - [`budget`]  Dense memory cap + dense/sparse path selector.
+//! - [`reml`]    Shared AI-REML algorithm: `SigmaSolver`, `SolverBuilder`,
+//!               `ai_step`, `run_reml`. Read this file to understand the
+//!               math; both backends use it.
+//! - [`dense`]   Dense backend: `DenseBuilder`, `assemble_sigma`,
+//!               `trace_p_k_dense`, `fit_reml_dense` entry point.
+//! - [`sparse`]  Sparse backend: `SparseBuilder`, `trace_p_k_sparse`,
+//!               `fit_reml_sparse` entry point. Submodules `assembler`
+//!               (cached pattern + symbolic Cholesky) and `hutchinson`
+//!               (stochastic trace estimators, fallback until #26 #27).
+//! - [`pql`]     Binary GLMM PQL outer loop wrapping `fit_reml`.
 //!
 //! ## Path selection
 //!
 //! `fit_reml` picks dense vs sparse at entry:
 //!  - All kinships dense → dense path always.
 //!  - At least one kinship sparse AND dense working set fits → dense
-//!    (cheap and exact).
+//!    (cheap and exact, sparse kinships are pre-promoted).
 //!  - At least one kinship sparse AND dense working set exceeds budget →
-//!    sparse path; trace term picks Takahashi or Hutchinson based on
-//!    `nnz_L` and the configured probe count.
+//!    sparse path; the trace term uses Hutchinson today and will use
+//!    Takahashi selected inversion once #26 #27 lands.
 //!
 //! Statistical outputs (h², α, p-values) are identical across paths to
 //! within numerical noise. The dense path is bit-identical to GMMAT.
@@ -33,6 +47,7 @@ pub mod budget;
 pub mod dense;
 pub mod load;
 pub mod pql;
+pub mod reml;
 pub mod sparse;
 pub mod types;
 
@@ -47,10 +62,11 @@ use faer::Mat;
 
 use crate::error::FavorError;
 
-/// Fit AI-REML for the variance components in `[τ_kinship_1..τ_L,
-/// τ_group_1..τ_G]`. Dispatches between the dense kernel (small n,
-/// matches GMMAT bit-for-bit) and the sparse kernel (large n + sparse
-/// kinships, matches GMMAT to within numerical noise).
+/// Fit AI-REML for the variance components in
+/// `[τ_kinship_1..τ_L, τ_group_1..τ_G]`. Dispatches between the dense
+/// kernel (small n, bit-identical to GMMAT) and the sparse kernel
+/// (large n + sparse kinships, matches GMMAT to within Hutchinson noise
+/// until #26 #27 lands).
 ///
 /// Returns `FavorError::Resource` if neither path can run within the
 /// configured memory budget.
@@ -93,15 +109,15 @@ pub fn fit_reml(
 
     if !dense_fits && !all_sparse {
         // Dense doesn't fit AND we have at least one inherently dense
-        // kinship. We can't do anything useful — bail out clearly.
+        // kinship. Bail out clearly.
         check_memory_budget(n)?;
         unreachable!("check_memory_budget should have errored above");
     }
 
-    let w_vec = dense::weights_or_one(n, weights);
+    let w_vec = reml::weights_or_ones(n, weights);
 
     // Warm start: var(Y)/(L+G) per slot, kinship slots rescaled by
-    // mean(diag(K_l)). Same for both paths.
+    // mean(diag(K_l)). Matches `glmmkin.R:309-316`.
     let y_mean = (0..n).map(|i| y[(i, 0)]).sum::<f64>() / n as f64;
     let y_var = (0..n)
         .map(|i| (y[(i, 0)] - y_mean).powi(2))
@@ -118,9 +134,8 @@ pub fn fit_reml(
         init_tau.set_group(gi, warm);
     }
 
-    // Path selection. Sparse only when dense won't fit (or is forced
-    // off in the future via a flag). For now we keep dense when it fits
-    // because it's exact and slightly faster on small studies.
+    // Path selection. Sparse only when dense won't fit. Otherwise dense —
+    // it's exact and slightly faster on small studies.
     let take_sparse = !dense_fits && all_sparse;
     if take_sparse {
         return sparse::fit_reml_sparse(
@@ -135,8 +150,8 @@ pub fn fit_reml(
     }
 
     if any_sparse && dense_fits {
-        // Dense fits but kinships are sparse-stored — promote to dense
-        // for the dense kernel. Cheap when dense fits.
+        // Dense fits but kinships are sparse-stored — promote them once.
+        // Cheap when dense fits.
         let promoted: Vec<KinshipMatrix> = kinships
             .iter()
             .map(|k| match k.as_sparse() {
@@ -173,7 +188,8 @@ pub fn fit_reml(
 #[cfg(test)]
 mod tests {
     //! Integration tests across the public dispatcher. Per-component tests
-    //! live in their own files (`types.rs`, `dense.rs`, `budget.rs`).
+    //! live in their own files (`types.rs`, `dense.rs`, `budget.rs`,
+    //! `sparse/mod.rs`).
 
     use super::*;
     use crate::output::{create, Output, OutputMode};
