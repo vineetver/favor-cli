@@ -119,33 +119,96 @@ pub fn compute_key(vcf_path: &Path, annotations_path: &Path) -> Result<String, F
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Why a `probe()` returned a miss. Surface this in `RunManifest` so
+/// operators can tell "no store on disk" apart from "store exists but
+/// content fingerprint changed" without grepping logs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ProbeReason {
+    NoManifest,
+    UnreadableManifest,
+    ContentKeyChanged,
+    SchemaVersionMismatch { found: u32, expected: u32 },
+    MissingChromosomeArtifact { chromosome: String, file: String },
+    FingerprintFailed,
+}
+
 pub struct StoreProbe {
     pub store_dir: PathBuf,
     /// `Some` only when a valid, key-matching, fully-materialized store exists.
     pub manifest: Option<StoreManifest>,
+    /// Populated only when `manifest` is `None`.
+    pub miss_reason: Option<ProbeReason>,
 }
 
 pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> StoreProbe {
     let store_dir = store_dir.to_path_buf();
-    let miss = || StoreProbe { store_dir: store_dir.clone(), manifest: None };
+    let miss = |reason: ProbeReason| StoreProbe {
+        store_dir: store_dir.clone(),
+        manifest: None,
+        miss_reason: Some(reason),
+    };
 
-    let Ok(s) = fs::read_to_string(store_dir.join("manifest.json")) else { return miss(); };
-    let Ok(manifest) = serde_json::from_str::<StoreManifest>(&s) else { return miss(); };
-    let Ok(key) = compute_key(vcf_path, annotations_path) else { return miss(); };
+    let Ok(s) = fs::read_to_string(store_dir.join("manifest.json")) else {
+        return miss(ProbeReason::NoManifest);
+    };
+    let Ok(manifest) = serde_json::from_str::<StoreManifest>(&s) else {
+        return miss(ProbeReason::UnreadableManifest);
+    };
+    let Ok(key) = compute_key(vcf_path, annotations_path) else {
+        return miss(ProbeReason::FingerprintFailed);
+    };
 
-    if manifest.key != key || manifest.version != 3 {
-        return miss();
+    if manifest.version != 3 {
+        return miss(ProbeReason::SchemaVersionMismatch {
+            found: manifest.version,
+            expected: 3,
+        });
+    }
+    if manifest.key != key {
+        return miss(ProbeReason::ContentKeyChanged);
     }
 
     for ci in &manifest.chromosomes {
         let sparse_g = store_dir.join(format!("chromosome={}/sparse_g.bin", ci.name));
         let variants = store_dir.join(format!("chromosome={}/variants.parquet", ci.name));
-        if !sparse_g.exists() || !variants.exists() {
-            return miss();
+        if !sparse_g.exists() {
+            return miss(ProbeReason::MissingChromosomeArtifact {
+                chromosome: ci.name.clone(),
+                file: "sparse_g.bin".into(),
+            });
+        }
+        if !variants.exists() {
+            return miss(ProbeReason::MissingChromosomeArtifact {
+                chromosome: ci.name.clone(),
+                file: "variants.parquet".into(),
+            });
         }
     }
 
-    StoreProbe { store_dir, manifest: Some(manifest) }
+    StoreProbe {
+        store_dir,
+        manifest: Some(manifest),
+        miss_reason: None,
+    }
+}
+
+/// Human-friendly summary of a probe miss for `out.status()` and run.json.
+pub fn describe_miss(reason: &ProbeReason) -> String {
+    match reason {
+        ProbeReason::NoManifest => "no manifest.json on disk".into(),
+        ProbeReason::UnreadableManifest => "manifest.json present but unparseable".into(),
+        ProbeReason::ContentKeyChanged => {
+            "VCF or annotations content fingerprint changed since last build".into()
+        }
+        ProbeReason::SchemaVersionMismatch { found, expected } => {
+            format!("manifest schema v{found} on disk, this build expects v{expected}")
+        }
+        ProbeReason::MissingChromosomeArtifact { chromosome, file } => {
+            format!("chromosome={chromosome} is missing {file}")
+        }
+        ProbeReason::FingerprintFailed => "could not fingerprint VCF or annotations".into(),
+    }
 }
 
 pub const STAAR_ANNOTATION_COLUMNS: &[ColumnRequirement] = &[
@@ -199,6 +262,22 @@ pub struct GenoStoreResult {
     pub geno_output_dir: Option<PathBuf>,
 }
 
+impl GenoStoreResult {
+    /// Build a `GenotypeResult` view for downstream stages that need a
+    /// sample-list + parquet directory pair (phenotype loading, kinship
+    /// group loading, known-loci joins). Replaces hand-built clones at
+    /// every call site.
+    pub fn to_genotype_result(&self) -> super::genotype::GenotypeResult {
+        super::genotype::GenotypeResult {
+            sample_names: self.sample_names.clone(),
+            output_dir: self
+                .geno_output_dir
+                .clone()
+                .unwrap_or_else(|| self.store_dir.clone()),
+        }
+    }
+}
+
 pub fn setup_resources(out: &dyn Output) -> Result<Resources, FavorError> {
     let resources = Resources::detect_configured();
 
@@ -222,14 +301,18 @@ pub fn build_or_load_store(
     out: &dyn Output,
 ) -> Result<GenoStoreResult, FavorError> {
     let probe_result = if rebuild_store {
-        StoreProbe { store_dir: store_dir.to_path_buf(), manifest: None }
+        StoreProbe {
+            store_dir: store_dir.to_path_buf(),
+            manifest: None,
+            miss_reason: None,
+        }
     } else {
         probe(store_dir, genotypes, annotations)
     };
 
     if let Some(manifest) = probe_result.manifest {
         out.status(&format!(
-            "Step 1/4: Using cached genotype store ({} variants x {} samples)",
+            "Using cached genotype store ({} variants x {} samples)",
             manifest.n_variants, manifest.n_samples,
         ));
 
@@ -245,7 +328,13 @@ pub fn build_or_load_store(
         });
     }
 
-    out.status("Step 1/4: Building genotype store...");
+    let why = match (&probe_result.miss_reason, rebuild_store) {
+        (_, true) => "  Rebuild requested by --rebuild-store".to_string(),
+        (Some(r), _) => format!("  Cache miss: {}", describe_miss(r)),
+        (None, _) => "  Cache miss: probe returned no reason".to_string(),
+    };
+    out.status(&why);
+    out.status("Building genotype store...");
 
     out.status("  Extracting genotypes from VCF...");
     let geno = crate::staar::genotype::extract_genotypes(
@@ -429,7 +518,7 @@ pub fn build(
 
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| FavorError::Resource(format!("Manifest serialize: {e}")))?;
-    fs::write(store_dir.join("manifest.json"), manifest_json)?;
+    write_atomic(&store_dir.join("manifest.json"), manifest_json.as_bytes())?;
 
     out.success(&format!(
         "Genotype store: {} variants x {} samples, {} genes, {} carriers",
@@ -439,9 +528,97 @@ pub fn build(
     Ok(manifest)
 }
 
+/// Write `bytes` to `path` atomically: write to `path.tmp`, fsync the file,
+/// rename, then fsync the parent directory so the rename survives a crash.
+///
+/// Parent-dir fsync is best-effort: on filesystems where opening a directory
+/// is not allowed (rare on Linux but possible on some network mounts), the
+/// rename has already happened so we accept a degraded durability guarantee
+/// rather than failing the build.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FavorError> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| FavorError::Resource(format!("path '{}' has no parent", path.display())))?;
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|s| s.to_str()).unwrap_or("")
+    ));
+    {
+        let mut f = File::create(&tmp)
+            .map_err(|e| FavorError::Resource(format!("create {}: {e}", tmp.display())))?;
+        f.write_all(bytes)
+            .map_err(|e| FavorError::Resource(format!("write {}: {e}", tmp.display())))?;
+        f.sync_all()
+            .map_err(|e| FavorError::Resource(format!("fsync {}: {e}", tmp.display())))?;
+    }
+    fs::rename(&tmp, path).map_err(|e| {
+        FavorError::Resource(format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        ))
+    })?;
+    if let Ok(dir) = File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
 fn now_string() -> String {
     let d = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", d.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_no_manifest_returns_typed_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let bogus_vcf = dir.path().join("does-not-exist.vcf.gz");
+        let bogus_ann = dir.path().join("does-not-exist.annotated");
+        let p = probe(dir.path(), &bogus_vcf, &bogus_ann);
+        assert!(p.manifest.is_none());
+        assert_eq!(p.miss_reason, Some(ProbeReason::NoManifest));
+    }
+
+    #[test]
+    fn probe_unreadable_manifest_returns_typed_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("manifest.json"), "{ not valid json").unwrap();
+        let bogus_vcf = dir.path().join("does-not-exist.vcf.gz");
+        let bogus_ann = dir.path().join("does-not-exist.annotated");
+        let p = probe(dir.path(), &bogus_vcf, &bogus_ann);
+        assert!(p.manifest.is_none());
+        assert_eq!(p.miss_reason, Some(ProbeReason::UnreadableManifest));
+    }
+
+    #[test]
+    fn write_atomic_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        write_atomic(&path, b"hello world").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+        // No leftover .tmp.
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn describe_miss_humanises_each_variant() {
+        assert!(describe_miss(&ProbeReason::NoManifest).contains("manifest"));
+        assert!(describe_miss(&ProbeReason::ContentKeyChanged).contains("fingerprint"));
+        assert!(describe_miss(&ProbeReason::SchemaVersionMismatch {
+            found: 2,
+            expected: 3
+        })
+        .contains("v2"));
+    }
 }

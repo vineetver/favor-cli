@@ -74,16 +74,25 @@ pub struct ChromScoreCache {
     pub gene_blocks: HashMap<String, GeneKBlock>,
 }
 
-/// SHA-256 of (store_key, trait_name, sorted covariates, known_loci path,
+/// SHA-256 of (store_key, trait_name, sorted covariates, known_loci CONTENT,
 /// sorted canonicalized kinship paths, kinship_groups column name).
 ///
 /// Kinship paths are canonicalized and sorted before hashing so reordered
 /// `--kinship a.tsv,b.tsv` invocations hit the same cache (sum is commutative).
 /// If canonicalize fails (file does not exist), the raw path is used.
 ///
-/// Invalidated by: new VCF, new annotations, different trait, different covariates,
-/// different --known-loci file, different --kinship set, different --kinship-groups column.
-/// NOT invalidated by: MAF cutoff, mask definitions, SPA flag, kinship file order.
+/// `known_loci` is hashed by **content**, not path: editing the file in
+/// place must invalidate the cache because additional loci change the
+/// covariate matrix and therefore U/K. If the file is unreadable we fall
+/// back to the path bytes so the key is still defined for tests.
+///
+/// Invalidated by: new VCF, new annotations, different trait, different
+/// covariates, different --known-loci content, different --kinship set,
+/// different --kinship-groups column.
+///
+/// NOT invalidated by: MAF cutoff, mask definitions, SPA flag, kinship
+/// file order, ai_seed (AI-STAAR weights are applied at test time, not
+/// cached into U/K).
 pub fn cache_key(
     store_key: &str,
     trait_name: &str,
@@ -104,8 +113,15 @@ pub fn cache_key(
         hasher.update(b",");
     }
     hasher.update(b"|");
+    // Domain-separate "no known_loci" from "known_loci is an empty file":
+    // an empty Sha256::update(&[]) is a no-op, so without the marker the
+    // two would collide.
     if let Some(p) = known_loci {
-        hasher.update(p.to_string_lossy().as_bytes());
+        hasher.update(b"loci=");
+        match std::fs::read(p) {
+            Ok(bytes) => hasher.update(&bytes),
+            Err(_) => hasher.update(p.to_string_lossy().as_bytes()),
+        }
     }
     hasher.update(b"|");
     let mut canonical: Vec<String> = kinship
@@ -734,6 +750,34 @@ mod tests {
         // kinship_groups column changes key
         let k_groups = cache_key("store1", "BMI", &covs, None, &no_kin, Some("batch"));
         assert_ne!(k1, k_groups, "adding kinship_groups should change key");
+    }
+
+    /// Verify that editing a known_loci file in place invalidates the cache
+    /// (path-only hashing would miss this).
+    #[test]
+    fn cache_key_known_loci_uses_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let loci_path = dir.path().join("loci.tsv");
+        let covs = vec!["age".into(), "sex".into()];
+        let no_kin: Vec<PathBuf> = Vec::new();
+
+        std::fs::write(&loci_path, "1:100:A:T\n").unwrap();
+        let k1 = cache_key("store1", "BMI", &covs, Some(&loci_path), &no_kin, None);
+
+        // Same content → same key.
+        let k1b = cache_key("store1", "BMI", &covs, Some(&loci_path), &no_kin, None);
+        assert_eq!(k1, k1b);
+
+        // Edit file in place → key must change.
+        std::fs::write(&loci_path, "1:100:A:T\n2:200:G:C\n").unwrap();
+        let k2 = cache_key("store1", "BMI", &covs, Some(&loci_path), &no_kin, None);
+        assert_ne!(k1, k2, "editing known_loci content must invalidate the cache");
+
+        // Empty content with same path is still distinct from no file.
+        std::fs::write(&loci_path, "").unwrap();
+        let k_empty = cache_key("store1", "BMI", &covs, Some(&loci_path), &no_kin, None);
+        let k_none = cache_key("store1", "BMI", &covs, None, &no_kin, None);
+        assert_ne!(k_empty, k_none);
     }
 
     /// Verify that validate_header rejects truncated files.

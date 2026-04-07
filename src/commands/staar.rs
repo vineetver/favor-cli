@@ -14,7 +14,9 @@ use crate::output::Output;
 use crate::staar::masks::ScangParams;
 use crate::staar::pipeline::{StaarConfig, StaarPipeline};
 use crate::staar::store;
-use crate::staar::{self, MaskCategory};
+use crate::staar;
+#[cfg(test)]
+use crate::staar::MaskCategory;
 
 const GB: u64 = 1024 * 1024 * 1024;
 
@@ -105,7 +107,7 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, FavorError> {
     })?;
     ann_vs.require_annotated()?;
 
-    let mask_categories = parse_mask_categories(&args.masks)?;
+    let mask_categories = commands::parse_mask_categories(&args.masks)?;
 
     if let Some(ref loci) = args.known_loci {
         if !loci.exists() {
@@ -159,19 +161,6 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, FavorError> {
     })
 }
 
-fn parse_mask_categories(masks: &[String]) -> Result<Vec<MaskCategory>, FavorError> {
-    masks
-        .iter()
-        .map(|s| {
-            s.parse::<MaskCategory>().map_err(|_| {
-                FavorError::Input(format!(
-                    "Unknown mask '{s}'. Available: coding, noncoding, sliding-window, scang, custom"
-                ))
-            })
-        })
-        .collect()
-}
-
 fn parse_column_map(entries: &[String]) -> Result<std::collections::HashMap<String, String>, FavorError> {
     let mut map = std::collections::HashMap::new();
     for entry in entries {
@@ -203,7 +192,12 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), FavorError
     let sample_names = staar::genotype::read_sample_names(&config.genotypes)?;
     let n_samples = sample_names.len();
 
-    let ann_rows = parquet_row_count(&config.annotations);
+    let ann_rows = parquet_row_count(&config.annotations).unwrap_or_else(|e| {
+        out.warn(&format!(
+            "  dry-run: could not count annotation rows ({e}); estimating with 0"
+        ));
+        0
+    });
     let est_rare = (ann_rows as f64 * 0.02) as u64;
 
     let bytes_per_variant = (n_samples as u64) * 8;
@@ -254,17 +248,19 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), FavorError
     Ok(())
 }
 
-fn parquet_row_count(path: &std::path::Path) -> i64 {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return 0,
-    };
-    let reader = match parquet::file::reader::SerializedFileReader::new(file) {
-        Ok(r) => r,
-        Err(_) => return 0,
-    };
+fn parquet_row_count(path: &std::path::Path) -> Result<i64, String> {
+    // Annotations may be a directory of parquet files (favor annotate output)
+    // or a single .parquet file. For directories we can't cheaply estimate
+    // without scanning all part files, so we report None and let the caller
+    // fall back to a safe default.
+    if path.is_dir() {
+        return Err(format!("{} is a directory; row count not estimated", path.display()));
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let reader = parquet::file::reader::SerializedFileReader::new(file)
+        .map_err(|e| format!("parse parquet metadata for {}: {e}", path.display()))?;
     use parquet::file::reader::FileReader;
-    reader.metadata().file_metadata().num_rows()
+    Ok(reader.metadata().file_metadata().num_rows())
 }
 
 #[cfg(test)]
@@ -273,13 +269,13 @@ mod tests {
 
     #[test]
     fn parse_mask_categories_ok() {
-        let m = parse_mask_categories(&["coding".into(), "noncoding".into()]).unwrap();
+        let m = commands::parse_mask_categories(&["coding".into(), "noncoding".into()]).unwrap();
         assert_eq!(m, vec![MaskCategory::Coding, MaskCategory::Noncoding]);
     }
 
     #[test]
     fn parse_mask_categories_unknown_rejected() {
-        let err = parse_mask_categories(&["bogus".into()]).unwrap_err();
+        let err = commands::parse_mask_categories(&["bogus".into()]).unwrap_err();
         match err {
             FavorError::Input(msg) => assert!(msg.contains("bogus")),
             _ => panic!("expected Input error"),

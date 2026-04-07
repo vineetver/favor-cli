@@ -190,6 +190,36 @@ pub struct RunOutputs {
     pub score_cache_dir: Option<PathBuf>,
     pub results_dir: Option<PathBuf>,
     pub sumstats_dir: Option<PathBuf>,
+    /// Per-stage cache hit/miss decisions in execution order. Operators can
+    /// inspect `run.json` to ask "why did STAAR rebuild the store?" or
+    /// "did the score cache hit?" without grepping stdout logs.
+    #[serde(default)]
+    pub cache_decisions: Vec<CacheDecision>,
+}
+
+/// One cache hit/miss decision the pipeline made.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheDecision {
+    pub artifact: ArtifactKind,
+    pub outcome: CacheOutcome,
+    /// Free-text reason — typically the output of `store::describe_miss`
+    /// or `"cache_key=<hash> matched"` for hits.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    GenotypeStore,
+    ScoreCache,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheOutcome {
+    Hit,
+    Miss,
+    Rebuilt,
 }
 
 impl RunManifest {
@@ -229,23 +259,14 @@ impl RunManifest {
         }
     }
 
-    /// Atomic write to `{output_dir}/run.json` (tmp + rename).
+    /// Atomic write to `{output_dir}/run.json` (tmp + fsync + rename + dir
+    /// fsync). Reuses `store::write_atomic` so manifest, score cache, and
+    /// run.json all share the same durability story.
     pub fn write(&self, output_dir: &Path) -> Result<(), FavorError> {
-        let final_path = output_dir.join("run.json");
-        let tmp_path = output_dir.join("run.json.tmp");
+        let path = output_dir.join("run.json");
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| FavorError::Resource(format!("Serialize run manifest: {e}")))?;
-        std::fs::write(&tmp_path, json).map_err(|e| {
-            FavorError::Resource(format!("Write {}: {e}", tmp_path.display()))
-        })?;
-        std::fs::rename(&tmp_path, &final_path).map_err(|e| {
-            FavorError::Resource(format!(
-                "Rename {} -> {}: {e}",
-                tmp_path.display(),
-                final_path.display()
-            ))
-        })?;
-        Ok(())
+        store::write_atomic(&path, json.as_bytes())
     }
 
     /// Load an existing manifest if one is present and parses cleanly.
@@ -338,6 +359,10 @@ struct PhenoStageOut {
     /// Compact sample list aligned to `pheno_mask` (only samples with both
     /// phenotype and genotype). Used by kinship loaders.
     compact_samples: Vec<String>,
+    /// Genotype-result view rebuilt once and shared with kinship loading.
+    /// Lives here so `stage_fit_null_model` doesn't have to reach back into
+    /// `GenoStoreResult` and reconstruct one of these by hand.
+    genotype_result: staar::genotype::GenotypeResult,
 }
 
 // ---------------------------------------------------------------------------
@@ -525,7 +550,48 @@ impl<'a> StaarPipeline<'a> {
     }
 
     fn stage_ensure_store(&mut self) -> Result<GenoStoreResult, FavorError> {
+        // Probe first so we can record the cache decision in run.json
+        // regardless of whether the store is hit or rebuilt below.
+        let probe_result = if self.config.rebuild_store {
+            self.manifest.outputs.cache_decisions.push(CacheDecision {
+                artifact: ArtifactKind::GenotypeStore,
+                outcome: CacheOutcome::Rebuilt,
+                reason: "rebuild requested by --rebuild-store".into(),
+            });
+            None
+        } else {
+            let probe = store::probe(
+                &self.config.store_dir,
+                &self.config.genotypes,
+                &self.config.annotations,
+            );
+            let decision = if probe.manifest.is_some() {
+                CacheDecision {
+                    artifact: ArtifactKind::GenotypeStore,
+                    outcome: CacheOutcome::Hit,
+                    reason: "content fingerprint matched".into(),
+                }
+            } else {
+                let reason = probe
+                    .miss_reason
+                    .as_ref()
+                    .map(store::describe_miss)
+                    .unwrap_or_else(|| "unknown miss".into());
+                CacheDecision {
+                    artifact: ArtifactKind::GenotypeStore,
+                    outcome: CacheOutcome::Miss,
+                    reason,
+                }
+            };
+            self.manifest.outputs.cache_decisions.push(decision);
+            probe.manifest.is_some().then_some(probe)
+        };
+
         let geno_staging_dir = self.config.output_dir.join(".geno_staging");
+        // We re-probe inside `build_or_load_store`; that's a small redundant
+        // file read but keeps the build_or_load_store API one-call-and-done
+        // for non-pipeline callers (notably the dry-run estimator).
+        let _ = probe_result;
         store::build_or_load_store(
             &self.config.genotypes,
             &self.config.annotations,
@@ -541,20 +607,14 @@ impl<'a> StaarPipeline<'a> {
         &mut self,
         store: &GenoStoreResult,
     ) -> Result<PhenoStageOut, FavorError> {
-        let geno_for_pheno = staar::genotype::GenotypeResult {
-            sample_names: store.sample_names.clone(),
-            output_dir: store
-                .geno_output_dir
-                .clone()
-                .unwrap_or_else(|| store.store_dir.clone()),
-        };
+        let genotype_result = store.to_genotype_result();
         let primary_trait = &self.config.trait_names[0];
 
         let pheno = load_phenotype(
             &store.engine,
             &self.config.phenotype,
             &self.config.covariates,
-            &geno_for_pheno,
+            &genotype_result,
             primary_trait,
             self.config.ancestry_col.as_deref(),
             self.config.ai_base_tests,
@@ -566,7 +626,7 @@ impl<'a> StaarPipeline<'a> {
 
         if let Some(ref loci_path) = self.config.known_loci {
             let x_cond =
-                load_known_loci(&store.engine, &geno_for_pheno, loci_path, pheno.n, self.out)?;
+                load_known_loci(&store.engine, &genotype_result, loci_path, pheno.n, self.out)?;
             x = augment_covariates(&x, &x_cond);
             self.out.status(&format!(
                 "  Conditional: {} known loci added as covariates",
@@ -589,6 +649,7 @@ impl<'a> StaarPipeline<'a> {
             pheno_mask: pheno.pheno_mask,
             ancestry: pheno.ancestry,
             compact_samples,
+            genotype_result,
         })
     }
 
@@ -597,7 +658,7 @@ impl<'a> StaarPipeline<'a> {
         pheno: &PhenoStageOut,
         store: &GenoStoreResult,
     ) -> Result<NullModel, FavorError> {
-        self.out.status("Step 2/4: Fitting null model...");
+        self.out.status("Fitting null model...");
 
         let kind = self.config.null_model_kind(pheno.trait_type);
         match kind {
@@ -622,13 +683,7 @@ impl<'a> StaarPipeline<'a> {
                         &store.engine,
                         &self.config.phenotype,
                         col,
-                        &staar::genotype::GenotypeResult {
-                            sample_names: store.sample_names.clone(),
-                            output_dir: store
-                                .geno_output_dir
-                                .clone()
-                                .unwrap_or_else(|| store.store_dir.clone()),
-                        },
+                        &pheno.genotype_result,
                         &pheno.pheno_mask,
                         &self.config.column_map,
                         self.out,
@@ -727,11 +782,22 @@ impl<'a> StaarPipeline<'a> {
 
         if score_cache::probe(&store.store_dir, &store.manifest, &key) {
             self.out.status("  Score cache: hit (reusing cached U/K)");
+            self.manifest.outputs.cache_decisions.push(CacheDecision {
+                artifact: ArtifactKind::ScoreCache,
+                outcome: CacheOutcome::Hit,
+                reason: format!("cache_key={key} matched"),
+            });
             return Ok(dir);
         }
 
+        self.manifest.outputs.cache_decisions.push(CacheDecision {
+            artifact: ArtifactKind::ScoreCache,
+            outcome: CacheOutcome::Miss,
+            reason: format!("no valid scores.bin for cache_key={key}"),
+        });
+
         self.out
-            .status("Step 2b/4: Building score cache (all U/K, no MAF filter)...");
+            .status("Building score cache (all U/K, no MAF filter)...");
         std::fs::create_dir_all(&dir).map_err(|e| {
             FavorError::Resource(format!("Cannot create score cache directory '{}': {e}", dir.display()))
         })?;
@@ -920,6 +986,30 @@ mod tests {
         c.kinship.push(PathBuf::from("/no/such/k.tsv"));
         assert_eq!(c.null_model_kind(TraitType::Continuous), NullModelKind::KinshipReml);
         assert_eq!(c.null_model_kind(TraitType::Binary), NullModelKind::KinshipPql);
+    }
+
+    #[test]
+    fn cache_decisions_round_trip_through_run_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = RunManifest::new(&dummy_config());
+        m.outputs.cache_decisions.push(CacheDecision {
+            artifact: ArtifactKind::GenotypeStore,
+            outcome: CacheOutcome::Miss,
+            reason: "no manifest.json on disk".into(),
+        });
+        m.outputs.cache_decisions.push(CacheDecision {
+            artifact: ArtifactKind::ScoreCache,
+            outcome: CacheOutcome::Hit,
+            reason: "cache_key=abc matched".into(),
+        });
+        m.write(dir.path()).unwrap();
+
+        let loaded = RunManifest::probe(dir.path()).unwrap();
+        assert_eq!(loaded.outputs.cache_decisions.len(), 2);
+        assert_eq!(loaded.outputs.cache_decisions[0].outcome, CacheOutcome::Miss);
+        assert_eq!(loaded.outputs.cache_decisions[0].artifact, ArtifactKind::GenotypeStore);
+        assert_eq!(loaded.outputs.cache_decisions[1].outcome, CacheOutcome::Hit);
+        assert_eq!(loaded.outputs.cache_decisions[1].artifact, ArtifactKind::ScoreCache);
     }
 
     #[test]

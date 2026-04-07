@@ -122,7 +122,7 @@ pub fn load_phenotype(
     column_map: &HashMap<String, String>,
     out: &dyn Output,
 ) -> Result<PhenotypeData, FavorError> {
-    out.status("Step 3/6: Loading phenotype...");
+    out.status("Loading phenotype...");
 
     engine.register_csv("_pheno", phenotype, b'\t')?;
     let pheno_cols = engine.table_columns("_pheno")?;
