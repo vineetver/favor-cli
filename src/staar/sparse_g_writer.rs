@@ -190,14 +190,12 @@ pub fn build_chromosome(
     }
     let _ = engine.execute("DROP TABLE IF EXISTS _geno_carrier");
 
-    // ── Write sparse_g.bin ────────────────────────────────────────────────
-
     let sparse_g_path = chrom_dir.join("sparse_g.bin");
     let file = File::create(&sparse_g_path)
         .map_err(|e| FavorError::Resource(format!("Create sparse_g.bin: {e}")))?;
     let mut w = BufWriter::with_capacity(4 * 1024 * 1024, file);
 
-    // Placeholder header — rewritten at end with correct totals
+    // Header is rewritten at the end with correct totals once data is laid out.
     let placeholder = SparseGHeader::new(n_samples as u32, n_variants as u32, 0, 0);
     placeholder.write_to(&mut w)?;
 
@@ -210,7 +208,6 @@ pub fn build_chromosome(
     let mut data_offset: u64 = 0;
     let mut total_carriers: u64 = 0;
 
-    // Write carrier data in variant_vcf order (0, 1, 2, ...)
     for uv in &unique_variants {
         offsets.push(data_offset);
 
@@ -236,7 +233,6 @@ pub fn build_chromosome(
         total_carriers += n_carriers as u64;
     }
 
-    // Write offsets table
     let offsets_start = SPARSE_G_HEADER_SIZE as u64 + data_offset;
     for &off in &offsets {
         w.write_all(&off.to_le_bytes())?;
@@ -252,8 +248,6 @@ pub fn build_chromosome(
     );
     final_header.write_to(&mut w)?;
     w.flush()?;
-
-    // ── Write membership.parquet ──────────────────────────────────────────
 
     let mut mem_variant_vcf = UInt32Builder::new();
     let mut mem_gene = StringBuilder::new();
@@ -281,9 +275,6 @@ pub fn build_chromosome(
     .map_err(|e| FavorError::Resource(format!("membership batch: {e}")))?;
 
     write_parquet(chrom_dir, "membership.parquet", mem_schema, &mem_batch)?;
-
-    // ── Write variants.parquet ────────────────────────────────────────────
-    // Query full metadata for these variants (already sorted by pos, ref, alt)
 
     let full_batches = engine.collect(&column::metadata_select_sql(chrom))?;
     write_variants_parquet(chrom_dir, &full_batches, chrom, &unique_variants)?;
@@ -332,8 +323,8 @@ fn write_variants_parquet(
 ) -> Result<(), FavorError> {
     use arrow::array::{BooleanArray, Float32Array};
 
-    // Build a lookup: (pos, ref, alt) -> first batch row for metadata extraction
-    // The full query is already sorted by (pos, ref, alt).
+    // (pos, ref, alt) → first batch row. The query is already sorted by
+    // (pos, ref, alt) so the first hit is the canonical row.
     struct MetaRow {
         maf: f64,
         #[allow(dead_code)]

@@ -187,7 +187,6 @@ fn run_enrichment(
         .collect::<Vec<_>>()
         .join(", ");
 
-    // Write annotated pass-through
     engine.register_parquet_dir("_input", annotated.root())?;
     let annotated_out = output_dir.join("annotated.parquet");
     engine.execute(&format!(

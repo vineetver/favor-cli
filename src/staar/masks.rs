@@ -318,8 +318,6 @@ fn v(
 mod tests {
     use super::*;
 
-    // -- coding masks --
-
     #[test]
     fn stopgain_is_plof_and_ptv() {
         let var = v("exonic", "stopgain", 23.7, 0.0, false, false, false, false);
@@ -437,8 +435,6 @@ mod tests {
         assert!(!is_ptv(&var));
     }
 
-    // -- noncoding masks --
-
     #[test]
     fn upstream_matches() {
         let var = v("upstream", "", 5.6, 0.0, false, false, false, false);
@@ -527,8 +523,6 @@ mod tests {
         assert!(is_ncrna(&var));
     }
 
-    // -- negative cases: intronic should match nothing --
-
     #[test]
     fn intronic_matches_no_mask() {
         let var = v("intronic", "", 13.9, 0.0, false, false, false, false);
@@ -546,8 +540,6 @@ mod tests {
         assert!(!is_enhancer_dhs(&var));
         assert!(!is_ncrna(&var));
     }
-
-    // -- mask group building --
 
     #[test]
     fn build_coding_masks_groups_by_gene() {
@@ -611,8 +603,6 @@ mod tests {
         assert_eq!(windows[1].variant_indices.len(), 2);
     }
 
-    // -- VEP-style consequences (forward compat) --
-
     #[test]
     fn vep_missense_variant() {
         let var = v(
@@ -661,8 +651,6 @@ mod tests {
         assert!(is_ptv_ds(&var));
         assert!(!is_ptv(&var));
     }
-
-    // -- SCANG tests --
 
     fn var_at(pos: u32) -> AnnotatedVariant {
         use crate::types::{

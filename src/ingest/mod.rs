@@ -354,7 +354,6 @@ pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
             let alt_col = find_col("alt");
             let rsid_col = find_col("rsid");
 
-            // Determine join key from what columns are available
             let join_key =
                 if chr_col.is_some() && pos_col.is_some() && ref_col.is_some() && alt_col.is_some()
                 {
@@ -364,15 +363,14 @@ pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
                 } else if chr_col.is_some() && pos_col.is_some() {
                     JoinKey::ChromPos
                 } else {
-                    // Check if there's a composite variant_id column (chr:pos:ref:alt)
                     let has_variant_id = raw_columns.iter().any(|c| {
                         let lower = c.to_lowercase();
                         lower == "variant_id" || lower == "varid" || lower == "variant"
                     });
                     if has_variant_id {
-                        JoinKey::ChromPosRefAlt // will be parsed from composite ID
+                        JoinKey::ChromPosRefAlt
                     } else {
-                        JoinKey::Rsid // fallback — hopefully rsid exists
+                        JoinKey::Rsid
                     }
                 };
 
@@ -384,8 +382,8 @@ pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
                 ambiguous,
                 unmapped,
                 join_key,
-                build_guess: BuildGuess::Unknown, // filled in by build_detect
-                coord_base: CoordBase::Unknown,   // filled in by build_detect
+                build_guess: BuildGuess::Unknown,
+                coord_base: CoordBase::Unknown,
                 chr_col,
                 pos_col,
                 ref_col,
@@ -396,12 +394,9 @@ pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
     }
 }
 
-// THE single source of truth for GWAS column name normalization.
-
-/// (lowercased_input_name, canonical_output_name)
-///
-/// When a raw column name (lowercased) matches the left side, it maps to the right side.
-/// Ambiguities (e.g., A1 could be effect or other allele) are detected separately.
+/// Single source of truth for GWAS column name normalization.
+/// `(lowercased_input_name, canonical_output_name)`. Ambiguities (e.g.
+/// `A1` as effect or other allele) are detected separately.
 static ALIASES: &[(&str, &str)] = &[
     ("chromosome", "chromosome"),
     ("chr", "chromosome"),

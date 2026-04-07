@@ -271,7 +271,6 @@ pub fn setup(
         tui::select_environment().map_err(|e| FavorError::Internal(e.into()))?
     };
 
-    // Validate HPC choice: check srun/sbatch availability
     if environment == Some(Environment::Hpc) {
         let has_srun = std::process::Command::new("which")
             .arg("srun")
@@ -297,7 +296,6 @@ pub fn setup(
     // 5. Memory budget selection
     let res_detect = Resources::detect();
     let memory_budget = if let Some(budget) = &cli_memory_budget {
-        // Validate the budget string
         if ResourceConfig::parse_memory_bytes(budget).is_none() {
             return Err(FavorError::Input(format!(
                 "Cannot parse memory budget '{budget}'. Use format like '16GB', '64G', '8192MB'."
@@ -358,7 +356,6 @@ pub fn setup(
     // 7. Save config — preserve existing resource customizations, overlay new ones
     let mut existing_resources = Config::load().map(|c| c.resources).unwrap_or_default();
 
-    // Update environment and budget from this setup run
     if environment.is_some() {
         existing_resources.environment = environment;
     }
@@ -426,7 +423,6 @@ pub fn uninstall(out: &dyn Output) -> Result<(), FavorError> {
     out.status(&format!("  Config: {}", config_dir.display()));
     out.warn("Data packs at your configured root directory will NOT be deleted.");
 
-    // Remove config directory
     if config_dir.exists() {
         std::fs::remove_dir_all(&config_dir).map_err(|e| {
             FavorError::Resource(format!(
@@ -437,7 +433,6 @@ pub fn uninstall(out: &dyn Output) -> Result<(), FavorError> {
         out.status("  Removed config directory");
     }
 
-    // Remove PATH entry from shell rc
     let home = dirs::home_dir().unwrap_or_default();
     let install_dir = binary.parent().unwrap_or(std::path::Path::new(""));
     let install_str = install_dir.to_string_lossy();

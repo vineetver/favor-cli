@@ -1,3 +1,8 @@
+//! MultiSTAAR scaffolding. `run_multi_staar` is implemented and matches
+//! the reference R package, but no pipeline stage calls it yet — the CLI
+//! accepts comma-separated `--trait-name` and the pipeline only runs
+//! `[0]`. A future `RunMode::MultiTrait` will fan out to here.
+
 use faer::Mat;
 
 use super::model::NullModel;

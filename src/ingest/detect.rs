@@ -32,13 +32,11 @@ pub fn detect_build_and_coords(
         Err(_) => return Ok(()),
     };
 
-    // Register the input file as a table
     let delimiter = match analysis.delimiter {
         Some(Delimiter::Tab) => b'\t',
         Some(Delimiter::Comma) => b',',
         Some(Delimiter::Space) => b' ',
         None => {
-            // Parquet input — register as parquet
             engine.register_parquet_file("_ingest_input", input_path)?;
             return probe_all_chroms(engine, &chr_col, &pos_col, &ann_db, analysis);
         }
@@ -95,11 +93,9 @@ fn probe_chromosome(
     chrom: &str,
     annotation_path: &std::path::Path,
 ) -> Result<Option<(f64, f64)>, FavorError> {
-    // Register annotation parquet for this chromosome
     let ann_table = format!("_ann_probe_{chrom}");
     engine.register_parquet_file(&ann_table, annotation_path)?;
 
-    // Sample 100 positions from input for this chromosome
     engine.execute(&format!(
         "CREATE OR REPLACE VIEW _ingest_probe AS \
          SELECT CAST(\"{pos_col}\" AS INT) AS pos \
@@ -113,13 +109,12 @@ fn probe_chromosome(
         return Ok(None);
     }
 
-    // 1-based match: positions that exist in annotations
     let hits_1 = engine.query_scalar(&format!(
         "SELECT COUNT(*) FROM _ingest_probe s \
          WHERE EXISTS (SELECT 1 FROM {ann_table} a WHERE a.position = s.pos)"
     ))?;
 
-    // 0-based match: pos + 1
+    // 0-based input matches if pos + 1 hits the annotation.
     let hits_0 = engine.query_scalar(&format!(
         "SELECT COUNT(*) FROM _ingest_probe s \
          WHERE EXISTS (SELECT 1 FROM {ann_table} a WHERE a.position = s.pos + 1)"

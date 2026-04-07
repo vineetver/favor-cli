@@ -222,10 +222,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // PHRED to annotation rank
-    // =========================================================================
-
     #[test]
     fn phred_to_rank_matches_r() {
         let gt = load();
@@ -243,10 +239,6 @@ mod tests {
             );
         }
     }
-
-    // =========================================================================
-    // Full STAAR test (continuous trait)
-    // =========================================================================
 
     #[test]
     fn staar_continuous_matches_r() {
@@ -303,22 +295,14 @@ mod tests {
         assert!(result.staar_o.is_finite(), "STAAR-O should be finite");
     }
 
-    // =========================================================================
-    // SPA (saddlepoint approximation for binary traits)
-    // =========================================================================
-
     #[test]
     fn spa_binary_loads() {
-        // Verify the SPA binary section loads from R output.
-        // Full SPA validation requires a carefully constructed binary dataset
-        // where R's STAAR_Binary_SPA returns non-NULL for all tests.
+        // Full SPA validation needs a hand-built binary dataset where R's
+        // STAAR_Binary_SPA returns non-NULL for every test; until then we
+        // just confirm the section deserializes.
         let gt = load();
         assert!(!gt.spa_binary.is_null(), "SPA binary section should exist");
     }
-
-    // =========================================================================
-    // Null model — continuous
-    // =========================================================================
 
     #[test]
     fn null_model_continuous_matches_r() {
@@ -340,10 +324,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Null model — binary (IRLS + W-weighted kernel)
-    // =========================================================================
-
     #[test]
     fn null_model_binary_matches_r() {
         let gt = load();
@@ -353,7 +333,6 @@ mod tests {
 
         let model = model::fit_logistic(&y, &x, 25);
 
-        // Check fitted values and working weights
         let mu = model.fitted_values.as_ref().unwrap();
         let ww = model.working_weights.as_ref().unwrap();
         for i in 0..5 {
@@ -372,7 +351,7 @@ mod tests {
             );
         }
 
-        // Check W-weighted kernel: K = G'WG - G'WX(X'WX)^-1 X'WG
+        // K = G'WG − G'WX(X'WX)⁻¹X'WG
         let g = vecs_to_mat(&nm.g);
         let k = model.compute_kernel(&g);
         let expected_k = vecs_to_mat(&nm.expected_k_binary);
@@ -388,10 +367,6 @@ mod tests {
             }
         }
     }
-
-    // =========================================================================
-    // MultiSTAAR — per-trait STAAR-O from R, our Cauchy combine must match
-    // =========================================================================
 
     #[test]
     fn multi_staar_per_trait_from_r() {
@@ -425,10 +400,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // SCANG — window construction parameters match R
-    // =========================================================================
-
     #[test]
     fn scang_params_from_r() {
         let gt = load();
@@ -450,10 +421,6 @@ mod tests {
         // With random data, 0 significant windows is expected
         assert_eq!(sc.n_windows_found, 0);
     }
-
-    // =========================================================================
-    // MetaSTAAR — U/sigma2 and K/sigma2 scaling consistency
-    // =========================================================================
 
     #[test]
     fn meta_staar_scaling_from_r() {

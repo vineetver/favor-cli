@@ -351,7 +351,6 @@ fn check_cross_layer_consistency(sg: &SparseG, vi: &VariantIndex, chrom: &str) -
         let entry = vi.get(v);
         let cl = sg.load_variant(v);
 
-        // Check vid matches expected format from metadata
         let expected_vid =
             crate::types::format_vid(chrom, entry.position, &entry.ref_allele, &entry.alt_allele);
         if *entry.vid != *expected_vid {

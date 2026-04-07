@@ -525,7 +525,6 @@ pub fn fit_logistic(y: &Mat<f64>, x: &Mat<f64>, max_iter: usize) -> NullModel {
     let k = x.ncols();
     let max_iter = if max_iter == 0 { 25 } else { max_iter };
 
-    // Initialize beta to zeros
     let mut beta = Mat::zeros(k, 1);
 
     for _ in 0..max_iter {
@@ -558,7 +557,6 @@ pub fn fit_logistic(y: &Mat<f64>, x: &Mat<f64>, max_iter: usize) -> NullModel {
 
         let new_beta: Mat<f64> = xtwx.col_piv_qr().solve(&xtwy);
 
-        // Check convergence
         let mut max_diff = 0.0f64;
         for j in 0..k {
             let diff: f64 = new_beta[(j, 0)] - beta[(j, 0)];
