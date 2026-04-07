@@ -45,17 +45,12 @@ use crate::staar::kinship::types::{
 /// and is the default. `Hutchinson` is the stochastic fallback, kept
 /// available for the regression test that confirms it still produces
 /// valid-within-tolerance estimates.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum SparseSolverKind {
+    #[default]
     Takahashi,
     Hutchinson,
-}
-
-impl Default for SparseSolverKind {
-    fn default() -> Self {
-        Self::Takahashi
-    }
 }
 
 /// Owned wrapper around the faer sparse Cholesky factor of Σ. Cloned into
@@ -279,6 +274,7 @@ pub fn trace_p_k_sparse_takahashi(
 /// `hutchinson_probes` is the M parameter for the stochastic Hutchinson
 /// estimator. Ignored when `kind == Takahashi`. `None` for Hutchinson
 /// uses [`DEFAULT_HUTCHINSON_PROBES`].
+#[allow(clippy::too_many_arguments)]
 pub fn fit_reml_sparse(
     y: &Mat<f64>,
     x: &Mat<f64>,

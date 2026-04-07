@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 //! Cached Σ pattern + symbolic Cholesky factor for the sparse path.
 //!
 //! The sparsity pattern of `Σ = diag(τ_g/W) + Σ_l τ_l · K_l` is constant

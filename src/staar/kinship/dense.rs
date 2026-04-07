@@ -44,9 +44,9 @@ pub fn assemble_sigma(
     debug_assert_eq!(tau.n_group(), groups.n_groups());
 
     let mut sigma = Mat::<f64>::zeros(n, n);
-    for li in 0..kinships.len() {
+    for (li, kin) in kinships.iter().enumerate() {
         let tau_l = tau.kinship(li);
-        let k = kinships[li]
+        let k = kin
             .as_dense()
             .expect("dense path called with non-dense kinship — fit_reml dispatch bug");
         for r in 0..n {
