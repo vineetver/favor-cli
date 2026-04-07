@@ -1,4 +1,4 @@
-//! `favor staar` command — thin orchestrator.
+//! `cohort staar` command — thin orchestrator.
 //!
 //! Validates `StaarArgs`, builds a typed `StaarConfig`, and delegates to
 //! `StaarPipeline::run`. Replaces the previous 20-positional-arg entry point.
@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::commands;
 use crate::data::VariantSet;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::masks::ScangParams;
 use crate::staar::pipeline::{StaarConfig, StaarPipeline};
@@ -20,7 +20,7 @@ use crate::staar::MaskCategory;
 
 const GB: u64 = 1024 * 1024 * 1024;
 
-/// Raw, unvalidated CLI arguments for `favor staar`.
+/// Raw, unvalidated CLI arguments for `cohort staar`.
 ///
 /// Mirrors the `Command::Staar` variant in `cli.rs`. Carrying a single
 /// struct around lets each layer pass arguments by name, kills the 20-arg
@@ -51,7 +51,7 @@ pub struct StaarArgs {
     pub output_path: Option<PathBuf>,
 }
 
-pub fn run(args: StaarArgs, out: &dyn Output, dry_run: bool) -> Result<(), FavorError> {
+pub fn run(args: StaarArgs, out: &dyn Output, dry_run: bool) -> Result<(), CohortError> {
     let config = build_config(args)?;
 
     if dry_run {
@@ -64,43 +64,43 @@ pub fn run(args: StaarArgs, out: &dyn Output, dry_run: bool) -> Result<(), Favor
 
 /// Validate `StaarArgs` and produce a `StaarConfig`. All input checks live
 /// here so the pipeline never sees a half-validated config.
-fn build_config(args: StaarArgs) -> Result<StaarConfig, FavorError> {
+fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
     if !args.genotypes.exists() {
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "Genotype VCF not found: '{}'. Check the path to your multi-sample VCF.",
             args.genotypes.display()
         )));
     }
     if !args.phenotype.exists() {
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "Phenotype file not found: '{}'. Provide a tab-delimited file with sample IDs, traits, and covariates.",
             args.phenotype.display()
         )));
     }
     if args.maf_cutoff <= 0.0 || args.maf_cutoff >= 0.5 {
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "MAF cutoff must be in (0, 0.5), got {}",
             args.maf_cutoff
         )));
     }
     if args.trait_names.is_empty() {
-        return Err(FavorError::Input(
+        return Err(CohortError::Input(
             "At least one --trait-name is required.".into(),
         ));
     }
 
     let annotations = args.annotations.ok_or_else(|| {
-        FavorError::Input("STAAR requires --annotations <path> from `favor annotate`.".into())
+        CohortError::Input("STAAR requires --annotations <path> from `cohort annotate`.".into())
     })?;
     if !annotations.exists() {
-        return Err(FavorError::Input(format!(
-            "Annotations not found: {}. Run `favor annotate` first.",
+        return Err(CohortError::Input(format!(
+            "Annotations not found: {}. Run `cohort annotate` first.",
             annotations.display()
         )));
     }
     let ann_vs = VariantSet::open(&annotations).map_err(|e| {
-        FavorError::Input(format!(
-            "'{}' is not a valid variant set ({}). Run `favor annotate` to produce one.",
+        CohortError::Input(format!(
+            "'{}' is not a valid variant set ({}). Run `cohort annotate` to produce one.",
             annotations.display(),
             e,
         ))
@@ -111,7 +111,7 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, FavorError> {
 
     if let Some(ref loci) = args.known_loci {
         if !loci.exists() {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "Known loci file not found: {}",
                 loci.display()
             )));
@@ -120,7 +120,7 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, FavorError> {
 
     for kp in &args.kinship {
         if !kp.exists() {
-            return Err(FavorError::DataMissing(format!(
+            return Err(CohortError::DataMissing(format!(
                 "Kinship file not found: '{}'",
                 kp.display()
             )));
@@ -161,11 +161,11 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, FavorError> {
     })
 }
 
-fn parse_column_map(entries: &[String]) -> Result<std::collections::HashMap<String, String>, FavorError> {
+fn parse_column_map(entries: &[String]) -> Result<std::collections::HashMap<String, String>, CohortError> {
     let mut map = std::collections::HashMap::new();
     for entry in entries {
         let (k, v) = entry.split_once('=').ok_or_else(|| {
-            FavorError::Input(format!("Invalid --column-map entry '{entry}'. Expected key=value."))
+            CohortError::Input(format!("Invalid --column-map entry '{entry}'. Expected key=value."))
         })?;
         map.insert(k.trim().to_string(), v.trim().to_string());
     }
@@ -188,7 +188,7 @@ fn blank_to_none(s: Option<String>) -> Option<String> {
     })
 }
 
-fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), FavorError> {
+fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), CohortError> {
     let sample_names = staar::genotype::read_sample_names(&config.genotypes)?;
     let n_samples = sample_names.len();
 
@@ -249,7 +249,7 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), FavorError
 }
 
 fn parquet_row_count(path: &std::path::Path) -> Result<i64, String> {
-    // Annotations may be a directory of parquet files (favor annotate output)
+    // Annotations may be a directory of parquet files (cohort annotate output)
     // or a single .parquet file. For directories we can't cheaply estimate
     // without scanning all part files, so we report None and let the caller
     // fall back to a safe default.
@@ -277,7 +277,7 @@ mod tests {
     fn parse_mask_categories_unknown_rejected() {
         let err = commands::parse_mask_categories(&["bogus".into()]).unwrap_err();
         match err {
-            FavorError::Input(msg) => assert!(msg.contains("bogus")),
+            CohortError::Input(msg) => assert!(msg.contains("bogus")),
             _ => panic!("expected Input error"),
         }
     }

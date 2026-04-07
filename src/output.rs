@@ -7,7 +7,7 @@ use std::time::Duration;
 use clap::ValueEnum;
 use serde_json::json;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 
 #[derive(Clone, Debug, ValueEnum)]
 pub enum Format {
@@ -24,7 +24,7 @@ pub enum OutputMode {
 
 impl OutputMode {
     pub fn detect(format: &Format) -> Self {
-        if std::env::var("FAVOR_MACHINE").is_ok_and(|v| !v.is_empty()) {
+        if std::env::var("COHORT_MACHINE").is_ok_and(|v| !v.is_empty()) {
             return Self::Machine;
         }
         match format {
@@ -68,7 +68,7 @@ pub trait Output {
     fn status(&self, msg: &str);
     fn success(&self, msg: &str);
     fn warn(&self, msg: &str);
-    fn error(&self, err: &FavorError);
+    fn error(&self, err: &CohortError);
     fn result_json(&self, data: &serde_json::Value);
     fn table(&self, headers: &[&str], rows: &[Vec<String>]);
     /// `total == 0` is a spinner (unknown length). Machine mode is a no-op.
@@ -97,7 +97,7 @@ impl Output for HumanOutput {
         eprintln!("  ! {msg}");
     }
 
-    fn error(&self, err: &FavorError) {
+    fn error(&self, err: &CohortError) {
         eprintln!("  x {err}");
     }
 
@@ -181,7 +181,7 @@ impl Output for MachineOutput {
         eprintln!("{}", json!({"level": "warn", "message": msg}));
     }
 
-    fn error(&self, err: &FavorError) {
+    fn error(&self, err: &CohortError) {
         eprintln!(
             "{}",
             json!({"error": err.code_name(), "message": err.to_string(), "exit_code": err.exit_code()})

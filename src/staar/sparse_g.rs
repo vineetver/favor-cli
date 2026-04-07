@@ -13,7 +13,7 @@ use std::path::Path;
 
 use memmap2::Mmap;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::staar::carrier::encoding::*;
 use crate::staar::carrier::reader::{CarrierEntry, CarrierList};
 
@@ -34,24 +34,24 @@ pub struct SparseG {
 
 impl SparseG {
     /// Open a sparse genotype matrix for one chromosome.
-    pub fn open(chrom_dir: &Path) -> Result<Self, FavorError> {
+    pub fn open(chrom_dir: &Path) -> Result<Self, CohortError> {
         let path = chrom_dir.join("sparse_g.bin");
         let file = File::open(&path)
-            .map_err(|e| FavorError::Resource(format!("Open {}: {e}", path.display())))?;
+            .map_err(|e| CohortError::Resource(format!("Open {}: {e}", path.display())))?;
         let mmap = unsafe {
             Mmap::map(&file)
-                .map_err(|e| FavorError::Resource(format!("mmap {}: {e}", path.display())))?
+                .map_err(|e| CohortError::Resource(format!("mmap {}: {e}", path.display())))?
         };
 
         let header = SparseGHeader::read_from(&mmap)
-            .map_err(|e| FavorError::Resource(format!("sparse_g.bin: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("sparse_g.bin: {e}")))?;
 
         let n_variants = header.n_variants as usize;
         let offsets_start = header.offsets_start as usize;
         let offsets_bytes = n_variants * 8;
 
         if mmap.len() < offsets_start + offsets_bytes {
-            return Err(FavorError::Resource(format!(
+            return Err(CohortError::Resource(format!(
                 "sparse_g.bin truncated: {} bytes < expected {} (offsets table)",
                 mmap.len(),
                 offsets_start + offsets_bytes,

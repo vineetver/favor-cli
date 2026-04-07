@@ -15,7 +15,7 @@ use std::path::Path;
 use faer::Mat;
 use rayon::prelude::*;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::carrier::sparse_score;
 use crate::staar::carrier::{AnalysisVectors, CarrierList, VariantIndex, VariantIndexEntry};
@@ -118,7 +118,7 @@ impl<'a> ChromCtx<'a> {
         store_dir: &Path,
         name: &'a str,
         cache_dir: &Path,
-    ) -> Result<Self, FavorError> {
+    ) -> Result<Self, CohortError> {
         let chrom_dir = store_dir.join(format!("chromosome={name}"));
         let sparse_g = SparseG::open(&chrom_dir)?;
         let variant_index = VariantIndex::load(&chrom_dir)?;
@@ -143,7 +143,7 @@ pub fn run_score_tests(
     analysis: &AnalysisVectors,
     ctx: &ScoringContext,
     out: &dyn Output,
-) -> Result<(ResultSet, Vec<(usize, f64)>), FavorError> {
+) -> Result<(ResultSet, Vec<(usize, f64)>), CohortError> {
     out.status("Running score tests (carrier-indexed sparse)...");
 
     let mut plan = MaskPlan::build(&config.mask_categories, out);
@@ -216,14 +216,14 @@ fn score_chrom_genes(
     ctx: &ScoringContext,
     results: &mut ResultSet,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let gene_names: Vec<&String> = chrom_ctx.cache.gene_blocks.keys().collect();
     let mode = ctx.scoring_mode;
     let maf_cutoff = config.maf_cutoff;
 
     let per_gene: Vec<Vec<(usize, GeneResult)>> = gene_names
         .par_iter()
-        .map(|gene_name| -> Result<Option<Vec<(usize, GeneResult)>>, FavorError> {
+        .map(|gene_name| -> Result<Option<Vec<(usize, GeneResult)>>, CohortError> {
             let Some(block) = chrom_ctx.cache.gene_blocks.get(*gene_name) else {
                 return Ok(None);
             };
@@ -277,7 +277,7 @@ fn compile_gene_inputs(
     analysis: &AnalysisVectors,
     maf_cutoff: f64,
     mode: ScoringMode,
-) -> Result<Option<GeneInputs>, FavorError> {
+) -> Result<Option<GeneInputs>, CohortError> {
     if block.m() < 2 {
         return Ok(None);
     }
@@ -347,7 +347,7 @@ fn score_gene_masks(
     chrom_ctx: &ChromCtx<'_>,
     analysis: &AnalysisVectors,
     ctx: &ScoringContext,
-) -> Result<Option<Vec<(usize, GeneResult)>>, FavorError> {
+) -> Result<Option<Vec<(usize, GeneResult)>>, CohortError> {
     let all_entries = chrom_ctx.variant_index.all_entries();
     let n_vcf = analysis.n_vcf_total;
 

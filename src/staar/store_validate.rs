@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::staar::carrier::reader::VariantIndex;
 use crate::staar::sparse_g::SparseG;
 use crate::staar::store::StoreManifest;
@@ -27,7 +27,7 @@ pub struct CheckResult {
 pub fn validate_store(
     store_dir: &Path,
     manifest: &StoreManifest,
-) -> Result<Vec<CheckResult>, FavorError> {
+) -> Result<Vec<CheckResult>, CohortError> {
     let mut results = Vec::new();
 
     for ci in &manifest.chromosomes {

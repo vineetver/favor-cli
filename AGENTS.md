@@ -1,10 +1,10 @@
-# FAVOR CLI — Agent Guide
+# COHORT CLI — Agent Guide
 
 Machine interface: always use `--format json`. Use `--dry-run` before committing resources.
 
 ## What this tool does
 
-FAVOR is an end-to-end genomic variant analysis toolkit. It takes called variants,
+COHORT is an end-to-end genomic variant analysis toolkit. It takes called variants,
 annotates them with functional predictions, overlays tissue-specific regulatory data,
 runs association testing (rare-variant and common-variant), and interprets results
 down to target gene, mechanism, and cell type.
@@ -30,13 +30,13 @@ down to target gene, mechanism, and cell type.
 
 ## Memory
 
-FAVOR adapts to available memory. DataFusion commands (annotate, enrich, ingest) work with any
+COHORT adapts to available memory. DataFusion commands (annotate, enrich, ingest) work with any
 allocation. STAAR needs the genotype matrix in RAM per-chromosome — use `--dry-run` first:
 
 ```bash
-favor staar --dry-run --format json ...
+cohort staar --dry-run --format json ...
 # → {"memory": {"recommended": "64G"}}
-srun --mem=64G -c 8 favor staar --format json ...
+srun --mem=64G -c 8 cohort staar --format json ...
 ```
 
 ## Output conventions

@@ -3,8 +3,8 @@
 ## Build
 
 ```bash
-git clone https://github.com/vineetver/favor-cli.git
-cd favor-cli
+git clone https://github.com/vineetver/cohort-cli.git
+cd cohort-cli
 cargo check           # type-check (~10s)
 cargo test            # run test suite
 cargo build --release # full build (~5 min, pulls DataFusion + Arrow)
@@ -43,7 +43,7 @@ src/
   column.rs            Col enum, single source of truth for all column names
   engine.rs            DataFusion query engine
   types.rs             Domain types: Chromosome, Consequence, AnnotatedVariant
-  error.rs             FavorError with exit codes and recovery hints
+  error.rs             CohortError with exit codes and recovery hints
   output.rs            Output trait: human (colored) + machine (JSON)
 
   commands/            One file per CLI command (thin dispatch)
@@ -67,7 +67,7 @@ One entry in `PACKS` in `src/data/mod.rs`. Everything else picks it up.
 
 ## Bugs
 
-Use the [bug report template](https://github.com/vineetver/favor-cli/issues/new?template=bug_report.yml). Include `favor --version`, platform, and memory allocation.
+Use the [bug report template](https://github.com/vineetver/cohort-cli/issues/new?template=bug_report.yml). Include `cohort --version`, platform, and memory allocation.
 
 ## License
 

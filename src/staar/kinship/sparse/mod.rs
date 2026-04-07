@@ -29,7 +29,7 @@ pub use hutchinson::{
 use faer::sparse::linalg::solvers::Llt;
 use faer::Mat;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::staar::kinship::reml::{
     run_reml, weights_or_ones, SigmaSolver, SolverBuilder, SparseHutchinsonState,
     SparseTakahashiState,
@@ -73,7 +73,7 @@ pub struct HutchinsonBuilder<'a> {
 }
 
 impl<'a> SolverBuilder for HutchinsonBuilder<'a> {
-    fn build(&self, tau: &VarianceComponents) -> Result<SigmaSolver, FavorError> {
+    fn build(&self, tau: &VarianceComponents) -> Result<SigmaSolver, CohortError> {
         let factor = self.assembler.factor(
             tau,
             self.groups,
@@ -111,7 +111,7 @@ pub struct TakahashiBuilder<'a> {
 }
 
 impl<'a> SolverBuilder for TakahashiBuilder<'a> {
-    fn build(&self, tau: &VarianceComponents) -> Result<SigmaSolver, FavorError> {
+    fn build(&self, tau: &VarianceComponents) -> Result<SigmaSolver, CohortError> {
         // Assemble the upper-triangle-only view of Σ at the current τ
         // and hand it to the simplicial Cholesky API. See the comment
         // in `Assembler::new` for why we cannot use the full pattern
@@ -133,7 +133,7 @@ impl<'a> SolverBuilder for TakahashiBuilder<'a> {
         &self,
         _solver: SigmaSolver,
         tau: &VarianceComponents,
-    ) -> Result<KinshipInverse, FavorError> {
+    ) -> Result<KinshipInverse, CohortError> {
         // Drop the simplicial state and refactor once via the high-level
         // path so the score test gets a `Llt<u32, f64>` it can call
         // `solve_in_place` on directly.
@@ -281,7 +281,7 @@ pub fn fit_reml_sparse(
     init_tau: VarianceComponents,
     kind: SparseSolverKind,
     hutchinson_probes: Option<usize>,
-) -> Result<KinshipState, FavorError> {
+) -> Result<KinshipState, CohortError> {
     let n = y.nrows();
     let w_vec = weights_or_ones(n, weights);
 

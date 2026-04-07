@@ -6,7 +6,7 @@
 
 use std::io::{self, Write};
 
-pub const SPARSE_G_MAGIC: [u8; 8] = *b"FAVORG\x03\0";
+pub const SPARSE_G_MAGIC: [u8; 8] = *b"COHORT\x03\0";
 pub const SPARSE_G_VERSION: u16 = 3;
 pub const SPARSE_G_HEADER_SIZE: usize = 64;
 

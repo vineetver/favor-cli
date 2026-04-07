@@ -12,7 +12,7 @@ use parquet::file::reader::FileReader;
 
 use crate::column::Col;
 use crate::config::{Config, Tier};
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::ingest::JoinKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,18 +299,18 @@ pub struct VariantSet {
 }
 
 impl VariantSet {
-    pub fn open(path: &Path) -> Result<Self, FavorError> {
+    pub fn open(path: &Path) -> Result<Self, CohortError> {
         let meta_path = path.join("meta.json");
         if !meta_path.exists() {
-            return Err(FavorError::Input(format!(
-                "Not a variant set: {}. Missing meta.json. Run `favor ingest` to produce one.",
+            return Err(CohortError::Input(format!(
+                "Not a variant set: {}. Missing meta.json. Run `cohort ingest` to produce one.",
                 path.display()
             )));
         }
         let content = std::fs::read_to_string(&meta_path)
-            .map_err(|e| FavorError::Input(format!("Cannot read {}: {e}", meta_path.display())))?;
+            .map_err(|e| CohortError::Input(format!("Cannot read {}: {e}", meta_path.display())))?;
         let meta: VariantMeta = serde_json::from_str(&content).map_err(|e| {
-            FavorError::Input(format!("Invalid meta.json in {}: {e}", path.display()))
+            CohortError::Input(format!("Invalid meta.json in {}: {e}", path.display()))
         })?;
         Ok(Self {
             root: path.to_path_buf(),
@@ -347,11 +347,11 @@ impl VariantSet {
         self.meta.kind.as_ref()
     }
 
-    pub fn require_annotated(&self) -> Result<(), FavorError> {
+    pub fn require_annotated(&self) -> Result<(), CohortError> {
         match &self.meta.kind {
             Some(VariantSetKind::Annotated { .. }) => Ok(()),
-            Some(VariantSetKind::Ingested) => Err(FavorError::Input(format!(
-                "{} is an ingested variant set, not annotated. Run `favor annotate` first.",
+            Some(VariantSetKind::Ingested) => Err(CohortError::Input(format!(
+                "{} is an ingested variant set, not annotated. Run `cohort annotate` first.",
                 self.root.display()
             ))),
             None => Ok(()),
@@ -369,15 +369,15 @@ pub struct VariantSetWriter {
 }
 
 impl VariantSetWriter {
-    pub fn new(root: &Path, join_key: JoinKey, source: &str) -> Result<Self, FavorError> {
+    pub fn new(root: &Path, join_key: JoinKey, source: &str) -> Result<Self, CohortError> {
         if root.join("meta.json").exists() {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "VariantSet already exists at {}. Remove it first.",
                 root.display()
             )));
         }
         std::fs::create_dir_all(root)
-            .map_err(|e| FavorError::Resource(format!("Cannot create {}: {e}", root.display())))?;
+            .map_err(|e| CohortError::Resource(format!("Cannot create {}: {e}", root.display())))?;
         Ok(Self {
             root: root.to_path_buf(),
             join_key,
@@ -388,10 +388,10 @@ impl VariantSetWriter {
         })
     }
 
-    pub fn chrom_path(&self, chrom: &str) -> Result<PathBuf, FavorError> {
+    pub fn chrom_path(&self, chrom: &str) -> Result<PathBuf, CohortError> {
         let dir = self.root.join(format!("chromosome={chrom}"));
         std::fs::create_dir_all(&dir)
-            .map_err(|e| FavorError::Resource(format!("Cannot create {}: {e}", dir.display())))?;
+            .map_err(|e| CohortError::Resource(format!("Cannot create {}: {e}", dir.display())))?;
         Ok(dir.join("data.parquet"))
     }
 
@@ -414,15 +414,15 @@ impl VariantSetWriter {
 
     /// Scan written parquet files to populate per-chrom metadata.
     /// Uses parquet file metadata directly — no query engine needed.
-    pub fn scan_and_register(&mut self) -> Result<(), FavorError> {
+    pub fn scan_and_register(&mut self) -> Result<(), CohortError> {
         let entries = std::fs::read_dir(&self.root).map_err(|e| {
-            FavorError::Resource(format!("Cannot read {}: {e}", self.root.display()))
+            CohortError::Resource(format!("Cannot read {}: {e}", self.root.display()))
         })?;
 
         let mut first_parquet: Option<PathBuf> = None;
 
         for entry in entries {
-            let entry = entry.map_err(|e| FavorError::Resource(format!("{e}")))?;
+            let entry = entry.map_err(|e| CohortError::Resource(format!("{e}")))?;
             let name = entry.file_name().to_string_lossy().to_string();
             let chrom = match name.strip_prefix("chromosome=") {
                 Some(c) if !c.is_empty() => c.to_string(),
@@ -437,9 +437,9 @@ impl VariantSetWriter {
             let mut total_size: u64 = 0;
 
             let files =
-                std::fs::read_dir(&dir).map_err(|e| FavorError::Resource(format!("{e}")))?;
+                std::fs::read_dir(&dir).map_err(|e| CohortError::Resource(format!("{e}")))?;
             for file in files {
-                let file = file.map_err(|e| FavorError::Resource(format!("{e}")))?;
+                let file = file.map_err(|e| CohortError::Resource(format!("{e}")))?;
                 let fname = file.file_name().to_string_lossy().to_string();
                 if !fname.ends_with(".parquet") {
                     continue;
@@ -469,9 +469,9 @@ impl VariantSetWriter {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<VariantSet, FavorError> {
+    pub fn finish(self) -> Result<VariantSet, CohortError> {
         if self.per_chrom.is_empty() {
-            return Err(FavorError::Analysis(
+            return Err(CohortError::Analysis(
                 "VariantSet has no chromosomes. No variants were written.".into(),
             ));
         }
@@ -487,9 +487,9 @@ impl VariantSetWriter {
         };
         let meta_path = self.root.join("meta.json");
         let json = serde_json::to_string_pretty(&meta)
-            .map_err(|e| FavorError::Resource(format!("JSON serialize failed: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("JSON serialize failed: {e}")))?;
         std::fs::write(&meta_path, json).map_err(|e| {
-            FavorError::Resource(format!("Cannot write {}: {e}", meta_path.display()))
+            CohortError::Resource(format!("Cannot write {}: {e}", meta_path.display()))
         })?;
         Ok(VariantSet {
             root: self.root,
@@ -529,19 +529,19 @@ fn chrom_sort_key(chrom: &str) -> (u8, u8) {
     }
 }
 
-pub fn parquet_row_count(path: &Path) -> Result<u64, FavorError> {
+pub fn parquet_row_count(path: &Path) -> Result<u64, CohortError> {
     let file = std::fs::File::open(path)
-        .map_err(|e| FavorError::Resource(format!("Cannot open {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Cannot open {}: {e}", path.display())))?;
     let reader = parquet::file::reader::SerializedFileReader::new(file)
-        .map_err(|e| FavorError::Resource(format!("Bad parquet {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Bad parquet {}: {e}", path.display())))?;
     Ok(reader.metadata().file_metadata().num_rows() as u64)
 }
 
-pub fn parquet_column_names(path: &Path) -> Result<Vec<String>, FavorError> {
+pub fn parquet_column_names(path: &Path) -> Result<Vec<String>, CohortError> {
     let file = std::fs::File::open(path)
-        .map_err(|e| FavorError::Resource(format!("Cannot open {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Cannot open {}: {e}", path.display())))?;
     let reader = parquet::file::reader::SerializedFileReader::new(file)
-        .map_err(|e| FavorError::Resource(format!("Bad parquet {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Bad parquet {}: {e}", path.display())))?;
     let schema = reader.metadata().file_metadata().schema_descr();
     // Top-level fields from root group — returns "gencode" not its leaf children.
     Ok(schema
@@ -558,15 +558,15 @@ pub struct AnnotationDb {
 }
 
 impl AnnotationDb {
-    pub fn open(config: &Config) -> Result<Self, FavorError> {
+    pub fn open(config: &Config) -> Result<Self, CohortError> {
         Self::open_tier(config.data.tier, &config.root_dir())
     }
 
-    pub fn open_tier(tier: Tier, data_root: &Path) -> Result<Self, FavorError> {
+    pub fn open_tier(tier: Tier, data_root: &Path) -> Result<Self, CohortError> {
         let root = data_root.join(tier.as_str());
         if !root.exists() {
-            return Err(FavorError::DataMissing(format!(
-                "Annotations not found at {}. Run `favor data pull --tier {}` first.",
+            return Err(CohortError::DataMissing(format!(
+                "Annotations not found at {}. Run `cohort data pull --tier {}` first.",
                 root.display(),
                 tier
             )));
@@ -577,7 +577,7 @@ impl AnnotationDb {
     }
 
     /// Verify that all autosomal chromosomes have parquet files.
-    pub fn validate_installed(&self) -> Result<(), FavorError> {
+    pub fn validate_installed(&self) -> Result<(), CohortError> {
         let mut missing = Vec::new();
         for n in 1..=22 {
             if !self
@@ -598,9 +598,9 @@ impl AnnotationDb {
             }
         }
         if !missing.is_empty() {
-            return Err(FavorError::DataMissing(format!(
+            return Err(CohortError::DataMissing(format!(
                 "Annotation data ({} tier) missing for chromosomes: {}. \
-                 Run: favor data pull --tier {}",
+                 Run: cohort data pull --tier {}",
                 self.tier,
                 missing.join(", "),
                 self.tier,
@@ -639,14 +639,14 @@ pub struct AnnotatedSet {
 }
 
 impl AnnotatedSet {
-    pub fn open(path: &Path) -> Result<Self, FavorError> {
+    pub fn open(path: &Path) -> Result<Self, CohortError> {
         let vs = VariantSet::open(path)?;
         let tier = match vs.kind() {
             Some(VariantSetKind::Annotated { tier }) => *tier,
             Some(VariantSetKind::Ingested) => {
-                return Err(FavorError::Input(format!(
+                return Err(CohortError::Input(format!(
                     "'{}' is an ingested variant set, not annotated. \
-                     Run `favor annotate` first.",
+                     Run `cohort annotate` first.",
                     path.display()
                 )));
             }
@@ -689,12 +689,12 @@ impl AnnotatedSet {
     }
 
     /// Validate that this annotated set supports the given pipeline columns.
-    pub fn supports(&self, required: &[Col]) -> Result<(), FavorError> {
+    pub fn supports(&self, required: &[Col]) -> Result<(), CohortError> {
         for &col in required {
             if !self.tier().has(col) {
-                return Err(FavorError::Input(format!(
+                return Err(CohortError::Input(format!(
                     "Column '{}' requires {} tier but this data was annotated \
-                     with {} tier.\nRe-annotate with: favor annotate {} --full",
+                     with {} tier.\nRe-annotate with: cohort annotate {} --full",
                     col.as_str(),
                     Tier::required_for(&[col]),
                     self.tier(),
@@ -842,10 +842,10 @@ pub struct TissueDb {
 }
 
 impl TissueDb {
-    pub fn open(tissue_dir: &Path) -> Result<Self, FavorError> {
+    pub fn open(tissue_dir: &Path) -> Result<Self, CohortError> {
         if !tissue_dir.exists() {
-            return Err(FavorError::DataMissing(format!(
-                "Tissue data not found at {}. Run `favor data pull --pack eqtl` first.",
+            return Err(CohortError::DataMissing(format!(
+                "Tissue data not found at {}. Run `cohort data pull --pack eqtl` first.",
                 tissue_dir.display()
             )));
         }
@@ -873,13 +873,13 @@ impl TissueDb {
     }
 
     #[allow(dead_code)]
-    pub fn validate_tables(&self, needed: &[TissueTable]) -> Result<(), FavorError> {
+    pub fn validate_tables(&self, needed: &[TissueTable]) -> Result<(), CohortError> {
         let missing: Vec<_> = needed
             .iter()
             .filter(|t| !self.available.contains(t))
             .collect();
         if !missing.is_empty() {
-            return Err(FavorError::DataMissing(format!(
+            return Err(CohortError::DataMissing(format!(
                 "Tissue data missing: {}. Install with:\n{}",
                 missing
                     .iter()
@@ -888,7 +888,7 @@ impl TissueDb {
                     .join(", "),
                 missing
                     .iter()
-                    .map(|t| format!("  favor data pull --pack {}", t.required_pack()))
+                    .map(|t| format!("  cohort data pull --pack {}", t.required_pack()))
                     .collect::<Vec<_>>()
                     .join("\n")
             )));

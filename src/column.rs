@@ -1,4 +1,4 @@
-//! Canonical column identifiers for the FAVOR pipeline.
+//! Canonical column identifiers for the COHORT pipeline.
 //!
 //! Every column the pipeline touches has a canonical identity defined here.
 //! No string literal column name should appear anywhere else in the codebase
@@ -7,7 +7,7 @@
 //! Rename a column? Change one match arm. Forget a column? The compiler tells
 //! you (non-exhaustive match).
 
-/// Canonical column identifier for the FAVOR pipeline.
+/// Canonical column identifier for the COHORT pipeline.
 ///
 /// Every column produced, consumed, or joined across pipeline stages has exactly
 /// one `Col` variant. SQL generation, schema definitions, and result writing all

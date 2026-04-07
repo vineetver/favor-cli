@@ -16,16 +16,16 @@ use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReser
 use datafusion::logical_expr::SortExpr;
 use datafusion::prelude::*;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::resource::Resources;
 
 #[derive(Debug)]
-pub struct FavorPool {
+pub struct CohortPool {
     limit: usize,
     used: AtomicUsize,
 }
 
-impl FavorPool {
+impl CohortPool {
     pub fn new(resources: &Resources) -> Self {
         Self {
             limit: resources.memory_bytes as usize,
@@ -34,7 +34,7 @@ impl FavorPool {
     }
 }
 
-impl MemoryPool for FavorPool {
+impl MemoryPool for CohortPool {
     fn grow(&self, _reservation: &MemoryReservation, additional: usize) {
         self.used.fetch_add(additional, Ordering::Relaxed);
     }
@@ -52,7 +52,7 @@ impl MemoryPool for FavorPool {
         if old + additional > self.limit {
             self.used.fetch_sub(additional, Ordering::Relaxed);
             return Err(DataFusionError::ResourcesExhausted(format!(
-                "FavorPool: requested {} bytes, used {}, limit {}",
+                "CohortPool: requested {} bytes, used {}, limit {}",
                 additional, old, self.limit
             )));
         }
@@ -73,8 +73,8 @@ pub struct DfEngine {
 }
 
 impl DfEngine {
-    pub fn new(resources: &Resources) -> Result<Self, FavorError> {
-        let pool = Arc::new(FavorPool::new(resources));
+    pub fn new(resources: &Resources) -> Result<Self, CohortError> {
+        let pool = Arc::new(CohortPool::new(resources));
 
         let config = SessionConfig::new()
             .with_target_partitions(resources.threads)
@@ -85,7 +85,7 @@ impl DfEngine {
             .with_memory_pool(pool)
             .with_temp_file_path(resources.temp_dir.clone())
             .build_arc()
-            .map_err(|e| FavorError::Resource(format!("DataFusion runtime init: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("DataFusion runtime init: {e}")))?;
 
         let ctx = SessionContext::new_with_config_rt(config, rt_env);
 
@@ -93,12 +93,12 @@ impl DfEngine {
             .worker_threads(resources.threads.min(4))
             .enable_all()
             .build()
-            .map_err(|e| FavorError::Resource(format!("Tokio runtime init: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Tokio runtime init: {e}")))?;
 
         Ok(Self { ctx, rt })
     }
 
-    pub fn register_csv(&self, name: &str, path: &Path, delimiter: u8) -> Result<(), FavorError> {
+    pub fn register_csv(&self, name: &str, path: &Path, delimiter: u8) -> Result<(), CohortError> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("csv");
         self.rt.block_on(async {
             let opts = CsvReadOptions::new()
@@ -108,31 +108,31 @@ impl DfEngine {
             self.ctx
                 .register_csv(name, &path.to_string_lossy(), opts)
                 .await
-                .map_err(|e| FavorError::Resource(format!("Register CSV '{name}': {e}")))
+                .map_err(|e| CohortError::Resource(format!("Register CSV '{name}': {e}")))
         })
     }
 
-    pub fn register_parquet_file(&self, name: &str, path: &Path) -> Result<(), FavorError> {
+    pub fn register_parquet_file(&self, name: &str, path: &Path) -> Result<(), CohortError> {
         self.rt.block_on(async {
             self.ctx
                 .register_parquet(name, &path.to_string_lossy(), ParquetReadOptions::default())
                 .await
-                .map_err(|e| FavorError::Resource(format!("Register parquet '{name}': {e}")))
+                .map_err(|e| CohortError::Resource(format!("Register parquet '{name}': {e}")))
         })
     }
 
-    pub fn register_parquet_dir(&self, name: &str, path: &Path) -> Result<(), FavorError> {
+    pub fn register_parquet_dir(&self, name: &str, path: &Path) -> Result<(), CohortError> {
         let url = format!("file://{}", path.display());
         self.rt.block_on(async {
             let table_path = ListingTableUrl::parse(&url)
-                .map_err(|e| FavorError::Resource(format!("Invalid path '{url}': {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Invalid path '{url}': {e}")))?;
             let opts = ListingOptions::new(Arc::new(ParquetFormat::default()))
                 .with_file_extension(".parquet");
             let schema = opts
                 .infer_schema(&self.ctx.state(), &table_path)
                 .await
                 .map_err(|e| {
-                    FavorError::Resource(format!(
+                    CohortError::Resource(format!(
                         "Cannot read parquet schema at {}: {e}",
                         path.display()
                     ))
@@ -142,10 +142,10 @@ impl DfEngine {
                     .with_listing_options(opts)
                     .with_schema(schema),
             )
-            .map_err(|e| FavorError::Resource(format!("Listing table '{name}': {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Listing table '{name}': {e}")))?;
             self.ctx
                 .register_table(name, Arc::new(listing))
-                .map_err(|e| FavorError::Resource(format!("Register '{name}': {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Register '{name}': {e}")))?;
             Ok(())
         })
     }
@@ -158,12 +158,12 @@ impl DfEngine {
         name: &str,
         path: &Path,
         sort_columns: &[&str],
-    ) -> Result<(), FavorError> {
+    ) -> Result<(), CohortError> {
         let is_dir = path.is_dir();
         let url = format!("file://{}", path.display());
         self.rt.block_on(async {
             let table_path = ListingTableUrl::parse(&url)
-                .map_err(|e| FavorError::Resource(format!("Invalid path '{url}': {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Invalid path '{url}': {e}")))?;
 
             let sort_order: Vec<Vec<SortExpr>> = vec![sort_columns
                 .iter()
@@ -180,7 +180,7 @@ impl DfEngine {
                 .infer_schema(&self.ctx.state(), &table_path)
                 .await
                 .map_err(|e| {
-                    FavorError::Resource(format!(
+                    CohortError::Resource(format!(
                         "Cannot read parquet schema at {}: {e}",
                         path.display()
                     ))
@@ -190,22 +190,22 @@ impl DfEngine {
                     .with_listing_options(opts)
                     .with_schema(schema),
             )
-            .map_err(|e| FavorError::Resource(format!("Listing table '{name}': {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Listing table '{name}': {e}")))?;
             self.ctx
                 .register_table(name, Arc::new(listing))
-                .map_err(|e| FavorError::Resource(format!("Register '{name}': {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Register '{name}': {e}")))?;
             Ok(())
         })
     }
 
     /// Column names from a registered table's Arrow schema — no query needed.
-    pub fn table_columns(&self, table_name: &str) -> Result<Vec<String>, FavorError> {
+    pub fn table_columns(&self, table_name: &str) -> Result<Vec<String>, CohortError> {
         self.rt.block_on(async {
             let provider = self
                 .ctx
                 .table_provider(table_name)
                 .await
-                .map_err(|e| FavorError::Resource(format!("Table '{table_name}': {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Table '{table_name}': {e}")))?;
             Ok(provider
                 .schema()
                 .fields()
@@ -215,7 +215,7 @@ impl DfEngine {
         })
     }
 
-    pub fn collect(&self, sql: &str) -> Result<Vec<RecordBatch>, FavorError> {
+    pub fn collect(&self, sql: &str) -> Result<Vec<RecordBatch>, CohortError> {
         let sql_preview: String = if sql.len() > 200 {
             format!("{}...", &sql[..200])
         } else {
@@ -223,21 +223,21 @@ impl DfEngine {
         };
         self.rt.block_on(async {
             let df = self.ctx.sql(sql).await.map_err(|e| {
-                FavorError::Analysis(format!("SQL parse failed: {e}\n  SQL: {sql_preview}"))
+                CohortError::Analysis(format!("SQL parse failed: {e}\n  SQL: {sql_preview}"))
             })?;
             df.collect().await.map_err(|e| {
-                FavorError::Analysis(format!("Query execution failed: {e}\n  SQL: {sql_preview}"))
+                CohortError::Analysis(format!("Query execution failed: {e}\n  SQL: {sql_preview}"))
             })
         })
     }
 
-    pub fn execute(&self, sql: &str) -> Result<(), FavorError> {
+    pub fn execute(&self, sql: &str) -> Result<(), CohortError> {
         self.collect(sql)?;
         Ok(())
     }
 
     /// Return the physical plan as a string for debugging.
-    pub fn explain(&self, sql: &str) -> Result<String, FavorError> {
+    pub fn explain(&self, sql: &str) -> Result<String, CohortError> {
         let batches = self.collect(&format!("EXPLAIN {sql}"))?;
         let mut lines = Vec::new();
         for batch in &batches {
@@ -257,7 +257,7 @@ impl DfEngine {
     }
 
     /// Returns 0 if query returns no rows.
-    pub fn query_scalar(&self, sql: &str) -> Result<i64, FavorError> {
+    pub fn query_scalar(&self, sql: &str) -> Result<i64, CohortError> {
         let batches = self.collect(sql)?;
         for batch in &batches {
             if batch.num_rows() == 0 {
@@ -277,7 +277,7 @@ impl DfEngine {
         Ok(0)
     }
 
-    pub fn query_strings(&self, sql: &str) -> Result<Vec<String>, FavorError> {
+    pub fn query_strings(&self, sql: &str) -> Result<Vec<String>, CohortError> {
         let batches = self.collect(sql)?;
         let mut result = Vec::new();
         for batch in &batches {

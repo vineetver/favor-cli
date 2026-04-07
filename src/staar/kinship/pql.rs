@@ -10,7 +10,7 @@
 
 use faer::Mat;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::kinship::budget::check_memory_budget;
 use crate::staar::kinship::fit_reml;
@@ -25,7 +25,7 @@ pub fn fit_pql_glmm(
     kinships: &[KinshipMatrix],
     groups: &GroupPartition,
     out: &dyn Output,
-) -> Result<KinshipState, FavorError> {
+) -> Result<KinshipState, CohortError> {
     use crate::staar::model::fit_logistic;
 
     let n = y.nrows();
@@ -37,7 +37,7 @@ pub fn fit_pql_glmm(
 
     let init = fit_logistic(y, x, 25);
     let Some(init_mu) = init.fitted_values.as_ref() else {
-        return Err(FavorError::Analysis(
+        return Err(CohortError::Analysis(
             "fit_logistic returned without fitted values — cannot start PQL".into(),
         ));
     };
@@ -111,7 +111,7 @@ pub fn fit_pql_glmm(
         ));
     }
 
-    last_state.ok_or_else(|| FavorError::Analysis("PQL outer loop did not run".into()))
+    last_state.ok_or_else(|| CohortError::Analysis("PQL outer loop did not run".into()))
 }
 
 #[cfg(test)]
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn fit_pql_glmm_propagates_kinship_size_mismatch() {
         // PQL delegates input validation to `fit_reml`. A wrong-size
-        // kinship must surface as `FavorError::Input` from the very
+        // kinship must surface as `CohortError::Input` from the very
         // first inner call.
         let kin = block_family_kinship(3, 5);
         let n = 50;
@@ -184,7 +184,7 @@ mod tests {
         let (y, x) = synthetic_binary(n);
         let out = null_output();
         match fit_pql_glmm(&y, &x, std::slice::from_ref(&kin), &groups, out.as_ref()) {
-            Err(FavorError::Input(msg)) => assert!(msg.contains("n_samples"), "msg = {msg}"),
+            Err(CohortError::Input(msg)) => assert!(msg.contains("n_samples"), "msg = {msg}"),
             Err(other) => panic!("expected Input, got {other:?}"),
             Ok(_) => panic!("expected Input error, got Ok"),
         }

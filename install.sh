@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -e
 
-REPO="vineetver/favor-cli"
-INSTALL_DIR="${FAVOR_INSTALL_DIR:-$HOME/.local/bin}"
+REPO="vineetver/cohort-cli"
+INSTALL_DIR="${COHORT_INSTALL_DIR:-$HOME/.local/bin}"
 
 main() {
     need_cmd curl
@@ -14,14 +14,14 @@ main() {
     case "$OS" in
         linux)
             case "$ARCH" in
-                x86_64|amd64) ARTIFACT="favor-x86_64-linux" ;;
+                x86_64|amd64) ARTIFACT="cohort-x86_64-linux" ;;
                 *) err "Unsupported architecture: $ARCH. Build from source: cargo install --git https://github.com/$REPO" ;;
             esac
             ;;
         darwin)
             case "$ARCH" in
-                x86_64)        ARTIFACT="favor-x86_64-macos" ;;
-                arm64|aarch64) ARTIFACT="favor-aarch64-macos" ;;
+                x86_64)        ARTIFACT="cohort-x86_64-macos" ;;
+                arm64|aarch64) ARTIFACT="cohort-aarch64-macos" ;;
                 *) err "Unsupported architecture: $ARCH" ;;
             esac
             ;;
@@ -35,9 +35,9 @@ main() {
 
     URL="https://github.com/$REPO/releases/download/$LATEST/$ARTIFACT.tar.gz"
 
-    echo "Installing favor $LATEST ($ARTIFACT)..."
+    echo "Installing cohort $LATEST ($ARTIFACT)..."
     echo "  From: $URL"
-    echo "  To:   $INSTALL_DIR/favor"
+    echo "  To:   $INSTALL_DIR/cohort"
 
     TMPDIR=$(mktemp -d)
     trap "rm -rf $TMPDIR" EXIT
@@ -46,8 +46,8 @@ main() {
     tar xzf "$TMPDIR/$ARTIFACT.tar.gz" -C "$TMPDIR"
 
     mkdir -p "$INSTALL_DIR"
-    mv "$TMPDIR/favor" "$INSTALL_DIR/favor"
-    chmod +x "$INSTALL_DIR/favor"
+    mv "$TMPDIR/cohort" "$INSTALL_DIR/cohort"
+    chmod +x "$INSTALL_DIR/cohort"
 
     # Add to PATH if not already there
     case ":$PATH:" in
@@ -71,10 +71,10 @@ main() {
     esac
 
     echo ""
-    echo "Installed favor $LATEST"
-    echo "Run 'favor setup' to configure."
+    echo "Installed cohort $LATEST"
+    echo "Run 'cohort setup' to configure."
     echo ""
-    echo "To uninstall: favor uninstall (or just rm $INSTALL_DIR/favor)"
+    echo "To uninstall: cohort uninstall (or just rm $INSTALL_DIR/cohort)"
 }
 
 need_cmd() {

@@ -60,14 +60,14 @@ pub use types::{
 
 use faer::Mat;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 
 /// Fit AI-REML for the variance components in
 /// `[τ_kinship_1..τ_L, τ_group_1..τ_G]`. Dispatches between the dense
 /// kernel (small n, bit-identical to GMMAT) and the sparse kernel
 /// (large n + sparse kinships, exact via the Takahashi recursion).
 ///
-/// Returns `FavorError::Resource` if neither path can run within the
+/// Returns `CohortError::Resource` if neither path can run within the
 /// configured memory budget.
 pub fn fit_reml(
     y: &Mat<f64>,
@@ -75,25 +75,25 @@ pub fn fit_reml(
     kinships: &[KinshipMatrix],
     groups: &GroupPartition,
     weights: Option<&[f64]>,
-) -> Result<KinshipState, FavorError> {
+) -> Result<KinshipState, CohortError> {
     let n = y.nrows();
     let l = kinships.len();
     let g = groups.n_groups();
     let n_comp = l + g;
     if n_comp == 0 {
-        return Err(FavorError::Input(
+        return Err(CohortError::Input(
             "fit_reml requires at least one variance component (kinship or group)".into(),
         ));
     }
     if groups.n_samples() != n {
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "group partition covers {} samples but y has {n} rows",
             groups.n_samples()
         )));
     }
     for k in kinships {
         if k.n() != n {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "kinship matrix '{}' has shape ({}, {}) but n_samples = {n}",
                 k.label(),
                 k.n(),
@@ -300,7 +300,7 @@ mod tests {
         let x = make_x_intercept(n);
         let groups = GroupPartition::single(n + 5);
         match fit_reml(&y, &x, &[], &groups, None) {
-            Err(FavorError::Input(msg)) => {
+            Err(CohortError::Input(msg)) => {
                 assert!(msg.contains("group partition covers"), "msg = {msg}");
             }
             Err(other) => panic!("expected Input, got {other:?}"),
@@ -318,7 +318,7 @@ mod tests {
         let kin = block_family_kinship(3, 5, "wrong-size");
         assert_ne!(kin.n(), n);
         match fit_reml(&y, &x, std::slice::from_ref(&kin), &groups, None) {
-            Err(FavorError::Input(msg)) => {
+            Err(CohortError::Input(msg)) => {
                 assert!(msg.contains("n_samples"), "msg = {msg}");
                 assert!(msg.contains("wrong-size"), "msg = {msg}");
             }

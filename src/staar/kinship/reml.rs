@@ -45,7 +45,7 @@
 use faer::prelude::Solve;
 use faer::Mat;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::staar::kinship::dense;
 use crate::staar::kinship::sparse;
 use crate::staar::kinship::sparse::takahashi::TakahashiNumeric;
@@ -339,13 +339,13 @@ impl SigmaSolver {
 /// the high-level form — so the override refactors Σ once at the final τ
 /// to produce a fresh `Llt` for the score path.
 pub trait SolverBuilder {
-    fn build(&self, tau: &VarianceComponents) -> Result<SigmaSolver, FavorError>;
+    fn build(&self, tau: &VarianceComponents) -> Result<SigmaSolver, CohortError>;
 
     fn finalize_inverse(
         &self,
         solver: SigmaSolver,
         tau: &VarianceComponents,
-    ) -> Result<KinshipInverse, FavorError> {
+    ) -> Result<KinshipInverse, CohortError> {
         let _ = tau;
         Ok(solver.into_inverse())
     }
@@ -388,7 +388,7 @@ pub fn ai_step(
     tau: &VarianceComponents,
     fixtau: &[bool],
     solver: SigmaSolver,
-) -> Result<AiStep, FavorError> {
+) -> Result<AiStep, CohortError> {
     let n = y.nrows();
     let l = kinships.len();
     let g = groups.n_groups();
@@ -594,7 +594,7 @@ fn converge<B: SolverBuilder>(
     init_tau: VarianceComponents,
     fixtau: &[bool],
     builder: &B,
-) -> Result<KinshipState, FavorError> {
+) -> Result<KinshipState, CohortError> {
     let n = y.nrows();
     let k = x.ncols();
     let l = kinships.len();
@@ -640,7 +640,7 @@ fn converge<B: SolverBuilder>(
             }
             try_count += 1;
             if try_count > REML_STEP_HALVE_MAX {
-                return Err(FavorError::Analysis(format!(
+                return Err(CohortError::Analysis(format!(
                     "AI-REML step-halving failed to find a feasible τ in {REML_STEP_HALVE_MAX} attempts"
                 )));
             }
@@ -680,7 +680,7 @@ fn converge<B: SolverBuilder>(
         // Divergence guard. Upstream `glmmkin.R:406-410` warns and
         // breaks; we error out so the caller knows the fit is no good.
         if tau.as_slice().iter().any(|&t| t.abs() > REML_TOL.powi(-2)) {
-            return Err(FavorError::Analysis(format!(
+            return Err(CohortError::Analysis(format!(
                 "AI-REML diverged: |τ_max| > {}",
                 REML_TOL.powi(-2)
             )));
@@ -688,7 +688,7 @@ fn converge<B: SolverBuilder>(
     }
 
     let last = last
-        .ok_or_else(|| FavorError::Analysis("AI-REML produced no iterations".into()))?;
+        .ok_or_else(|| CohortError::Analysis("AI-REML produced no iterations".into()))?;
 
     let total_var: f64 = tau.as_slice().iter().sum();
     let h2: Vec<f64> = if total_var > 0.0 {
@@ -725,7 +725,7 @@ pub fn run_reml<B: SolverBuilder>(
     weights: &[f64],
     init_tau: VarianceComponents,
     builder: &B,
-) -> Result<KinshipState, FavorError> {
+) -> Result<KinshipState, CohortError> {
     let l = kinships.len();
     let g = groups.n_groups();
     let n_comp = l + g;
@@ -773,7 +773,7 @@ pub fn run_reml<B: SolverBuilder>(
         state.outer_refits = refit_iter + 1;
     }
 
-    Err(FavorError::Analysis(format!(
+    Err(CohortError::Analysis(format!(
         "AI-REML boundary refit did not stabilize within {REML_MAX_OUTER_REFITS} iterations"
     )))
 }

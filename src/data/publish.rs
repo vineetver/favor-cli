@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 
 use super::transfer::{
@@ -20,9 +20,9 @@ pub fn publish(
     pack_filter: Option<String>,
     dry_run: bool,
     output: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     if !source_root.is_dir() {
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "Source root does not exist: {}",
             source_root.display()
         )));
@@ -30,7 +30,7 @@ pub fn publish(
 
     let packs: Vec<&Pack> = if let Some(ref id) = pack_filter {
         let pack =
-            Pack::find(id).ok_or_else(|| FavorError::Input(format!("Unknown pack '{id}'")))?;
+            Pack::find(id).ok_or_else(|| CohortError::Input(format!("Unknown pack '{id}'")))?;
         vec![pack]
     } else {
         Pack::all().iter().collect()
@@ -61,12 +61,12 @@ fn publish_pack(
     source_root: &std::path::Path,
     dry_run: bool,
     output: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     output.status(&format!("Pack '{}' — scanning...", pack.id));
 
     let source_base = pack.source_dir(source_root);
     if !source_base.is_dir() {
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "Source directory does not exist for pack '{}': {}",
             pack.id,
             source_base.display()
@@ -101,7 +101,7 @@ fn publish_pack(
                 .path()
                 .strip_prefix(&source_base)
                 .map_err(|_| {
-                    FavorError::Resource(format!(
+                    CohortError::Resource(format!(
                         "Failed to compute relative path for {}",
                         entry.path().display()
                     ))
@@ -112,7 +112,7 @@ fn publish_pack(
             let size = entry
                 .metadata()
                 .map_err(|e| {
-                    FavorError::Resource(format!(
+                    CohortError::Resource(format!(
                         "Failed to read metadata for {}: {e}",
                         entry.path().display()
                     ))
@@ -149,7 +149,7 @@ fn publish_pack(
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| FavorError::Resource(format!("Failed to serialize manifest: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Failed to serialize manifest: {e}")))?;
 
     let total_gb = total_size as f64 / (1024.0 * 1024.0 * 1024.0);
     output.status(&format!(
@@ -163,7 +163,7 @@ fn publish_pack(
     if dry_run {
         let manifest_path = format!("/tmp/favor-manifest-{}.json", pack.id);
         std::fs::write(&manifest_path, &manifest_json)
-            .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", manifest_path)))?;
+            .map_err(|e| CohortError::Resource(format!("Cannot write '{}': {e}", manifest_path)))?;
         output.status(&format!("  manifest written to {manifest_path}"));
         output.result_json(&json!({
             "pack_id": pack.id, "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -184,10 +184,10 @@ fn publish_pack(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .map_err(|e| FavorError::Resource(format!("Failed to run mc: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Failed to run mc: {e}")))?;
 
         if !status.success() {
-            return Err(FavorError::Resource(format!(
+            return Err(CohortError::Resource(format!(
                 "mc cp failed for {rel_path} (exit {})",
                 status.code().unwrap_or(-1)
             )));
@@ -200,7 +200,7 @@ fn publish_pack(
 
     let tmp_manifest = format!("/tmp/favor-manifest-{}.json", pack.id);
     std::fs::write(&tmp_manifest, &manifest_json)
-        .map_err(|e| FavorError::Resource(format!("Cannot write '{}': {e}", tmp_manifest)))?;
+        .map_err(|e| CohortError::Resource(format!("Cannot write '{}': {e}", tmp_manifest)))?;
 
     let manifest_remote = format!("{minio_pack_prefix}/manifest.json");
     let status = std::process::Command::new("mc")
@@ -208,10 +208,10 @@ fn publish_pack(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map_err(|e| FavorError::Resource(format!("Failed to upload manifest: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Failed to upload manifest: {e}")))?;
 
     if !status.success() {
-        return Err(FavorError::Resource(
+        return Err(CohortError::Resource(
             "mc cp failed for manifest.json".to_string(),
         ));
     }
@@ -224,24 +224,24 @@ fn publish_pack(
     let body = ureq::get(&url)
         .call()
         .map_err(|e| {
-            FavorError::Resource(format!("Failed to re-fetch manifest after upload: {e}"))
+            CohortError::Resource(format!("Failed to re-fetch manifest after upload: {e}"))
         })?
         .into_body()
         .read_to_string()
-        .map_err(|e| FavorError::Resource(format!("Failed to read uploaded manifest: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Failed to read uploaded manifest: {e}")))?;
 
     let reread: PackManifest = serde_json::from_str(&body).map_err(|e| {
-        FavorError::Resource(format!("Uploaded manifest is not valid v2 JSON: {e}"))
+        CohortError::Resource(format!("Uploaded manifest is not valid v2 JSON: {e}"))
     })?;
 
     if reread.schema_version != MANIFEST_SCHEMA_VERSION {
-        return Err(FavorError::Resource(format!(
+        return Err(CohortError::Resource(format!(
             "Uploaded manifest has schema_version {}, expected {}",
             reread.schema_version, MANIFEST_SCHEMA_VERSION
         )));
     }
     if reread.files.len() != files.len() {
-        return Err(FavorError::Resource(format!(
+        return Err(CohortError::Resource(format!(
             "Uploaded manifest has {} files, expected {}",
             reread.files.len(),
             files.len()

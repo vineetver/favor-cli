@@ -1,12 +1,12 @@
 [package]
-name = "favor"
+name = "cohort"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Genomic variant annotation, tissue enrichment, and rare-variant association testing"
 license = "GPL-3.0"
-repository = "https://github.com/vineetver/favor-cli"
-homepage = "https://github.com/vineetver/favor-cli"
+repository = "https://github.com/vineetver/cohort-cli"
+homepage = "https://github.com/vineetver/cohort-cli"
 readme = "README.md"
 keywords = ["genomics", "staar", "rare-variant", "association-testing", "annotation"]
 categories = ["science", "command-line-utilities"]

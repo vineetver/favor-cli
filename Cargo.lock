@@ -654,6 +654,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cohort"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "clap",
+ "crossterm",
+ "datafusion",
+ "dirs",
+ "faer",
+ "futures",
+ "indicatif",
+ "memmap2",
+ "noodles-bgzf 0.14.0",
+ "noodles-vcf",
+ "parquet",
+ "ratatui",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+ "statrs",
+ "tempfile",
+ "tokio",
+ "toml",
+ "ureq",
+ "walkdir",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1811,37 +1842,6 @@ name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
-
-[[package]]
-name = "favor"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "async-trait",
- "clap",
- "crossterm",
- "datafusion",
- "dirs",
- "faer",
- "futures",
- "indicatif",
- "memmap2",
- "noodles-bgzf 0.14.0",
- "noodles-vcf",
- "parquet",
- "ratatui",
- "rayon",
- "serde",
- "serde_json",
- "sha2",
- "statrs",
- "tempfile",
- "tokio",
- "toml",
- "ureq",
- "walkdir",
-]
 
 [[package]]
 name = "find-msvc-tools"

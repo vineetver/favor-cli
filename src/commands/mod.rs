@@ -11,18 +11,18 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::config::Tier;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::MaskCategory;
 
 /// Parse `--masks` strings into the typed enum. Shared between
-/// `favor staar` and `favor meta-staar` so the accepted set stays in sync.
-pub fn parse_mask_categories(masks: &[String]) -> Result<Vec<MaskCategory>, FavorError> {
+/// `cohort staar` and `cohort meta-staar` so the accepted set stays in sync.
+pub fn parse_mask_categories(masks: &[String]) -> Result<Vec<MaskCategory>, CohortError> {
     masks
         .iter()
         .map(|s| {
             s.parse::<MaskCategory>().map_err(|_| {
-                FavorError::Input(format!(
+                CohortError::Input(format!(
                     "Unknown mask '{s}'. Available: coding, noncoding, sliding-window, scang, custom"
                 ))
             })

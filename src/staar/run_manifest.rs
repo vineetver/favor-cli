@@ -1,4 +1,4 @@
-//! `run.json` shape and resume planner for `favor staar`.
+//! `run.json` shape and resume planner for `cohort staar`.
 //!
 //! Owns the `Stage` enum, the on-disk manifest, the cache-decision log,
 //! and `plan_resume`. Disk writes go through `store::write_atomic` so a
@@ -9,11 +9,11 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::staar::store;
 use crate::staar::RunMode;
 
-/// One stage in a `favor staar` run. Order matches execution order.
+/// One stage in a `cohort staar` run. Order matches execution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
@@ -94,7 +94,7 @@ pub struct RunManifest {
     /// On-disk schema version. See `RUN_MANIFEST_VERSION`.
     #[serde(default = "default_manifest_version")]
     pub schema_version: u32,
-    pub favor_version: String,
+    pub cohort_version: String,
     pub run_mode: RunMode,
     pub trait_name: String,
     pub config_hash: String,
@@ -173,7 +173,7 @@ impl RunManifest {
     pub fn new(run_mode: RunMode, trait_name: String, config_hash: String) -> Self {
         Self {
             schema_version: RUN_MANIFEST_VERSION,
-            favor_version: env!("CARGO_PKG_VERSION").to_string(),
+            cohort_version: env!("CARGO_PKG_VERSION").to_string(),
             run_mode,
             trait_name,
             config_hash,
@@ -224,10 +224,10 @@ impl RunManifest {
     }
 
     /// Atomic write to `{output_dir}/run.json` via `store::write_atomic`.
-    pub fn write(&self, output_dir: &Path) -> Result<(), FavorError> {
+    pub fn write(&self, output_dir: &Path) -> Result<(), CohortError> {
         let path = output_dir.join("run.json");
         let json = serde_json::to_string_pretty(self)
-            .map_err(|e| FavorError::Resource(format!("Serialize run manifest: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Serialize run manifest: {e}")))?;
         store::write_atomic(&path, json.as_bytes())
     }
 
@@ -566,7 +566,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("run.json");
         let legacy = serde_json::json!({
-            "favor_version": "0.0.0",
+            "cohort_version": "0.0.0",
             "run_mode": "analyze",
             "trait_name": "BMI",
             "config_hash": "abc",

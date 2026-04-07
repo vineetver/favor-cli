@@ -29,7 +29,7 @@ use faer::Mat;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::carrier::sparse_score;
 use crate::staar::carrier::{AnalysisVectors, VariantIndex};
@@ -305,7 +305,7 @@ pub fn build_chromosome(
     out_dir: &Path,
     chrom: &str,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let n_variants = variant_index.len();
 
     let gene_names: Vec<String> = variant_index.gene_names().map(|s| s.to_string()).collect();
@@ -364,14 +364,14 @@ pub fn build_chromosome(
     // Phase 3: write binary
     let chrom_dir = out_dir.join(format!("chromosome={chrom}"));
     std::fs::create_dir_all(&chrom_dir)
-        .map_err(|e| FavorError::Resource(format!("mkdir {}: {e}", chrom_dir.display())))?;
+        .map_err(|e| CohortError::Resource(format!("mkdir {}: {e}", chrom_dir.display())))?;
 
     // Atomic write: write to .tmp, fsync, rename to final path.
     // A killed process never leaves a partial scores.bin visible to probe().
     let final_path = chrom_dir.join("scores.bin");
     let tmp_path = chrom_dir.join("scores.bin.tmp");
     let file = std::fs::File::create(&tmp_path)
-        .map_err(|e| FavorError::Resource(format!("Create {}: {e}", tmp_path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Create {}: {e}", tmp_path.display())))?;
     let mut w = BufWriter::new(file);
 
     // Header (64 bytes)
@@ -382,18 +382,18 @@ pub fn build_chromosome(
     header[14..18].copy_from_slice(&(gene_computed.len() as u32).to_le_bytes());
     header[18..26].copy_from_slice(&analysis.sigma2.to_le_bytes());
     w.write_all(&header)
-        .map_err(|e| FavorError::Resource(format!("Write header: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Write header: {e}")))?;
 
     // Section 1: vid-keyed U vector
     // Each entry: u16 vid_len + vid_bytes + f64 u_value
     for (i, entry) in variant_index.all_entries().iter().enumerate() {
         let vid = entry.vid.as_bytes();
         w.write_all(&(vid.len() as u16).to_le_bytes())
-            .map_err(|e| FavorError::Resource(format!("Write vid len: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Write vid len: {e}")))?;
         w.write_all(vid)
-            .map_err(|e| FavorError::Resource(format!("Write vid: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Write vid: {e}")))?;
         w.write_all(&u_all[i].to_le_bytes())
-            .map_err(|e| FavorError::Resource(format!("Write U: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Write U: {e}")))?;
     }
 
     // Section 2: per-gene blocks with vid keys
@@ -404,43 +404,43 @@ pub fn build_chromosome(
         let copy_len = name_bytes.len().min(GENE_NAME_LEN - 1);
         name_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
         w.write_all(&name_buf)
-            .map_err(|e| FavorError::Resource(format!("Write gene name: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Write gene name: {e}")))?;
 
         // n_variants (u32)
         let m = gc.variant_vids.len() as u32;
         w.write_all(&m.to_le_bytes())
-            .map_err(|e| FavorError::Resource(format!("Write m: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Write m: {e}")))?;
 
         // Explicit has_k flag (1 byte): 1 if K is cached, 0 if not
         let has_k: u8 = if gc.k_flat.is_empty() { 0 } else { 1 };
         w.write_all(&[has_k])
-            .map_err(|e| FavorError::Resource(format!("Write has_k: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Write has_k: {e}")))?;
 
         // Per-variant vid strings (length-prefixed)
         for vid in &gc.variant_vids {
             let vid_bytes = vid.as_bytes();
             w.write_all(&(vid_bytes.len() as u16).to_le_bytes())
-                .map_err(|e| FavorError::Resource(format!("Write vid len: {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Write vid len: {e}")))?;
             w.write_all(vid_bytes)
-                .map_err(|e| FavorError::Resource(format!("Write vid: {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Write vid: {e}")))?;
         }
 
         // K matrix [f64 × m²] — only if has_k
         for &val in &gc.k_flat {
             w.write_all(&val.to_le_bytes())
-                .map_err(|e| FavorError::Resource(format!("Write K: {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Write K: {e}")))?;
         }
     }
 
     w.flush()
-        .map_err(|e| FavorError::Resource(format!("Flush: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Flush: {e}")))?;
     // fsync before rename to ensure data is durable
     w.into_inner()
-        .map_err(|e| FavorError::Resource(format!("BufWriter finish: {e}")))?
+        .map_err(|e| CohortError::Resource(format!("BufWriter finish: {e}")))?
         .sync_all()
-        .map_err(|e| FavorError::Resource(format!("fsync {}: {e}", tmp_path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("fsync {}: {e}", tmp_path.display())))?;
     std::fs::rename(&tmp_path, &final_path).map_err(|e| {
-        FavorError::Resource(format!(
+        CohortError::Resource(format!(
             "Rename {} -> {}: {e}",
             tmp_path.display(),
             final_path.display()
@@ -462,14 +462,14 @@ pub fn build_chromosome(
 
 /// Bounds-checked little-endian readers — used by `load_chromosome` to
 /// keep a corrupted scores.bin from panicking the pipeline. Each returns
-/// a `FavorError::Resource` with the failing offset instead of unwrapping
+/// a `CohortError::Resource` with the failing offset instead of unwrapping
 /// `try_into` on a too-short slice.
 #[inline]
-fn read_u16(data: &[u8], pos: usize) -> Result<[u8; 2], FavorError> {
+fn read_u16(data: &[u8], pos: usize) -> Result<[u8; 2], CohortError> {
     data.get(pos..pos + 2)
         .and_then(|s| s.try_into().ok())
         .ok_or_else(|| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "scores.bin: short read at offset {pos} (need 2 bytes, file is {} bytes)",
                 data.len()
             ))
@@ -477,11 +477,11 @@ fn read_u16(data: &[u8], pos: usize) -> Result<[u8; 2], FavorError> {
 }
 
 #[inline]
-fn read_u32(data: &[u8], pos: usize) -> Result<[u8; 4], FavorError> {
+fn read_u32(data: &[u8], pos: usize) -> Result<[u8; 4], CohortError> {
     data.get(pos..pos + 4)
         .and_then(|s| s.try_into().ok())
         .ok_or_else(|| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "scores.bin: short read at offset {pos} (need 4 bytes, file is {} bytes)",
                 data.len()
             ))
@@ -489,11 +489,11 @@ fn read_u32(data: &[u8], pos: usize) -> Result<[u8; 4], FavorError> {
 }
 
 #[inline]
-fn read_f64(data: &[u8], pos: usize) -> Result<[u8; 8], FavorError> {
+fn read_f64(data: &[u8], pos: usize) -> Result<[u8; 8], CohortError> {
     data.get(pos..pos + 8)
         .and_then(|s| s.try_into().ok())
         .ok_or_else(|| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "scores.bin: short read at offset {pos} (need 8 bytes, file is {} bytes)",
                 data.len()
             ))
@@ -506,21 +506,21 @@ pub fn load_chromosome(
     cache_dir: &Path,
     chrom: &str,
     variant_index: &VariantIndex,
-) -> Result<ChromScoreCache, FavorError> {
+) -> Result<ChromScoreCache, CohortError> {
     let path = cache_dir.join(format!("chromosome={chrom}/scores.bin"));
     let data = std::fs::read(&path)
-        .map_err(|e| FavorError::Resource(format!("Read {}: {e}", path.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Read {}: {e}", path.display())))?;
 
     if data.len() < HEADER_SIZE {
-        return Err(FavorError::Resource("scores.bin truncated".into()));
+        return Err(CohortError::Resource("scores.bin truncated".into()));
     }
 
     if &data[0..8] != MAGIC {
-        return Err(FavorError::Resource("scores.bin: bad magic".into()));
+        return Err(CohortError::Resource("scores.bin: bad magic".into()));
     }
     let version = u16::from_le_bytes(read_u16(&data, 8)?);
     if version != VERSION {
-        return Err(FavorError::Resource(format!(
+        return Err(CohortError::Resource(format!(
             "scores.bin: version {version} != {VERSION}. Delete cache to rebuild."
         )));
     }
@@ -533,17 +533,17 @@ pub fn load_chromosome(
 
     for _ in 0..n_variants_on_disk {
         if pos + 2 > data.len() {
-            return Err(FavorError::Resource(
+            return Err(CohortError::Resource(
                 "scores.bin: U section truncated".into(),
             ));
         }
         let vid_len = u16::from_le_bytes(read_u16(&data, pos)?) as usize;
         pos += 2;
         if pos + vid_len + 8 > data.len() {
-            return Err(FavorError::Resource("scores.bin: U entry truncated".into()));
+            return Err(CohortError::Resource("scores.bin: U entry truncated".into()));
         }
         let vid = std::str::from_utf8(&data[pos..pos + vid_len])
-            .map_err(|_| FavorError::Resource("scores.bin: invalid UTF-8 in vid".into()))?;
+            .map_err(|_| CohortError::Resource("scores.bin: invalid UTF-8 in vid".into()))?;
         pos += vid_len;
         let u_val = f64::from_le_bytes(read_f64(&data, pos)?);
         pos += 8;
@@ -561,7 +561,7 @@ pub fn load_chromosome(
         // Gene name (GENE_NAME_LEN) + m (4 bytes) + has_k (1 byte)
         let gene_header_size = GENE_NAME_LEN + 4 + 1;
         if pos + gene_header_size > data.len() {
-            return Err(FavorError::Resource(
+            return Err(CohortError::Resource(
                 "scores.bin: gene block truncated".into(),
             ));
         }
@@ -584,19 +584,19 @@ pub fn load_chromosome(
         let mut all_resolved = true;
         for _ in 0..m {
             if pos + 2 > data.len() {
-                return Err(FavorError::Resource(format!(
+                return Err(CohortError::Resource(format!(
                     "scores.bin: gene {gene_name} vid truncated"
                 )));
             }
             let vid_len = u16::from_le_bytes(read_u16(&data, pos)?) as usize;
             pos += 2;
             if pos + vid_len > data.len() {
-                return Err(FavorError::Resource(format!(
+                return Err(CohortError::Resource(format!(
                     "scores.bin: gene {gene_name} vid bytes truncated"
                 )));
             }
             let vid = std::str::from_utf8(&data[pos..pos + vid_len])
-                .map_err(|_| FavorError::Resource("scores.bin: invalid UTF-8 in vid".into()))?;
+                .map_err(|_| CohortError::Resource("scores.bin: invalid UTF-8 in vid".into()))?;
             pos += vid_len;
 
             match variant_index.resolve_vid(vid) {
@@ -612,14 +612,14 @@ pub fn load_chromosome(
         let k_flat = if has_k {
             let k_size = m * m * 8;
             if pos + k_size > data.len() {
-                return Err(FavorError::Resource(format!(
+                return Err(CohortError::Resource(format!(
                     "scores.bin: gene {gene_name} K matrix truncated ({} bytes needed, {} available)",
                     k_size, data.len() - pos
                 )));
             }
             let k: Vec<f64> = (0..m * m)
                 .map(|i| read_f64(&data, pos + i * 8).map(f64::from_le_bytes))
-                .collect::<Result<Vec<f64>, FavorError>>()?;
+                .collect::<Result<Vec<f64>, CohortError>>()?;
             pos += k_size;
             k
         } else {

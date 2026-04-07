@@ -12,12 +12,12 @@ pub enum GenomeBuild {
 
 #[derive(Parser)]
 #[command(
-    name = "favor",
+    name = "cohort",
     version,
-    about = "FAVOR - Functional Annotation of Variants Online Resource",
+    about = "Cohort - genomic variant annotation and rare-variant association testing",
     long_about = "Genomic variant annotation, enrichment, and analysis toolkit.\n\n\
         Human mode (default in terminal): colored output, progress bars, interactive prompts.\n\
-        Machine mode (--format json or FAVOR_MACHINE=1): structured JSON for LLM agents."
+        Machine mode (--format json or COHORT_MACHINE=1): structured JSON for LLM agents."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -85,7 +85,7 @@ pub enum Command {
         build: Option<GenomeBuild>,
     },
 
-    /// Annotate variants against favor-base or favor-full
+    /// Annotate variants against FAVOR base or full tier
     Annotate {
         /// Input variant set directory (from ingest)
         input: PathBuf,
@@ -94,7 +94,7 @@ pub enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Use favor-full instead of favor-base
+        /// Use FAVOR full tier instead of base
         #[arg(long)]
         full: bool,
     },
@@ -149,7 +149,7 @@ pub enum Command {
         #[arg(long, value_delimiter = ',')]
         covariates: Vec<String>,
 
-        /// Annotated variant set from `favor annotate` (provides aPC weights + gene assignments)
+        /// Annotated variant set from `cohort annotate` (provides aPC weights + gene assignments)
         #[arg(long)]
         annotations: Option<PathBuf>,
 
@@ -270,7 +270,7 @@ pub enum Command {
     /// List available analyses and data status (for LLM agents)
     Manifest,
 
-    /// Remove favor binary and config
+    /// Remove cohort binary and config
     Uninstall,
 }
 
@@ -278,7 +278,7 @@ pub enum Command {
 pub enum DataAction {
     /// Download annotation data or add-on packs
     Pull {
-        /// Download favor-full (508GB) instead of configured tier
+        /// Download FAVOR full tier (508GB) instead of configured tier
         #[arg(long)]
         full: bool,
 

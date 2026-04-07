@@ -22,7 +22,7 @@
 use faer::sparse::{SparseColMat, Triplet};
 use faer::Mat;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::staar::kinship::sparse::SparseFactor;
 
 const KINSHIP_SYMMETRY_TOL: f64 = 1e-8;
@@ -48,16 +48,16 @@ impl KinshipMatrix {
     /// Build from a dense matrix. Errors if not square, contains NaN/Inf, or
     /// is asymmetric beyond `KINSHIP_SYMMETRY_TOL`. Auto-routes to sparse
     /// storage if the density falls below [`DENSE_DENSITY_THRESHOLD`].
-    pub fn new(matrix: Mat<f64>, label: String) -> Result<Self, FavorError> {
+    pub fn new(matrix: Mat<f64>, label: String) -> Result<Self, CohortError> {
         let n = matrix.nrows();
         if matrix.ncols() != n {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "kinship matrix '{label}' is not square: ({n}, {})",
                 matrix.ncols()
             )));
         }
         if n == 0 {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "kinship matrix '{label}' is empty"
             )));
         }
@@ -66,7 +66,7 @@ impl KinshipMatrix {
             for j in 0..n {
                 let v = matrix[(i, j)];
                 if !v.is_finite() {
-                    return Err(FavorError::Input(format!(
+                    return Err(CohortError::Input(format!(
                         "kinship matrix '{label}' has non-finite entry at ({i}, {j}): {v}"
                     )));
                 }
@@ -80,7 +80,7 @@ impl KinshipMatrix {
                 let a = matrix[(i, j)];
                 let b = matrix[(j, i)];
                 if (a - b).abs() > KINSHIP_SYMMETRY_TOL {
-                    return Err(FavorError::Input(format!(
+                    return Err(CohortError::Input(format!(
                         "kinship matrix '{label}' not symmetric at ({i}, {j}): \
                          K[{i},{j}] = {a:.6e} vs K[{j},{i}] = {b:.6e}"
                     )));
@@ -102,27 +102,27 @@ impl KinshipMatrix {
         n: usize,
         entries: Vec<Triplet<u32, u32, f64>>,
         label: String,
-    ) -> Result<Self, FavorError> {
+    ) -> Result<Self, CohortError> {
         if n == 0 {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "kinship matrix '{label}' is empty"
             )));
         }
         for t in &entries {
             if !t.val.is_finite() {
-                return Err(FavorError::Input(format!(
+                return Err(CohortError::Input(format!(
                     "kinship matrix '{label}' has non-finite entry at ({}, {})",
                     t.row, t.col
                 )));
             }
         }
         let matrix = SparseColMat::<u32, f64>::try_new_from_triplets(n, n, &entries).map_err(
-            |e| FavorError::Input(format!("kinship matrix '{label}' build failed: {e:?}")),
+            |e| CohortError::Input(format!("kinship matrix '{label}' build failed: {e:?}")),
         )?;
         Ok(Self::Sparse { matrix, label })
     }
 
-    fn dense_to_sparse(dense: &Mat<f64>, label: String) -> Result<Self, FavorError> {
+    fn dense_to_sparse(dense: &Mat<f64>, label: String) -> Result<Self, CohortError> {
         let n = dense.nrows();
         let mut entries: Vec<Triplet<u32, u32, f64>> = Vec::new();
         for j in 0..n {
@@ -227,15 +227,15 @@ impl GroupPartition {
     pub fn from_assignments(
         assignments: &[usize],
         labels: &[String],
-    ) -> Result<Self, FavorError> {
+    ) -> Result<Self, CohortError> {
         let n = assignments.len();
         if n == 0 {
-            return Err(FavorError::Input(
+            return Err(CohortError::Input(
                 "group partition requires at least one sample".into(),
             ));
         }
         if labels.is_empty() {
-            return Err(FavorError::Input(
+            return Err(CohortError::Input(
                 "group partition requires at least one label".into(),
             ));
         }
@@ -243,7 +243,7 @@ impl GroupPartition {
         let mut groups: Vec<Vec<u32>> = vec![Vec::new(); n_groups];
         for (i, &g) in assignments.iter().enumerate() {
             if g >= n_groups {
-                return Err(FavorError::Input(format!(
+                return Err(CohortError::Input(format!(
                     "sample {i} has group index {g} but only {n_groups} labels are defined"
                 )));
             }
@@ -251,7 +251,7 @@ impl GroupPartition {
         }
         for (g, members) in groups.iter().enumerate() {
             if members.is_empty() {
-                return Err(FavorError::Input(format!(
+                return Err(CohortError::Input(format!(
                     "group '{}' (index {g}) has no members — drop unused levels or refilter",
                     labels[g]
                 )));
@@ -377,7 +377,7 @@ mod tests {
         k[(1, 0)] = 0.4;
         let err = KinshipMatrix::new(k, "bad".into()).unwrap_err();
         match err {
-            FavorError::Input(msg) => assert!(msg.contains("not symmetric")),
+            CohortError::Input(msg) => assert!(msg.contains("not symmetric")),
             other => panic!("expected Input, got {other:?}"),
         }
     }
@@ -388,7 +388,7 @@ mod tests {
         k[(0, 0)] = 1.0;
         k[(1, 1)] = f64::NAN;
         let err = KinshipMatrix::new(k, "bad".into()).unwrap_err();
-        assert!(matches!(err, FavorError::Input(_)));
+        assert!(matches!(err, CohortError::Input(_)));
     }
 
     #[test]
@@ -426,14 +426,14 @@ mod tests {
     fn group_partition_rejects_empty_group() {
         let labels = vec!["A".into(), "B".into()];
         let err = GroupPartition::from_assignments(&[0, 0, 0], &labels).unwrap_err();
-        assert!(matches!(err, FavorError::Input(_)));
+        assert!(matches!(err, CohortError::Input(_)));
     }
 
     #[test]
     fn group_partition_rejects_oob_index() {
         let labels = vec!["A".into()];
         let err = GroupPartition::from_assignments(&[0, 1], &labels).unwrap_err();
-        assert!(matches!(err, FavorError::Input(_)));
+        assert!(matches!(err, CohortError::Input(_)));
     }
 
     #[test]

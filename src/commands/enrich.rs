@@ -7,7 +7,7 @@ use crate::commands::{self, EnrichConfig};
 use crate::config::Config;
 use crate::data::{parquet_row_count, AnnotatedSet, TissueDb};
 use crate::engine::DfEngine;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::resource::Resources;
 
@@ -18,10 +18,10 @@ pub fn handle(
     output_path: Option<PathBuf>,
     out: &dyn Output,
     dry_run: bool,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     if !input.exists() {
-        return Err(FavorError::Input(format!(
-            "Annotated variant set not found: '{}'. Run `favor annotate` first.",
+        return Err(CohortError::Input(format!(
+            "Annotated variant set not found: '{}'. Run `cohort annotate` first.",
             input.display()
         )));
     }
@@ -61,11 +61,11 @@ pub fn run(
     output_path: Option<PathBuf>,
     out: &dyn Output,
     dry_run: bool,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     handle(input, tissue, output_path, out, dry_run)
 }
 
-fn emit_dry_run(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorError> {
+fn emit_dry_run(config: &EnrichConfig, out: &dyn Output) -> Result<(), CohortError> {
     let annotated = AnnotatedSet::open(&config.input)?;
     let tissue_db = TissueDb::open(&config.tissue_dir)?;
     let available_tables: Vec<&str> = tissue_db
@@ -89,7 +89,7 @@ fn emit_dry_run(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorErro
 }
 
 /// Core enrich pipeline: open → validate → resolve tissue → join tables → report.
-pub fn run_enrich(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorError> {
+pub fn run_enrich(config: &EnrichConfig, out: &dyn Output) -> Result<(), CohortError> {
     let annotated = AnnotatedSet::open(&config.input)?;
     annotated.supports(&[Col::Vid])?;
     let tissue_db = TissueDb::open(&config.tissue_dir)?;
@@ -112,7 +112,7 @@ pub fn run_enrich(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorEr
     ));
 
     std::fs::create_dir_all(&config.output).map_err(|e| {
-        FavorError::Resource(format!("Cannot create '{}': {e}", config.output.display()))
+        CohortError::Resource(format!("Cannot create '{}': {e}", config.output.display()))
     })?;
 
     let tables_written = run_enrichment(
@@ -143,7 +143,7 @@ fn resolve_tissue(
     engine: &DfEngine,
     tissue_dir: &std::path::Path,
     tissue_query: &str,
-) -> Result<Vec<String>, FavorError> {
+) -> Result<Vec<String>, CohortError> {
     let tissue_vocab_path = tissue_dir.join("reference/tissue_vocab.parquet");
     if !tissue_vocab_path.exists() {
         return Ok(vec![tissue_query.to_string()]);
@@ -163,7 +163,7 @@ fn resolve_tissue(
         let groups = engine
             .query_strings("SELECT DISTINCT tissue_group FROM _tissue_vocab ORDER BY tissue_group")
             .unwrap_or_default();
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "Unknown tissue '{}'. Available groups: {}",
             tissue_query,
             groups.join(", ")
@@ -180,7 +180,7 @@ fn run_enrichment(
     engine: &DfEngine,
     output_dir: &std::path::Path,
     out: &dyn Output,
-) -> Result<Vec<(String, i64)>, FavorError> {
+) -> Result<Vec<(String, i64)>, CohortError> {
     let tissue_filter: String = resolved_tissues
         .iter()
         .map(|t| format!("'{}'", t.replace('\'', "''")))
@@ -267,7 +267,7 @@ fn write_meta(
     out: &dyn Output,
 ) {
     let meta = json!({
-        "favor_enrich_version": 2,
+        "cohort_enrich_version": 2,
         "source": config.input.to_string_lossy(),
         "tissue": config.tissue_name,
         "resolved_tissues": resolved_tissues,

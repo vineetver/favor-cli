@@ -7,7 +7,7 @@ use serde_json::json;
 use crate::cli::DataAction;
 use crate::config::{Config, DirProbe, Environment, ResourceConfig, Tier};
 use crate::data::Pack;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::output::OutputMode;
 use crate::resource::Resources;
@@ -17,19 +17,19 @@ pub fn init(
     force: bool,
     out: &dyn Output,
     mode: &OutputMode,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let config = Config::load_configured()?;
 
     let project_dir = match path {
         Some(p) => {
             std::fs::create_dir_all(&p).map_err(|e| {
-                FavorError::Resource(format!("Cannot create directory '{}': {e}", p.display()))
+                CohortError::Resource(format!("Cannot create directory '{}': {e}", p.display()))
             })?;
             p.canonicalize()
-                .map_err(|e| FavorError::Input(format!("Cannot resolve '{}': {e}", p.display())))?
+                .map_err(|e| CohortError::Input(format!("Cannot resolve '{}': {e}", p.display())))?
         }
         None => std::env::current_dir().map_err(|e| {
-            FavorError::Resource(format!("Cannot determine current directory: {e}"))
+            CohortError::Resource(format!("Cannot determine current directory: {e}"))
         })?,
     };
 
@@ -50,13 +50,13 @@ pub fn init(
     let content = render_init_template(&config, &probe);
 
     std::fs::write(&claude_path, &content).map_err(|e| {
-        FavorError::Resource(format!("Cannot write '{}': {e}", claude_path.display()))
+        CohortError::Resource(format!("Cannot write '{}': {e}", claude_path.display()))
     })?;
     std::fs::create_dir_all(&codex_dir).map_err(|e| {
-        FavorError::Resource(format!("Cannot create '{}': {e}", codex_dir.display()))
+        CohortError::Resource(format!("Cannot create '{}': {e}", codex_dir.display()))
     })?;
     std::fs::write(&codex_path, &content).map_err(|e| {
-        FavorError::Resource(format!("Cannot write '{}': {e}", codex_path.display()))
+        CohortError::Resource(format!("Cannot write '{}': {e}", codex_path.display()))
     })?;
 
     let action = if is_refresh {
@@ -126,14 +126,14 @@ fn build_pack_list(config: &Config, probe: &DirProbe) -> String {
         .map(|p| format!("- **{}** ({}): {}", p.id, p.size_human, p.description))
         .collect();
     if lines.is_empty() {
-        return "- No optional packs. Run `favor data pull --pack <id>` then `favor init --force`.".into();
+        return "- No optional packs. Run `cohort data pull --pack <id>` then `cohort init --force`.".into();
     }
     lines.join("\n")
 }
 
-const INIT_TEMPLATE: &str = r#"# FAVOR Genomic Analysis
+const INIT_TEMPLATE: &str = r#"# COHORT Genomic Analysis
 
-Always pass `--format json` to every favor command. Use `--dry-run` before heavy computation.
+Always pass `--format json` to every cohort command. Use `--dry-run` before heavy computation.
 
 ## System
 
@@ -149,26 +149,26 @@ Always pass `--format json` to every favor command. Use `--dry-run` before heavy
 ## Pipeline
 
 ```
-variant file -> favor ingest -> favor annotate -> favor enrich --tissue X
-                                                -> favor staar (rare-variant association)
-                                                -> favor interpret (variant-to-gene)
+variant file -> cohort ingest -> cohort annotate -> cohort enrich --tissue X
+                                                -> cohort staar (rare-variant association)
+                                                -> cohort interpret (variant-to-gene)
 ```
 
 ## Commands
 
 | Command | What it does |
 |---------|-------------|
-| `favor ingest <file>` | Normalize VCF/TSV/CSV to parquet with variant ID |
-| `favor annotate <file>` | Add CADD, ClinVar, gnomAD, REVEL, aPC scores, regulatory marks |
-| `favor enrich <file> --tissue <name>` | Add tissue eQTL, ChromBPNet, enhancer-gene links |
-| `favor staar --genotypes <vcf> --phenotype <tsv> --trait-name <col> --annotations <parquet>` | Rare-variant burden test (STAAR-O) |
-| `favor schema [table]` | Show column names and types |
-| `favor manifest` | List installed data and available commands |
+| `cohort ingest <file>` | Normalize VCF/TSV/CSV to parquet with variant ID |
+| `cohort annotate <file>` | Add CADD, ClinVar, gnomAD, REVEL, aPC scores, regulatory marks |
+| `cohort enrich <file> --tissue <name>` | Add tissue eQTL, ChromBPNet, enhancer-gene links |
+| `cohort staar --genotypes <vcf> --phenotype <tsv> --trait-name <col> --annotations <parquet>` | Rare-variant burden test (STAAR-O) |
+| `cohort schema [table]` | Show column names and types |
+| `cohort manifest` | List installed data and available commands |
 
 ## STAAR usage
 
 ```bash
-favor staar --dry-run --format json \
+cohort staar --dry-run --format json \
   --genotypes cohort.vcf.gz \
   --phenotype pheno.tsv \
   --trait-name LDL \
@@ -177,7 +177,7 @@ favor staar --dry-run --format json \
   --masks coding
 ```
 
-Use `--dry-run` first to check memory. On HPC: `srun --mem=64G -c 8 favor staar ...`
+Use `--dry-run` first to check memory. On HPC: `srun --mem=64G -c 8 cohort staar ...`
 
 ## Interpreting results
 
@@ -225,15 +225,15 @@ pub fn setup(
     mode: &OutputMode,
     cli_environment: Option<String>,
     cli_memory_budget: Option<String>,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     if mode.is_machine() {
-        return Err(FavorError::Input(
+        return Err(CohortError::Input(
             "setup requires interactive mode — run without --format json".to_string(),
         ));
     }
 
     // 1. Pick tier — returns Tier directly, no index mapping
-    let tier = match tui::select_tier().map_err(|e| FavorError::Internal(e.into()))? {
+    let tier = match tui::select_tier().map_err(|e| CohortError::Internal(e.into()))? {
         Some(t) => t,
         None => {
             output.warn("Setup cancelled");
@@ -243,8 +243,8 @@ pub fn setup(
 
     // 2. Pick root directory — browser shows live data probe
     let cwd = std::env::current_dir().unwrap_or_else(|_| Config::default_root_dir());
-    let root = match tui::select_directory("Select FAVOR root directory", &cwd)
-        .map_err(|e| FavorError::Internal(e.into()))?
+    let root = match tui::select_directory("Select FAVOR data root directory", &cwd)
+        .map_err(|e| CohortError::Internal(e.into()))?
     {
         Some(p) => p,
         None => {
@@ -261,14 +261,14 @@ pub fn setup(
         .map(|p| p.id.to_string())
         .collect();
     let selected_packs = tui::select_packs(&optional_packs, &installed_pack_ids)
-        .map_err(|e| FavorError::Internal(e.into()))?
+        .map_err(|e| CohortError::Internal(e.into()))?
         .unwrap_or_default(); // Esc = skip, not cancel
 
     // 4. Environment selection — HPC or workstation?
     let environment = if let Some(env_str) = &cli_environment {
         Some(env_str.parse::<Environment>()?)
     } else {
-        tui::select_environment().map_err(|e| FavorError::Internal(e.into()))?
+        tui::select_environment().map_err(|e| CohortError::Internal(e.into()))?
     };
 
     if environment == Some(Environment::Hpc) {
@@ -289,7 +289,7 @@ pub fn setup(
 
         if !has_srun && !has_sbatch {
             output.warn("srun/sbatch not found in PATH — are you sure this is HPC?");
-            output.warn("Continuing anyway. You can re-run `favor setup` to change.");
+            output.warn("Continuing anyway. You can re-run `cohort setup` to change.");
         }
     }
 
@@ -297,19 +297,19 @@ pub fn setup(
     let res_detect = Resources::detect();
     let memory_budget = if let Some(budget) = &cli_memory_budget {
         if ResourceConfig::parse_memory_bytes(budget).is_none() {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "Cannot parse memory budget '{budget}'. Use format like '16GB', '64G', '8192MB'."
             )));
         }
         Some(budget.clone())
     } else {
-        tui::select_memory_budget(&res_detect).map_err(|e| FavorError::Internal(e.into()))?
+        tui::select_memory_budget(&res_detect).map_err(|e| CohortError::Internal(e.into()))?
     };
 
     // 6. Probe the chosen root to show what's already there
     let probe = DirProbe::scan(&root);
 
-    output.status("FAVOR Configuration");
+    output.status("COHORT Configuration");
     output.status(&format!("  Root:       {}", root.display()));
     output.status(&format!("  Tier:       {tier}"));
 
@@ -386,7 +386,7 @@ pub fn setup(
         output,
     ) {
         output.warn(
-            "Config saved but annotation download incomplete. Run `favor data pull` to retry.",
+            "Config saved but annotation download incomplete. Run `cohort data pull` to retry.",
         );
         return Err(e);
     }
@@ -395,7 +395,7 @@ pub fn setup(
     for pack in Pack::required() {
         if let Err(e) = crate::data::transfer::pull_pack(pack.id, false, true, output) {
             output.warn(&format!(
-                "{} failed: {e}. Run `favor data pull --pack {}` to retry.",
+                "{} failed: {e}. Run `cohort data pull --pack {}` to retry.",
                 pack.name, pack.id
             ));
         }
@@ -405,16 +405,16 @@ pub fn setup(
     for pack_id in &selected_packs {
         if let Err(e) = crate::data::transfer::pull_pack(pack_id, false, true, output) {
             output.warn(&format!(
-                "Pack '{pack_id}' failed: {e}. Run `favor data pull --pack {pack_id}` to retry."
+                "Pack '{pack_id}' failed: {e}. Run `cohort data pull --pack {pack_id}` to retry."
             ));
         }
     }
 
-    output.success("Setup complete. Run: favor annotate <input.vcf>");
+    output.success("Setup complete. Run: cohort annotate <input.vcf>");
     Ok(())
 }
 
-pub fn uninstall(out: &dyn Output) -> Result<(), FavorError> {
+pub fn uninstall(out: &dyn Output) -> Result<(), CohortError> {
     let binary = std::env::current_exe().unwrap_or_default();
     let config_dir = Config::config_dir();
 
@@ -425,7 +425,7 @@ pub fn uninstall(out: &dyn Output) -> Result<(), FavorError> {
 
     if config_dir.exists() {
         std::fs::remove_dir_all(&config_dir).map_err(|e| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "Cannot remove config directory '{}': {e}",
                 config_dir.display()
             ))
@@ -456,7 +456,7 @@ pub fn uninstall(out: &dyn Output) -> Result<(), FavorError> {
     // Remove binary last (we're running it)
     if binary.exists() {
         std::fs::remove_file(&binary).map_err(|e| {
-            FavorError::Resource(format!("Cannot remove binary '{}': {e}", binary.display()))
+            CohortError::Resource(format!("Cannot remove binary '{}': {e}", binary.display()))
         })?;
     }
 

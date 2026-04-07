@@ -18,7 +18,7 @@ use faer::sparse::linalg::solvers::{Llt, SymbolicLlt};
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMat};
 use faer::Side;
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::staar::kinship::types::{GroupPartition, KinshipMatrix, VarianceComponents};
 
 /// Per-entry contribution to Σ at one nonzero position.
@@ -76,7 +76,7 @@ impl Assembler {
     /// Build the union pattern and the symbolic Cholesky factor. All
     /// kinships must be the sparse variant. Errors if the union pattern
     /// is structurally singular.
-    pub fn new(n: usize, kinships: &[KinshipMatrix]) -> Result<Self, FavorError> {
+    pub fn new(n: usize, kinships: &[KinshipMatrix]) -> Result<Self, CohortError> {
         // Union of K_l patterns + the diagonal.
         let mut col_sets: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); n];
         for j in 0..n {
@@ -84,7 +84,7 @@ impl Assembler {
         }
         for k in kinships {
             let sp = k.as_sparse().ok_or_else(|| {
-                FavorError::Internal(anyhow::anyhow!(
+                CohortError::Internal(anyhow::anyhow!(
                     "Assembler::new called with non-sparse kinship"
                 ))
             })?;
@@ -131,7 +131,7 @@ impl Assembler {
                 }
             }
             if !found {
-                return Err(FavorError::Internal(anyhow::anyhow!(
+                return Err(CohortError::Internal(anyhow::anyhow!(
                     "diagonal entry missing in union pattern at column {j}"
                 )));
             }
@@ -155,7 +155,7 @@ impl Assembler {
                     let union_slice = &row_idx[union_s..union_e];
                     let pos = union_slice
                         .binary_search(&row)
-                        .map_err(|_| FavorError::Internal(anyhow::anyhow!(
+                        .map_err(|_| CohortError::Internal(anyhow::anyhow!(
                             "K_l pattern not contained in union pattern"
                         )))?;
                     contributions[union_s + pos]
@@ -176,7 +176,7 @@ impl Assembler {
         );
         let symbolic = SymbolicLlt::<u32>::try_new(symbolic_pattern.as_ref(), Side::Lower)
             .map_err(|e| {
-                FavorError::Analysis(format!(
+                CohortError::Analysis(format!(
                     "sparse symbolic Cholesky failed (Σ pattern is structurally singular?): {e:?}"
                 ))
             })?;
@@ -255,7 +255,7 @@ impl Assembler {
         groups: &GroupPartition,
         weights: &[f64],
         row_to_group: &[usize],
-    ) -> Result<Llt<u32, f64>, FavorError> {
+    ) -> Result<Llt<u32, f64>, CohortError> {
         let values = self.assemble_values(tau, groups, weights, row_to_group);
         let symbolic_pattern = SymbolicSparseColMat::<u32>::new_checked(
             self.n,
@@ -268,7 +268,7 @@ impl Assembler {
         let mat_ref = SparseColMatRef::<'_, u32, f64>::new(pattern_ref, &values);
         Llt::<u32, f64>::try_new_with_symbolic(self.symbolic.clone(), mat_ref, Side::Lower)
             .map_err(|e| {
-                FavorError::Analysis(format!(
+                CohortError::Analysis(format!(
                     "sparse Σ Cholesky failed at current τ (matrix not positive definite): {e:?}"
                 ))
             })

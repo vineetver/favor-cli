@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">FAVOR CLI</h1>
+  <h1 align="center">COHORT CLI</h1>
   <p align="center">
     From raw variants to biological mechanisms in one tool.
     <br />
@@ -11,8 +11,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/vineetver/favor-cli/actions/workflows/ci.yml"><img src="https://github.com/vineetver/favor-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/vineetver/favor-cli/releases/latest"><img src="https://img.shields.io/github/v/release/vineetver/favor-cli?color=blue" alt="Release"></a>
+  <a href="https://github.com/vineetver/cohort-cli/actions/workflows/ci.yml"><img src="https://github.com/vineetver/cohort-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/vineetver/cohort-cli/releases/latest"><img src="https://img.shields.io/github/v/release/vineetver/cohort-cli?color=blue" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/rust-stable-orange" alt="Rust">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey" alt="Platform">
@@ -23,17 +23,17 @@
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vineetver/favor-cli/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vineetver/cohort-cli/master/install.sh | sh
 ```
 
 ## Quick start
 
 ```bash
-favor setup
-favor ingest input.vcf.gz
-favor annotate input.ingested.parquet
-favor enrich input.annotated.parquet --tissue brain
-favor staar --genotypes cohort.vcf.gz --phenotype pheno.tsv \
+cohort setup
+cohort ingest input.vcf.gz
+cohort annotate input.ingested.parquet
+cohort enrich input.annotated.parquet --tissue brain
+cohort staar --genotypes cohort.vcf.gz --phenotype pheno.tsv \
   --trait-name LDL --covariates age,sex,PC1,PC2 --annotations annotated.parquet
 ```
 
@@ -41,13 +41,13 @@ favor staar --genotypes cohort.vcf.gz --phenotype pheno.tsv \
 
 | Command | Description |
 |---------|-------------|
-| `favor setup` | Configure tier, data paths, HPC environment, memory budget |
-| `favor ingest` | Ingest any variant format: WGS VCF, variant lists, credible sets, TSV/CSV/parquet |
-| `favor annotate` | Annotate with FAVOR functional annotations (200–508 GB, 24 chromosomes) |
-| `favor enrich` | Tissue-specific overlay: eQTL, sQTL, ChromBPNet, enhancer-gene links |
-| `favor staar` | STAAR rare-variant association testing (single-study) |
-| `favor meta-staar` | MetaSTAAR cross-biobank rare-variant meta-analysis (summary-stat based) |
-| `favor schema` | Inspect annotation table schemas |
+| `cohort setup` | Configure tier, data paths, HPC environment, memory budget |
+| `cohort ingest` | Ingest any variant format: WGS VCF, variant lists, credible sets, TSV/CSV/parquet |
+| `cohort annotate` | Annotate with FAVOR functional annotations (200–508 GB, 24 chromosomes) |
+| `cohort enrich` | Tissue-specific overlay: eQTL, sQTL, ChromBPNet, enhancer-gene links |
+| `cohort staar` | STAAR rare-variant association testing (single-study) |
+| `cohort meta-staar` | MetaSTAAR cross-biobank rare-variant meta-analysis (summary-stat based) |
+| `cohort schema` | Inspect annotation table schemas |
 
 All commands support `--format json` and `--dry-run`. See [AGENTS.md](AGENTS.md) for the machine interface.
 
@@ -79,18 +79,18 @@ See [docs/storage.md](docs/storage.md) for the storage format and [docs/validati
 
 ## Roadmap
 
-Tracked in [GitHub Issues](https://github.com/vineetver/favor-cli/issues) with milestones:
+Tracked in [GitHub Issues](https://github.com/vineetver/cohort-cli/issues) with milestones:
 
 | Milestone | Focus |
 |-----------|-------|
-| [v0.2.0](https://github.com/vineetver/favor-cli/milestone/1) | STAAR hardening: GRM, multi-VCF, AI-STAAR, MultiSTAAR, performance |
-| [v0.3.0](https://github.com/vineetver/favor-cli/milestone/2) | MetaSTAAR: cross-biobank meta-analysis |
-| [v0.4.0](https://github.com/vineetver/favor-cli/milestone/3) | Variant interpretation: scoring, fine-mapping, colocalization, V2G |
-| [v1.0.0](https://github.com/vineetver/favor-cli/milestone/4) | Nextflow orchestration, provenance, QC |
+| [v0.2.0](https://github.com/vineetver/cohort-cli/milestone/1) | STAAR hardening: GRM, multi-VCF, AI-STAAR, MultiSTAAR, performance |
+| [v0.3.0](https://github.com/vineetver/cohort-cli/milestone/2) | MetaSTAAR: cross-biobank meta-analysis |
+| [v0.4.0](https://github.com/vineetver/cohort-cli/milestone/3) | Variant interpretation: scoring, fine-mapping, colocalization, V2G |
+| [v1.0.0](https://github.com/vineetver/cohort-cli/milestone/4) | Nextflow orchestration, provenance, QC |
 
 ## Citation
 
-FAVOR CLI implements the [STAAR](https://github.com/xihaoli/STAARpipeline) framework and the [FAVOR](https://favor.genohub.org) annotation database. If you use this tool, please cite:
+COHORT CLI implements the [STAAR](https://github.com/xihaoli/STAARpipeline) framework and the [FAVOR](https://favor.genohub.org) annotation database. If you use this tool, please cite:
 
 > Li Z\*, Li X\*, Zhou H, et al. **A framework for detecting noncoding rare variant associations of large-scale whole-genome sequencing studies.** *Nature Methods*, 19(12), 1599-1611 (2022). [DOI: 10.1038/s41592-022-01640-x](https://doi.org/10.1038/s41592-022-01640-x)
 

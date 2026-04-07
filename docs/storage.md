@@ -1,6 +1,6 @@
 # Genotype Storage
 
-FAVOR stores genotypes as a sparse matrix over `(sample_id, variant_vcf) -> dosage`. All queries resolve to aligned vectors over `variant_vcf`. All operations are vectorized transformations over these aligned index spaces. No alternative variant ordering or implicit joins anywhere.
+COHORT stores genotypes as a sparse matrix over `(sample_id, variant_vcf) -> dosage`. All queries resolve to aligned vectors over `variant_vcf`. All operations are vectorized transformations over these aligned index spaces. No alternative variant ordering or implicit joins anywhere.
 
 > **Coordinate convention:** All genomic positions are **1-based** (VCF convention). The FAVOR annotation data, ingested variant sets, and all pipeline output use 1-based positions. Input in 0-based formats (e.g. BED) is converted at ingest. The `variant_vcf` dense index (0, 1, 2, ..., N-1) is a separate concept — an internal array index, not a genomic coordinate.
 
@@ -118,7 +118,7 @@ Metadata vectors, weight vectors, genotype columns, score cache vectors, and mas
     { "name": "22", "n_variants": 17178 }
   ],
   "created_at": "1743879600",
-  "favor_version": "0.1.0"
+  "cohort_version": "0.1.0"
 }
 ```
 
@@ -136,7 +136,7 @@ Binary sparse genotype matrix. O(1) random access per variant via offset table.
 +-----------------------------------------------------------+
 |  Header (64 bytes)                                        |
 |                                                           |
-|  [0..8]   magic: "FAVORG\x03\0"                          |
+|  [0..8]   magic: "COHORT\x03\0"                           |
 |  [8..10]  version: u16 = 3                                |
 |  [10..14] n_samples: u32                                  |
 |  [14..18] n_variants: u32                                 |

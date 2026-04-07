@@ -5,7 +5,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::column::Col;
-use crate::error::FavorError;
+use crate::error::CohortError;
 
 /// Annotation tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,12 +136,12 @@ impl fmt::Display for Tier {
 }
 
 impl FromStr for Tier {
-    type Err = FavorError;
+    type Err = CohortError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "base" => Ok(Tier::Base),
             "full" => Ok(Tier::Full),
-            other => Err(FavorError::Input(format!(
+            other => Err(CohortError::Input(format!(
                 "Invalid tier '{other}'. Must be 'base' or 'full'."
             ))),
         }
@@ -164,12 +164,12 @@ impl fmt::Display for Environment {
 }
 
 impl FromStr for Environment {
-    type Err = FavorError;
+    type Err = CohortError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "hpc" | "cluster" => Ok(Environment::Hpc),
             "workstation" | "local" | "desktop" => Ok(Environment::Workstation),
-            other => Err(FavorError::Input(format!(
+            other => Err(CohortError::Input(format!(
                 "Invalid environment '{other}'. Must be 'hpc' or 'workstation'."
             ))),
         }
@@ -250,8 +250,8 @@ impl ResourceConfig {
 impl Config {
     pub fn config_dir() -> PathBuf {
         dirs::home_dir()
-            .map(|h| h.join(".favor"))
-            .unwrap_or_else(|| PathBuf::from(".favor"))
+            .map(|h| h.join(".cohort"))
+            .unwrap_or_else(|| PathBuf::from(".cohort"))
     }
 
     pub fn config_path() -> PathBuf {
@@ -277,37 +277,37 @@ impl Config {
         self.root_dir().join("tissue")
     }
 
-    pub fn load() -> Result<Self, FavorError> {
+    pub fn load() -> Result<Self, CohortError> {
         let path = Self::config_path();
         if !path.exists() {
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(&path).map_err(|e| {
-            FavorError::Resource(format!("Cannot read config '{}': {e}", path.display()))
+            CohortError::Resource(format!("Cannot read config '{}': {e}", path.display()))
         })?;
         let config: Config = toml::from_str(&content).map_err(|e| {
-            FavorError::Resource(format!("Invalid config '{}': {e}", path.display()))
+            CohortError::Resource(format!("Invalid config '{}': {e}", path.display()))
         })?;
         Ok(config)
     }
 
     /// Load config and require that setup has been run.
     /// Use this in every command that needs data paths.
-    pub fn load_configured() -> Result<Self, FavorError> {
+    pub fn load_configured() -> Result<Self, CohortError> {
         let config = Self::load()?;
         if !config.is_configured() {
-            return Err(FavorError::DataMissing(
-                "Not configured. Run `favor setup` first.".to_string(),
+            return Err(CohortError::DataMissing(
+                "Not configured. Run `cohort setup` first.".to_string(),
             ));
         }
         Ok(config)
     }
 
-    pub fn save(&self) -> Result<(), FavorError> {
+    pub fn save(&self) -> Result<(), CohortError> {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                FavorError::Resource(format!(
+                CohortError::Resource(format!(
                     "Cannot create config directory '{}': {e}",
                     parent.display()
                 ))
@@ -315,7 +315,7 @@ impl Config {
         }
         let content = toml::to_string_pretty(self)?;
         std::fs::write(&path, &content).map_err(|e| {
-            FavorError::Resource(format!("Cannot write config '{}': {e}", path.display()))
+            CohortError::Resource(format!("Cannot write config '{}': {e}", path.display()))
         })?;
         Ok(())
     }

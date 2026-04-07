@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use faer::Mat;
 
 use crate::engine::DfEngine;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::genotype::GenotypeResult;
 use crate::staar::kinship::types::{GroupPartition, KinshipMatrix};
@@ -30,7 +30,7 @@ pub fn load_kinship(
     paths: &[PathBuf],
     sample_order: &[String],
     out: &dyn Output,
-) -> Result<Vec<KinshipMatrix>, FavorError> {
+) -> Result<Vec<KinshipMatrix>, CohortError> {
     let n = sample_order.len();
     let id_to_idx: HashMap<&str, usize> = sample_order
         .iter()
@@ -46,7 +46,7 @@ pub fn load_kinship(
             .unwrap_or_else(|| path.display().to_string());
         out.status(&format!("  Loading kinship: {}", path.display()));
         let content = std::fs::read_to_string(path).map_err(|e| {
-            FavorError::Resource(format!(
+            CohortError::Resource(format!(
                 "Cannot read kinship file '{}': {e}",
                 path.display()
             ))
@@ -75,7 +75,7 @@ pub fn load_kinship(
             let s_i = parts[0];
             let s_j = parts[1];
             let val: f64 = parts[2].parse().map_err(|_| {
-                FavorError::Input(format!(
+                CohortError::Input(format!(
                     "Kinship file '{}' line {}: cannot parse value '{}'",
                     path.display(),
                     line_no + 1,
@@ -117,7 +117,7 @@ pub fn load_groups(
     pheno_mask: &[bool],
     column_map: &HashMap<String, String>,
     out: &dyn Output,
-) -> Result<GroupPartition, FavorError> {
+) -> Result<GroupPartition, CohortError> {
     engine.register_csv("_pheno_groups", phenotype, b'\t')?;
     let cols = engine.table_columns("_pheno_groups")?;
 
@@ -125,7 +125,7 @@ pub fn load_groups(
         if cols.contains(mapped) {
             mapped.clone()
         } else {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "Column map '{group_col}={mapped}' but '{mapped}' not in phenotype.",
             )));
         }
@@ -137,7 +137,7 @@ pub fn load_groups(
             .find(|c| c.to_lowercase() == lower)
             .cloned()
             .ok_or_else(|| {
-                FavorError::Input(format!(
+                CohortError::Input(format!(
                     "Group column '{group_col}' not found in phenotype. Available: {}",
                     cols.join(", ")
                 ))
@@ -178,7 +178,7 @@ pub fn load_groups(
             continue;
         }
         let label = id_to_label.get(name).cloned().ok_or_else(|| {
-            FavorError::Input(format!(
+            CohortError::Input(format!(
                 "Sample '{name}' has no value in group column '{resolved}'"
             ))
         })?;
@@ -277,7 +277,7 @@ mod tests {
         let out = null_output();
         let err = load_kinship(&[path], &order, out.as_ref()).unwrap_err();
         match err {
-            FavorError::Input(msg) => {
+            CohortError::Input(msg) => {
                 assert!(msg.contains("cannot parse value"), "msg = {msg}");
             }
             other => panic!("expected Input error, got {other:?}"),

@@ -17,7 +17,7 @@ mod setup;
 mod types;
 
 use cli::{Cli, Command};
-use error::FavorError;
+use error::CohortError;
 use output::OutputMode;
 
 fn main() {
@@ -26,7 +26,7 @@ fn main() {
     let out = output::create(&mode);
 
     if let Some(t) = cli.threads {
-        std::env::set_var("FAVOR_THREADS", t.to_string());
+        std::env::set_var("COHORT_THREADS", t.to_string());
     }
 
     let dry_run = cli.dry_run;
@@ -43,7 +43,7 @@ fn run(
     out: &dyn output::Output,
     mode: &OutputMode,
     dry_run: bool,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     match command {
         Command::Init { path, force } => setup::init(path, force, out, mode),
         Command::Setup { environment, memory_budget } => {

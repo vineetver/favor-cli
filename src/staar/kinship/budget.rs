@@ -9,22 +9,22 @@
 //! factor) bypass this guard entirely — their working set is `O(nnz_L)`,
 //! not `O(n²)`.
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 
 const DEFAULT_KINSHIP_MEM_BYTES: u64 = 16 * (1u64 << 30);
 
 /// Check that dense AI-REML for `n` samples will fit in the configured
 /// memory budget. Returns a `Resource` error with a clear hint when the
 /// required allocation would exceed the cap.
-pub fn check_memory_budget(n: usize) -> Result<(), FavorError> {
+pub fn check_memory_budget(n: usize) -> Result<(), CohortError> {
     let needed = bytes_for_dense_reml(n);
     let budget = memory_budget_bytes();
     if needed > budget {
         let needed_gb = needed as f64 / (1u64 << 30) as f64;
         let budget_gb = budget as f64 / (1u64 << 30) as f64;
-        return Err(FavorError::Resource(format!(
+        return Err(CohortError::Resource(format!(
             "Kinship-aware REML for n = {n} samples needs ~{needed_gb:.1} GB of dense matrix \
-             memory; budget is {budget_gb:.1} GB. Set FAVOR_KINSHIP_MEM_GB to raise the cap, \
+             memory; budget is {budget_gb:.1} GB. Set COHORT_KINSHIP_MEM_GB to raise the cap, \
              pass a sparse pedigree kinship to take the sparse path, or reduce sample count."
         )));
     }
@@ -37,10 +37,10 @@ pub fn bytes_for_dense_reml(n: usize) -> u64 {
     5u64 * (n as u64) * (n as u64) * 8
 }
 
-/// Resolved budget in bytes. Reads `FAVOR_KINSHIP_MEM_GB` if set, falls
+/// Resolved budget in bytes. Reads `COHORT_KINSHIP_MEM_GB` if set, falls
 /// back to [`DEFAULT_KINSHIP_MEM_BYTES`].
 pub fn memory_budget_bytes() -> u64 {
-    if let Ok(s) = std::env::var("FAVOR_KINSHIP_MEM_GB") {
+    if let Ok(s) = std::env::var("COHORT_KINSHIP_MEM_GB") {
         if let Ok(g) = s.parse::<f64>() {
             if g > 0.0 {
                 return (g * (1u64 << 30) as f64) as u64;
@@ -67,8 +67,8 @@ mod tests {
     fn rejects_huge_n() {
         let err = check_memory_budget(200_000).unwrap_err();
         match err {
-            FavorError::Resource(msg) => {
-                assert!(msg.contains("FAVOR_KINSHIP_MEM_GB"));
+            CohortError::Resource(msg) => {
+                assert!(msg.contains("COHORT_KINSHIP_MEM_GB"));
                 assert!(msg.contains("200000"));
             }
             other => panic!("expected Resource, got {other:?}"),

@@ -8,7 +8,7 @@ use faer::prelude::*;
 use faer::Mat;
 
 use crate::engine::DfEngine;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar;
 use crate::staar::genotype::GenotypeResult;
@@ -38,12 +38,12 @@ fn resolve_column(
     actual_cols: &[String],
     column_map: &HashMap<String, String>,
     role: &str,
-) -> Result<String, FavorError> {
+) -> Result<String, CohortError> {
     if let Some(mapped) = column_map.get(requested) {
         if actual_cols.contains(mapped) {
             return Ok(mapped.clone());
         }
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "Column map '{requested}={mapped}' but '{mapped}' not in phenotype. Available: {}",
             actual_cols.join(", ")
         )));
@@ -61,7 +61,7 @@ fn resolve_column(
         return Ok(matches[0].clone());
     }
 
-    Err(FavorError::Input(format!(
+    Err(CohortError::Input(format!(
         "{role} '{requested}' not in phenotype. Available: {}",
         actual_cols.join(", ")
     )))
@@ -121,7 +121,7 @@ pub fn load_phenotype(
     ai_seed: u64,
     column_map: &HashMap<String, String>,
     out: &dyn Output,
-) -> Result<PhenotypeData, FavorError> {
+) -> Result<PhenotypeData, CohortError> {
     out.status("Loading phenotype...");
 
     engine.register_csv("_pheno", phenotype, b'\t')?;
@@ -237,7 +237,7 @@ pub fn load_phenotype(
     let n = n_total - n_missing;
     out.status(&format!("  {} samples with phenotype + genotype", n));
     if n < 10 {
-        return Err(FavorError::Analysis(format!(
+        return Err(CohortError::Analysis(format!(
             "Only {n} samples with both phenotype and genotype data (need >= 10). \
              Check that sample IDs in '{}' match the VCF header.",
             phenotype.display()
@@ -247,7 +247,7 @@ pub fn load_phenotype(
     // NaN guards — NaN trait values silently corrupt the null model.
     let nan_y = y_vec.iter().filter(|v| v.is_nan()).count();
     if nan_y > 0 {
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "{nan_y} samples have NaN trait values in column '{trait_col}'. \
              Remove or impute these before running STAAR."
         )));
@@ -255,7 +255,7 @@ pub fn load_phenotype(
     for (j, cov_vals) in x_vecs.iter().enumerate() {
         let nan_count = cov_vals.iter().filter(|v| v.is_nan()).count();
         if nan_count > 0 {
-            return Err(FavorError::Input(format!(
+            return Err(CohortError::Input(format!(
                 "{nan_count} samples have missing values for covariate '{}'. \
                  Remove samples with missing covariates or impute before running STAAR.",
                 resolved_covs[j]
@@ -278,7 +278,7 @@ pub fn load_phenotype(
         Some(col) => {
             let missing = pop_labels.iter().filter(|p| p.is_none()).count();
             if missing > 0 {
-                return Err(FavorError::Input(format!(
+                return Err(CohortError::Input(format!(
                     "{missing} samples have missing values for ancestry column '{col}'. \
                      Remove or impute before running --ancestry-col."
                 )));
@@ -293,7 +293,7 @@ pub fn load_phenotype(
                 group.push(idx);
             }
             if order.len() < 2 {
-                return Err(FavorError::Input(format!(
+                return Err(CohortError::Input(format!(
                     "Ancestry column '{col}' has only {} distinct value(s); \
                      --ancestry-col needs at least 2 populations.",
                     order.len()
@@ -322,11 +322,11 @@ pub fn load_known_loci(
     loci_path: &Path,
     n_samples: usize,
     out: &dyn Output,
-) -> Result<Mat<f64>, FavorError> {
+) -> Result<Mat<f64>, CohortError> {
     use crate::types::Chromosome;
 
     let content = std::fs::read_to_string(loci_path)
-        .map_err(|e| FavorError::Resource(format!(
+        .map_err(|e| CohortError::Resource(format!(
             "Cannot read known loci file '{}': {e}", loci_path.display()
         )))?;
     let loci: Vec<(String, i32)> = content.lines()
@@ -341,7 +341,7 @@ pub fn load_known_loci(
         .collect();
 
     if loci.is_empty() {
-        return Err(FavorError::Input(format!(
+        return Err(CohortError::Input(format!(
             "Known loci file '{}' is empty or unparseable.", loci_path.display()
         )));
     }

@@ -23,7 +23,7 @@ use parquet::file::properties::WriterProperties;
 
 use crate::column::{self, Col, STAAR_WEIGHTS};
 use crate::engine::DfEngine;
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::carrier::encoding::*;
 
@@ -48,7 +48,7 @@ pub fn build_chromosome(
     chrom_dir: &Path,
     n_samples: usize,
     out: &dyn Output,
-) -> Result<BuildStats, FavorError> {
+) -> Result<BuildStats, CohortError> {
     let wide = n_samples > 65535;
 
     // Query metadata sorted by (position, ref, alt) — canonical variant_vcf ordering.
@@ -75,7 +75,7 @@ pub fn build_chromosome(
             .column(0)
             .as_any()
             .downcast_ref::<Int32Array>()
-            .ok_or_else(|| FavorError::Analysis("_rare_all missing position".into()))?;
+            .ok_or_else(|| CohortError::Analysis("_rare_all missing position".into()))?;
         for i in 0..batch.num_rows() {
             raw_rows.push(RawRow {
                 pos: pos_arr.value(i),
@@ -147,12 +147,12 @@ pub fn build_chromosome(
             .column(0)
             .as_any()
             .downcast_ref::<Int32Array>()
-            .ok_or_else(|| FavorError::Analysis("Genotype parquet missing position".into()))?;
+            .ok_or_else(|| CohortError::Analysis("Genotype parquet missing position".into()))?;
         let dos_col = batch.column(3);
         let dos_fsl = dos_col.as_any().downcast_ref::<FixedSizeListArray>();
         let dos_list = dos_col.as_any().downcast_ref::<ListArray>();
         if dos_fsl.is_none() && dos_list.is_none() {
-            return Err(FavorError::Analysis(
+            return Err(CohortError::Analysis(
                 "Genotype parquet missing dosages".into(),
             ));
         }
@@ -192,7 +192,7 @@ pub fn build_chromosome(
 
     let sparse_g_path = chrom_dir.join("sparse_g.bin");
     let file = File::create(&sparse_g_path)
-        .map_err(|e| FavorError::Resource(format!("Create sparse_g.bin: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Create sparse_g.bin: {e}")))?;
     let mut w = BufWriter::with_capacity(4 * 1024 * 1024, file);
 
     // Header is rewritten at the end with correct totals once data is laid out.
@@ -272,7 +272,7 @@ pub fn build_chromosome(
             Arc::new(mem_gene.finish()) as ArrayRef,
         ],
     )
-    .map_err(|e| FavorError::Resource(format!("membership batch: {e}")))?;
+    .map_err(|e| CohortError::Resource(format!("membership batch: {e}")))?;
 
     write_parquet(chrom_dir, "membership.parquet", mem_schema, &mem_batch)?;
 
@@ -296,20 +296,20 @@ fn write_parquet(
     filename: &str,
     schema: Arc<Schema>,
     batch: &RecordBatch,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
         .build();
     let file = File::create(dir.join(filename))
-        .map_err(|e| FavorError::Resource(format!("Create {filename}: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Create {filename}: {e}")))?;
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))
-        .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Parquet writer: {e}")))?;
     writer
         .write(batch)
-        .map_err(|e| FavorError::Resource(format!("Write: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Write: {e}")))?;
     writer
         .close()
-        .map_err(|e| FavorError::Resource(format!("Close: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Close: {e}")))?;
     Ok(())
 }
 
@@ -320,7 +320,7 @@ fn write_variants_parquet(
     full_batches: &[RecordBatch],
     chrom: &str,
     unique_variants: &[UniqueVariant],
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     use arrow::array::{BooleanArray, Float32Array};
 
     // (pos, ref, alt) → first batch row. The query is already sorted by
@@ -512,7 +512,7 @@ fn write_variants_parquet(
     }
 
     let batch = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
 
     write_parquet(chrom_dir, "variants.parquet", schema, &batch)
 }

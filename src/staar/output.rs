@@ -20,7 +20,7 @@ use parquet::file::properties::WriterProperties;
 use serde_json::json;
 
 use crate::column::{Col, STAAR_WEIGHTS};
-use crate::error::FavorError;
+use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::store::{fsync_parent, tmp_path, write_atomic};
 use crate::types::AnnotatedVariant;
@@ -31,16 +31,16 @@ use super::{GeneResult, MaskType, TraitType};
 /// Run `build` against `out_path.tmp`, then rename onto `out_path` and
 /// fsync the parent. Closure shape so each caller keeps its arrow
 /// builders local.
-fn write_parquet_atomic<F>(out_path: &Path, build: F) -> Result<(), FavorError>
+fn write_parquet_atomic<F>(out_path: &Path, build: F) -> Result<(), CohortError>
 where
-    F: FnOnce(File) -> Result<(), FavorError>,
+    F: FnOnce(File) -> Result<(), CohortError>,
 {
     let tmp = tmp_path(out_path);
     let file = File::create(&tmp)
-        .map_err(|e| FavorError::Resource(format!("Create {}: {e}", tmp.display())))?;
+        .map_err(|e| CohortError::Resource(format!("Create {}: {e}", tmp.display())))?;
     build(file)?;
     fs::rename(&tmp, out_path).map_err(|e| {
-        FavorError::Resource(format!(
+        CohortError::Resource(format!(
             "rename {} -> {}: {e}",
             tmp.display(),
             out_path.display()
@@ -55,7 +55,7 @@ pub fn write_individual_results(
     variants: &[AnnotatedVariant],
     output_dir: &Path,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let out_path = output_dir.join("individual.parquet");
     let n = pvals.len();
 
@@ -112,20 +112,20 @@ pub fn write_individual_results(
         Arc::new(b_pvalue.finish()),
     ];
     let batch = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
 
     write_parquet_atomic(&out_path, |file| {
         let props = WriterProperties::builder()
             .set_compression(Compression::ZSTD(Default::default()))
             .build();
         let mut writer = ArrowWriter::try_new(file, schema, Some(props))
-            .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Parquet writer: {e}")))?;
         writer
             .write(&batch)
-            .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Parquet write: {e}")))?;
         writer
             .close()
-            .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
         Ok(())
     })?;
 
@@ -149,7 +149,7 @@ pub fn write_results(
     n: usize,
     n_rare: i64,
     out: &dyn Output,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     out.status("Writing results...");
     let mut significant_genes: Vec<serde_json::Value> = Vec::new();
 
@@ -300,19 +300,19 @@ pub fn write_results(
         columns.push(Arc::new(b_staar_o.finish()));
 
         let batch = RecordBatch::try_new(schema.clone(), columns)
-            .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
+            .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
         write_parquet_atomic(&out_path, |file| {
             let props = WriterProperties::builder()
                 .set_compression(Compression::ZSTD(Default::default()))
                 .build();
             let mut writer = ArrowWriter::try_new(file, schema, Some(props))
-                .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Parquet writer: {e}")))?;
             writer
                 .write(&batch)
-                .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Parquet write: {e}")))?;
             writer
                 .close()
-                .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+                .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
             Ok(())
         })?;
 
@@ -332,13 +332,13 @@ pub fn write_results(
     }
 
     let meta = json!({
-        "favor_staar_version": 1,
+        "cohort_staar_version": 1,
         "traits": trait_names, "trait_type": format!("{:?}", trait_type),
         "n_samples": n, "n_rare_variants": n_rare, "maf_cutoff": maf_cutoff,
         "sigma2": null_model.sigma2, "significant_genes": significant_genes,
     });
     let meta_bytes = serde_json::to_string_pretty(&meta)
-        .map_err(|e| FavorError::Resource(format!("Serialize staar.meta.json: {e}")))?;
+        .map_err(|e| CohortError::Resource(format!("Serialize staar.meta.json: {e}")))?;
     write_atomic(&output_dir.join("staar.meta.json"), meta_bytes.as_bytes())?;
 
     match generate_report(
@@ -413,7 +413,7 @@ pub fn generate_report(
     n_rare: i64,
     output_dir: &Path,
     title: &str,
-) -> Result<(), FavorError> {
+) -> Result<(), CohortError> {
     let genes = collect_plot_genes(results);
     let pvals = collect_pvalues(results);
     let n_genes: usize = results.iter().map(|(_, r)| r.len()).sum();
@@ -495,7 +495,7 @@ footer {{ margin-top:1.5rem; color:#aaa; font-size:0.65rem; text-align:center; }
 </table>
 </div>
 
-<footer>Generated by FAVOR CLI | Plotly.js interactive report</footer>
+<footer>Generated by COHORT CLI | Plotly.js interactive report</footer>
 
 <script>
 // Manhattan
@@ -910,7 +910,7 @@ mod tests {
                 gene("22", 30_000_000, 1e-3),
             ],
         )];
-        let dir = std::env::temp_dir().join("favor_test_report");
+        let dir = std::env::temp_dir().join("cohort_test_report");
         let _ = std::fs::create_dir_all(&dir);
         generate_report(&results, &["BMI".into()], 1000, 500, &dir, "Test").unwrap();
         let html = std::fs::read_to_string(dir.join("summary.html")).unwrap();
@@ -936,7 +936,7 @@ mod tests {
     #[test]
     fn empty_results_no_panic() {
         let results: Vec<(MaskType, Vec<GeneResult>)> = Vec::new();
-        let dir = std::env::temp_dir().join("favor_test_empty");
+        let dir = std::env::temp_dir().join("cohort_test_empty");
         let _ = std::fs::create_dir_all(&dir);
         generate_report(&results, &["BMI".into()], 0, 0, &dir, "Empty").unwrap();
         let html = std::fs::read_to_string(dir.join("summary.html")).unwrap();

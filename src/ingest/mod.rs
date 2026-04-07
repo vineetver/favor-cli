@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::FavorError;
+use crate::error::CohortError;
 
 /// Detected input format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -134,11 +134,11 @@ impl Analysis {
 }
 
 /// Detect input format from the file extension and first line.
-pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), FavorError> {
+pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), CohortError> {
     let name = path
         .file_name()
         .ok_or_else(|| {
-            FavorError::Input(format!(
+            CohortError::Input(format!(
                 "Path '{}' has no file name component.",
                 path.display()
             ))
@@ -180,16 +180,16 @@ pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), Fa
         }
     }
 
-    Err(FavorError::Input(format!(
+    Err(CohortError::Input(format!(
         "Cannot detect format for '{}'. Supported: .vcf, .vcf.gz, .tsv, .csv, .parquet, .txt",
         path.display()
     )))
 }
 
 /// Sniff delimiter from the first line of a text file.
-pub(crate) fn sniff_delimiter(path: &Path) -> Result<Delimiter, FavorError> {
+pub(crate) fn sniff_delimiter(path: &Path) -> Result<Delimiter, CohortError> {
     let file = std::fs::File::open(path)
-        .map_err(|e| FavorError::Input(format!("Cannot open '{}': {e}", path.display())))?;
+        .map_err(|e| CohortError::Input(format!("Cannot open '{}': {e}", path.display())))?;
 
     if path.to_string_lossy().ends_with(".gz") {
         // For .gz files, engine handles decompression — default to tab
@@ -200,7 +200,7 @@ pub(crate) fn sniff_delimiter(path: &Path) -> Result<Delimiter, FavorError> {
     let mut first_line = String::new();
     reader
         .read_line(&mut first_line)
-        .map_err(|e| FavorError::Input(format!("Cannot read '{}': {e}", path.display())))?;
+        .map_err(|e| CohortError::Input(format!("Cannot read '{}': {e}", path.display())))?;
 
     // Skip VCF header lines
     if first_line.starts_with("##") || first_line.starts_with("#CHROM") {
@@ -222,14 +222,14 @@ pub(crate) fn sniff_delimiter(path: &Path) -> Result<Delimiter, FavorError> {
 }
 
 /// Read column headers from a tabular file (first non-comment line).
-pub fn read_headers(path: &Path, delimiter: Delimiter) -> Result<Vec<String>, FavorError> {
+pub fn read_headers(path: &Path, delimiter: Delimiter) -> Result<Vec<String>, CohortError> {
     let file = std::fs::File::open(path)
-        .map_err(|e| FavorError::Input(format!("Cannot open '{}': {e}", path.display())))?;
+        .map_err(|e| CohortError::Input(format!("Cannot open '{}': {e}", path.display())))?;
 
     let reader = BufReader::new(file);
 
     for line in reader.lines() {
-        let line = line.map_err(|e| FavorError::Input(format!("Read error: {e}")))?;
+        let line = line.map_err(|e| CohortError::Input(format!("Read error: {e}")))?;
         let trimmed = line.trim();
 
         // Skip empty lines and VCF meta-headers
@@ -258,7 +258,7 @@ pub fn read_headers(path: &Path, delimiter: Delimiter) -> Result<Vec<String>, Fa
         return Ok(cols);
     }
 
-    Err(FavorError::Input(format!(
+    Err(CohortError::Input(format!(
         "No header line found in '{}'",
         path.display()
     )))
@@ -266,7 +266,7 @@ pub fn read_headers(path: &Path, delimiter: Delimiter) -> Result<Vec<String>, Fa
 
 /// Full analysis: detect format, map columns, detect join key.
 /// Build detection is separate (requires annotation parquets).
-pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
+pub fn analyze(path: &Path) -> Result<Analysis, CohortError> {
     let (format, delimiter) = detect_format(path)?;
 
     match format {
