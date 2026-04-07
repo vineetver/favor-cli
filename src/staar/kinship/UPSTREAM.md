@@ -89,22 +89,20 @@ So upstream's "sparse" path is really "sparse Cholesky factorization, dense
 inverse, exploit kinship sparsity in the Frobenius product". It costs `O(n^2)`
 memory.
 
-Our sparse path (`sparse.rs::ai_step_sparse`) does NOT materialize `Sigma_i`.
-It uses `factor.solve_in_place()` for `Sigma_i v` and a Hutchinson stochastic
-estimator for `tr(Sigma_i K_l)`. This costs `O(nnz_L * m)` memory where m is
-the probe count (default 30). It is an approximation with ~3% relative error
-on the trace term, which propagates into tau via the AI step.
+Our sparse path does NOT materialize `Sigma_i`. It uses
+`factor.solve_in_place()` for `Sigma_i v` and computes `tr(Sigma_i K_l)`
+exactly via the Takahashi (Erisman-Tinney) recursion, which walks the
+Cholesky factor of Σ to fill in the entries of `Sigma_i` at the union
+sparsity pattern of all kinship matrices. The Frobenius product
+`sum(Sigma_i * kins[[l]])` then reads those entries directly. This is
+mathematically 1:1 with upstream `R_fitglmm_ai` while still using
+strictly less memory than upstream (we never materialize the full
+`Sigma_i`, only the entries the Frobenius product needs).
 
-The Takahashi recursion in Phase 4 (#26 #27) replaces Hutchinson with an
-exact computation of `Sigma_i` entries restricted to the union sparsity pattern
-of all kinship matrices. Once that lands the sparse path is mathematically
-1:1 with upstream `R_fitglmm_ai` while still using strictly less memory than
-upstream (we never materialize the full `Sigma_i`, only the entries the
-Frobenius product needs).
-
-Until Phase 4 lands, the sparse path is "good approximation, ~3% trace
-error". After Phase 4 it is "1:1 with upstream, exact at the entry pattern".
-Document this clearly in PR A.
+A Hutchinson stochastic estimator (`hutchinson.rs`) is kept as a
+fallback under `SparseSolverKind::Hutchinson` and is exercised by the
+`sparse_fit_reml_pedigree_matches_dense_within_tolerance` test. It is
+not the default.
 
 ## PQL note
 

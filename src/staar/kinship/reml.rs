@@ -186,7 +186,7 @@ pub fn matvec_kinship(k: &KinshipMatrix, v: &Mat<f64>) -> Mat<f64> {
 ///   the Takahashi recursion. tr and diag are *exact* — 1:1 with
 ///   upstream `R/glmmkin.R::R_fitglmm_ai`'s `sum(Sigma_i * kins[[i]])`
 ///   formula, while using strictly less memory than upstream (we never
-///   materialize the dense inverse). Default sparse path. Closes #26 #27.
+///   materialize the dense inverse). Default sparse path.
 pub enum SigmaSolver {
     Dense(Mat<f64>),
     SparseHutchinson(SparseHutchinsonState),

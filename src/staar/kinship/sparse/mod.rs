@@ -3,21 +3,19 @@
 //! When all loaded kinships are sparse and dense Σ⁻¹ would blow the memory
 //! budget, this module assembles the sparse Σ via [`assembler::Assembler`],
 //! factors it via faer's sparse Cholesky, and hands the factor to the shared
-//! [`crate::staar::kinship::reml`] loop wrapped in
-//! [`SigmaSolver::Sparse`](crate::staar::kinship::reml::SigmaSolver::Sparse).
+//! [`crate::staar::kinship::reml`] loop.
 //!
 //! upstream:
 //!   - per-iteration AI step → `R/glmmkin.R::R_fitglmm_ai:662-710` (the
-//!     sparse-aware variant). Upstream still materializes Σ⁻¹ as a dense
-//!     matrix because R's `chol2inv` does so even on sparse Cholesky output;
-//!     it then uses `sum(Sigma_i * kins[[i]])` to exploit kinship sparsity
-//!     in the Frobenius product. We do not materialize Σ⁻¹: the trace term
-//!     comes from a stochastic Hutchinson estimator until the Takahashi
-//!     selected inversion (#26 #27) lands and restores 1:1 correspondence.
+//!     sparse-aware variant). Upstream materializes Σ⁻¹ as a dense matrix
+//!     because R's `chol2inv` does so even on sparse Cholesky output, then
+//!     uses `sum(Sigma_i * kins[[i]])` to exploit kinship sparsity in the
+//!     Frobenius product. We do not materialize Σ⁻¹: the default
+//!     [`TakahashiBuilder`] runs the Erisman-Tinney recursion to fill in
+//!     the entries of Σ⁻¹ at the union sparsity pattern, which is exactly
+//!     what the Frobenius sum needs. [`HutchinsonBuilder`] is kept as a
+//!     stochastic fallback.
 //!   - convergence + boundary refit → shared in `reml.rs::run_reml`.
-//!
-//! See `UPSTREAM.md` "sparse path is not bit-identical to upstream" for
-//! the full story.
 
 pub mod assembler;
 pub mod hutchinson;
@@ -90,8 +88,7 @@ impl<'a> SolverBuilder for HutchinsonBuilder<'a> {
     }
 }
 
-/// Builder for the Takahashi-based sparse path. Default sparse builder
-/// (closes #26 #27).
+/// Builder for the Takahashi-based sparse path. Default sparse builder.
 ///
 /// Each AI iteration:
 ///   1. assemble fresh Σ values at current τ via the assembler

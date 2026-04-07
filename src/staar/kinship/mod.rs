@@ -65,8 +65,7 @@ use crate::error::FavorError;
 /// Fit AI-REML for the variance components in
 /// `[τ_kinship_1..τ_L, τ_group_1..τ_G]`. Dispatches between the dense
 /// kernel (small n, bit-identical to GMMAT) and the sparse kernel
-/// (large n + sparse kinships, matches GMMAT to within Hutchinson noise
-/// until #26 #27 lands).
+/// (large n + sparse kinships, exact via the Takahashi recursion).
 ///
 /// Returns `FavorError::Resource` if neither path can run within the
 /// configured memory budget.

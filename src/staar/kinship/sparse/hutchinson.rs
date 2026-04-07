@@ -5,17 +5,11 @@
 //! fixed seed — same seed in, same float out, run-to-run.
 //!
 //! These are *approximations*. Standard error scales as `1/√M`; with
-//! `M = 30` the relative error is around 3%. They are kept as a fallback
-//! for when the Takahashi selected inversion in #26 #27 isn't available
-//! (very dense fill on the Cholesky factor, or when we want to keep the
-//! sparse path running on a backend that doesn't expose the simplicial
-//! Cholesky internals).
-//!
-//! Once Takahashi lands, the sparse trace and diagonal become exact at the
-//! union sparsity pattern of the kinship matrices, restoring 1:1
-//! correspondence with `R/glmmkin.R::R_fitglmm_ai:662-710`'s
-//! `sum(Sigma_i * kins[[i]])` Frobenius product. Until then, this module
-//! is the source of the trace term in the sparse AI step.
+//! `M = 30` the relative error is around 3%. The default sparse path uses
+//! the exact Takahashi recursion in [`super::takahashi`] instead. This
+//! module is kept as a fallback under `SparseSolverKind::Hutchinson` and
+//! is used by the regression test that confirms the stochastic path still
+//! produces valid-within-tolerance estimates against the dense path.
 
 use faer::sparse::linalg::solvers::Llt;
 use faer::sparse::SparseColMat;
@@ -75,8 +69,8 @@ pub fn sparse_matvec(k: &SparseColMat<u32, f64>, v: &Mat<f64>) -> Mat<f64> {
 /// is one sparse matvec plus one sparse Cholesky solve. With `M = 30`
 /// the relative error is ~3%.
 ///
-/// **Approximation, not exact.** Replaced by `takahashi::trace_k_exact`
-/// once #26 #27 lands.
+/// **Approximation, not exact.** The default sparse path uses
+/// [`super::takahashi`] instead.
 pub fn trace_k_estimate(
     factor: &Llt<u32, f64>,
     k_l: &SparseColMat<u32, f64>,
@@ -116,8 +110,8 @@ pub fn trace_k_estimate(
 /// diag(Σ⁻¹)[i] ≈ (1/M) Σ_m z_m[i] · solve(Σ, z_m)[i]
 /// ```
 ///
-/// Returns a length-`n` vector. Same seed → same output. Replaced by
-/// the Takahashi selected inverse once #26 #27 lands.
+/// Returns a length-`n` vector. Same seed → same output. The default
+/// sparse path uses the Takahashi selected inverse instead.
 pub fn diag_inverse_estimate(
     factor: &Llt<u32, f64>,
     n: usize,

@@ -14,8 +14,6 @@
 //! storing only the entries of `Sigma_inv` at the union sparsity pattern
 //! (orders of magnitude less memory for pedigree kinships).
 //!
-//! Closes #26, #27.
-//!
 //! ## The recursion
 //!
 //! Given the lower Cholesky factor `L` of `Σ` (so `Σ = L Lᵀ`), the entries
