@@ -10,6 +10,7 @@ pub mod model;
 pub mod multi;
 pub mod output;
 pub mod pipeline;
+pub mod run_manifest;
 pub mod score;
 pub mod score_cache;
 pub mod scoring;

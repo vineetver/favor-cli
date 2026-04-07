@@ -100,7 +100,6 @@ impl AnalysisVectors {
         let kinship_state_residuals: Option<&Mat<f64>> =
             null.kinship.as_ref().map(|s| &s.p_y);
 
-        // Compact arrays at n_pheno size
         let mut residuals = Vec::with_capacity(n_pheno);
         let mut x_row_major = Vec::with_capacity(n_pheno * k);
         let mut working_weights = if null.working_weights.is_some() {
@@ -114,7 +113,6 @@ impl AnalysisVectors {
             Vec::new()
         };
 
-        // Build VCF→pheno mapping
         let mut vcf_to_pheno = vec![None; n_vcf_total];
         let mut j = 0u32;
         for (vcf_idx, &has_pheno) in pheno_mask.iter().enumerate() {
@@ -140,7 +138,6 @@ impl AnalysisVectors {
         }
         debug_assert_eq!(j as usize, n_pheno);
 
-        // Row-major (X'X)^{-1}
         let mut xtx_inv = vec![0.0; k * k];
         for i in 0..k {
             for c in 0..k {
@@ -199,7 +196,7 @@ pub fn score_gene_sparse(
     let k = analysis.k;
     let is_binary = analysis.is_binary();
 
-    // ── Phase 1: U = G'r and GtX = G'X (or G'WX for binary). One walk
+    // Phase 1: U = G'r and GtX = G'X (or G'WX for binary). One walk
     // over carriers with both accumulators inside the closure.
     let mut u = vec![0.0f64; m];
     let mut gtx = vec![0.0f64; m * k];
@@ -213,14 +210,10 @@ pub fn score_gene_sparse(
         }
     });
 
-    // ── Phase 2: G'G via inverted carrier index ──────────────────────
-    // Build sample → variant map, accumulate G'G from each sample's contribution.
-    // For binary: G'WG with working weights.
-    //
-    // Most samples carry 0 or 1 variant → zero off-diagonal contribution.
-    // Only compound hets contribute off-diagonal terms.
-
-    // pheno_idx → list of (variant_local_idx, dosage)
+    // Phase 2: G'G via inverted carrier index. Most samples carry 0 or 1
+    // variant → zero off-diagonal contribution. Only compound hets contribute
+    // off-diagonal terms. For binary: G'WG with working weights.
+    // pheno_idx → list of (variant_local_idx, dosage).
     let total_carriers: usize = carriers.iter().map(|c| c.len()).sum();
     let mut sample_variants: HashMap<u32, Vec<(u16, u8)>> =
         HashMap::with_capacity(total_carriers.min(1024));
@@ -270,10 +263,8 @@ pub fn score_gene_sparse(
         }
     }
 
-    // ── Phase 3: Assemble kernel K = G'G − G'X (X'X)⁻¹ X'G ─────────
-    // For binary: K = G'WG − G'WX (X'WX)⁻¹ X'WG
-    // All small matrix operations: O(m × k² + m²)
-
+    // Phase 3: kernel K = G'G − G'X (X'X)⁻¹ X'G; for binary,
+    // K = G'WG − G'WX (X'WX)⁻¹ X'WG. All small matmuls: O(m·k² + m²).
     // tmp = (X'X)⁻¹ × (G'X)^T → [k × m]
     let mut tmp = vec![0.0f64; k * m];
     for i in 0..k {
@@ -567,7 +558,6 @@ mod tests {
             (rng_state >> 33) as f64 / (1u64 << 31) as f64
         };
 
-        // Build covariate matrix with intercept
         let mut x = Mat::zeros(n, k);
         for i in 0..n {
             x[(i, 0)] = 1.0; // intercept
@@ -576,7 +566,6 @@ mod tests {
             }
         }
 
-        // Build sparse genotype matrix (rare variants: ~5% carriers)
         let mut g_dense = Mat::zeros(n, m);
         let mut carrier_lists: Vec<Vec<CarrierEntry>> = vec![Vec::new(); m];
         for j in 0..m {
@@ -592,7 +581,6 @@ mod tests {
             }
         }
 
-        // Build phenotype
         let mut y = Mat::zeros(n, 1);
         for i in 0..n {
             y[(i, 0)] = x[(i, 1)] * 0.5 + next_f64() * 0.1;

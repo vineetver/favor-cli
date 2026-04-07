@@ -149,61 +149,136 @@ pub fn cache_dir(store_dir: &Path, key: &str) -> PathBuf {
     store_dir.join("score_cache").join(key)
 }
 
-/// Check if a valid score cache exists for all chromosomes in the manifest.
-/// Validates file existence AND header consistency (not just existence).
-pub fn probe(store_dir: &Path, manifest: &StoreManifest, key: &str) -> bool {
+/// Why a score cache probe missed. Mirrors `store::ProbeReason` so the
+/// pipeline can record a typed cache decision in `run.json` without
+/// hand-formatting reason strings.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ScoreCacheMiss {
+    /// `scores.bin` file does not exist for this chromosome.
+    MissingChromosomeFile { chromosome: String },
+    /// File exists but is too short to contain a header.
+    HeaderTruncated { chromosome: String, bytes: u64 },
+    /// File header is present but does not start with the FVSCORE magic.
+    BadMagic { chromosome: String },
+    /// On-disk format version differs from the build's `VERSION` constant.
+    VersionMismatch { chromosome: String, found: u16 },
+    /// File header is too short relative to the variant count it claims.
+    PayloadTruncated { chromosome: String },
+    /// Filesystem error opening or stat-ing the file.
+    IoError { chromosome: String, message: String },
+}
+
+impl ScoreCacheMiss {
+    /// Human-friendly summary for `out.status()` and `run.json`.
+    pub fn describe(&self) -> String {
+        match self {
+            ScoreCacheMiss::MissingChromosomeFile { chromosome } => {
+                format!("chr{chromosome} scores.bin missing")
+            }
+            ScoreCacheMiss::HeaderTruncated { chromosome, bytes } => format!(
+                "chr{chromosome} scores.bin truncated ({bytes} bytes < header size)"
+            ),
+            ScoreCacheMiss::BadMagic { chromosome } => {
+                format!("chr{chromosome} scores.bin: bad magic")
+            }
+            ScoreCacheMiss::VersionMismatch { chromosome, found } => format!(
+                "chr{chromosome} scores.bin schema v{found} on disk, this build expects v{VERSION}"
+            ),
+            ScoreCacheMiss::PayloadTruncated { chromosome } => {
+                format!("chr{chromosome} scores.bin payload truncated")
+            }
+            ScoreCacheMiss::IoError { chromosome, message } => {
+                format!("chr{chromosome} scores.bin io error: {message}")
+            }
+        }
+    }
+}
+
+/// Probe the per-key cache directory and return `None` on a clean hit, or
+/// `Some(ScoreCacheMiss)` describing the first chromosome that failed.
+pub fn probe(
+    store_dir: &Path,
+    manifest: &StoreManifest,
+    key: &str,
+) -> Option<ScoreCacheMiss> {
     let dir = cache_dir(store_dir, key);
     for ci in &manifest.chromosomes {
         let path = dir.join(format!("chromosome={}/scores.bin", ci.name));
-        match validate_header(&path) {
-            Ok(_) => {}
-            Err(_) => return false,
+        if let Err(reason) = validate_header(&path) {
+            return Some(reason.into_miss(ci.name.clone()));
         }
     }
-    true
+    None
 }
 
-/// Read and validate the header of a scores.bin file.
-/// Returns (n_variants, n_genes) on success.
-fn validate_header(path: &Path) -> Result<(u32, u32), FavorError> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| FavorError::Resource(format!("Open {}: {e}", path.display())))?;
+/// Internal failure type from `validate_header`. Carries enough info to be
+/// promoted to a `ScoreCacheMiss` with the chromosome name attached.
+enum HeaderError {
+    Missing,
+    Truncated { bytes: u64 },
+    BadMagic,
+    VersionMismatch { found: u16 },
+    PayloadTruncated,
+    Io(String),
+}
+
+impl HeaderError {
+    fn into_miss(self, chromosome: String) -> ScoreCacheMiss {
+        match self {
+            HeaderError::Missing => ScoreCacheMiss::MissingChromosomeFile { chromosome },
+            HeaderError::Truncated { bytes } => {
+                ScoreCacheMiss::HeaderTruncated { chromosome, bytes }
+            }
+            HeaderError::BadMagic => ScoreCacheMiss::BadMagic { chromosome },
+            HeaderError::VersionMismatch { found } => {
+                ScoreCacheMiss::VersionMismatch { chromosome, found }
+            }
+            HeaderError::PayloadTruncated => ScoreCacheMiss::PayloadTruncated { chromosome },
+            HeaderError::Io(message) => ScoreCacheMiss::IoError { chromosome, message },
+        }
+    }
+}
+
+/// Read and validate the header of a scores.bin file. Returns the
+/// `(n_variants, n_genes)` pair on success or a typed `HeaderError` on
+/// failure (lifted to `ScoreCacheMiss` by `probe`).
+fn validate_header(path: &Path) -> Result<(u32, u32), HeaderError> {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(HeaderError::Missing),
+        Err(e) => return Err(HeaderError::Io(e.to_string())),
+    };
     let file_len = file
         .metadata()
-        .map_err(|e| FavorError::Resource(format!("Stat {}: {e}", path.display())))?
+        .map_err(|e| HeaderError::Io(e.to_string()))?
         .len();
     if file_len < HEADER_SIZE as u64 {
-        return Err(FavorError::Resource(format!(
-            "scores.bin truncated: {} bytes < header size {HEADER_SIZE}",
-            file_len
-        )));
+        return Err(HeaderError::Truncated { bytes: file_len });
     }
 
     let mut reader = BufReader::new(file);
     let mut header = [0u8; HEADER_SIZE];
     reader
         .read_exact(&mut header)
-        .map_err(|e| FavorError::Resource(format!("Read header: {e}")))?;
+        .map_err(|e| HeaderError::Io(e.to_string()))?;
 
     if &header[0..8] != MAGIC {
-        return Err(FavorError::Resource("scores.bin: bad magic".into()));
+        return Err(HeaderError::BadMagic);
     }
     let version = u16::from_le_bytes([header[8], header[9]]);
     if version != VERSION {
-        return Err(FavorError::Resource(format!(
-            "scores.bin: version {version} != {VERSION}"
-        )));
+        return Err(HeaderError::VersionMismatch { found: version });
     }
-    let n_variants = u32::from_le_bytes(header[10..14].try_into().unwrap());
-    let n_genes = u32::from_le_bytes(header[14..18].try_into().unwrap());
+    let n_variants =
+        u32::from_le_bytes(header[10..14].try_into().expect("4 bytes from header slice"));
+    let n_genes =
+        u32::from_le_bytes(header[14..18].try_into().expect("4 bytes from header slice"));
 
     // v4: U section is variable-length (vid-keyed), so we can only check
     // that the file is larger than just the header. Full validation at load time.
     if file_len <= HEADER_SIZE as u64 && n_variants > 0 {
-        return Err(FavorError::Resource(format!(
-            "scores.bin truncated: {} bytes with {n_variants} variants",
-            file_len
-        )));
+        return Err(HeaderError::PayloadTruncated);
     }
 
     Ok((n_variants, n_genes))
@@ -385,6 +460,46 @@ pub fn build_chromosome(
     Ok(())
 }
 
+/// Bounds-checked little-endian readers — used by `load_chromosome` to
+/// keep a corrupted scores.bin from panicking the pipeline. Each returns
+/// a `FavorError::Resource` with the failing offset instead of unwrapping
+/// `try_into` on a too-short slice.
+#[inline]
+fn read_u16(data: &[u8], pos: usize) -> Result<[u8; 2], FavorError> {
+    data.get(pos..pos + 2)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| {
+            FavorError::Resource(format!(
+                "scores.bin: short read at offset {pos} (need 2 bytes, file is {} bytes)",
+                data.len()
+            ))
+        })
+}
+
+#[inline]
+fn read_u32(data: &[u8], pos: usize) -> Result<[u8; 4], FavorError> {
+    data.get(pos..pos + 4)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| {
+            FavorError::Resource(format!(
+                "scores.bin: short read at offset {pos} (need 4 bytes, file is {} bytes)",
+                data.len()
+            ))
+        })
+}
+
+#[inline]
+fn read_f64(data: &[u8], pos: usize) -> Result<[u8; 8], FavorError> {
+    data.get(pos..pos + 8)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| {
+            FavorError::Resource(format!(
+                "scores.bin: short read at offset {pos} (need 8 bytes, file is {} bytes)",
+                data.len()
+            ))
+        })
+}
+
 /// Load all cached scores for one chromosome.
 /// Vid strings on disk are resolved to current VariantIndex positions at load time.
 pub fn load_chromosome(
@@ -400,18 +515,17 @@ pub fn load_chromosome(
         return Err(FavorError::Resource("scores.bin truncated".into()));
     }
 
-    // Parse header
     if &data[0..8] != MAGIC {
         return Err(FavorError::Resource("scores.bin: bad magic".into()));
     }
-    let version = u16::from_le_bytes(data[8..10].try_into().unwrap());
+    let version = u16::from_le_bytes(read_u16(&data, 8)?);
     if version != VERSION {
         return Err(FavorError::Resource(format!(
             "scores.bin: version {version} != {VERSION}. Delete cache to rebuild."
         )));
     }
-    let n_variants_on_disk = u32::from_le_bytes(data[10..14].try_into().unwrap()) as usize;
-    let n_genes = u32::from_le_bytes(data[14..18].try_into().unwrap()) as usize;
+    let n_variants_on_disk = u32::from_le_bytes(read_u32(&data, 10)?) as usize;
+    let n_genes = u32::from_le_bytes(read_u32(&data, 14)?) as usize;
 
     // Section 1: vid-keyed U vector — resolve vids to current VariantIndex positions
     let mut u_all = vec![0.0f64; variant_index.len()];
@@ -423,7 +537,7 @@ pub fn load_chromosome(
                 "scores.bin: U section truncated".into(),
             ));
         }
-        let vid_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+        let vid_len = u16::from_le_bytes(read_u16(&data, pos)?) as usize;
         pos += 2;
         if pos + vid_len + 8 > data.len() {
             return Err(FavorError::Resource("scores.bin: U entry truncated".into()));
@@ -431,7 +545,7 @@ pub fn load_chromosome(
         let vid = std::str::from_utf8(&data[pos..pos + vid_len])
             .map_err(|_| FavorError::Resource("scores.bin: invalid UTF-8 in vid".into()))?;
         pos += vid_len;
-        let u_val = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        let u_val = f64::from_le_bytes(read_f64(&data, pos)?);
         pos += 8;
 
         // Resolve vid to current variant_vcf — skip if variant no longer exists
@@ -459,7 +573,7 @@ pub fn load_chromosome(
         let gene_name = String::from_utf8_lossy(&name_raw[..name_end]).into_owned();
         pos += GENE_NAME_LEN;
 
-        let m = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        let m = u32::from_le_bytes(read_u32(&data, pos)?) as usize;
         pos += 4;
 
         let has_k = data[pos] != 0;
@@ -474,7 +588,7 @@ pub fn load_chromosome(
                     "scores.bin: gene {gene_name} vid truncated"
                 )));
             }
-            let vid_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+            let vid_len = u16::from_le_bytes(read_u16(&data, pos)?) as usize;
             pos += 2;
             if pos + vid_len > data.len() {
                 return Err(FavorError::Resource(format!(
@@ -504,11 +618,8 @@ pub fn load_chromosome(
                 )));
             }
             let k: Vec<f64> = (0..m * m)
-                .map(|i| {
-                    let off = pos + i * 8;
-                    f64::from_le_bytes(data[off..off + 8].try_into().unwrap())
-                })
-                .collect();
+                .map(|i| read_f64(&data, pos + i * 8).map(f64::from_le_bytes))
+                .collect::<Result<Vec<f64>, FavorError>>()?;
             pos += k_size;
             k
         } else {
@@ -675,7 +786,6 @@ mod tests {
         assert_eq!(u32::from_le_bytes(data[10..14].try_into().unwrap()), 5); // 5 variants
         assert_eq!(u32::from_le_bytes(data[14..18].try_into().unwrap()), 1); // 1 gene
 
-        // Parse Section 1: check first vid-keyed U entry
         let mut pos = HEADER_SIZE;
         let vid_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
         pos += 2;
@@ -817,6 +927,97 @@ mod tests {
         bad[8..10].copy_from_slice(&99u16.to_le_bytes());
         std::fs::write(&path, bad).unwrap();
         assert!(validate_header(&path).is_err());
+    }
+
+    /// validate_header returns each typed HeaderError variant for the
+    /// matching corruption mode. The pipeline relies on these for the
+    /// `ScoreCacheMiss::*` reporting in `run.json`.
+    #[test]
+    fn validate_header_returns_typed_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scores.bin");
+
+        // Missing file
+        match validate_header(&path) {
+            Err(HeaderError::Missing) => {}
+            other => panic!("expected Missing, got {:?}", debug_header_err(&other)),
+        }
+
+        // Truncated header
+        std::fs::write(&path, [1, 2, 3]).unwrap();
+        match validate_header(&path) {
+            Err(HeaderError::Truncated { bytes: 3 }) => {}
+            other => panic!("expected Truncated{{3}}, got {:?}", debug_header_err(&other)),
+        }
+
+        // Bad magic
+        let mut bad = [0u8; HEADER_SIZE];
+        bad[0..8].copy_from_slice(b"NOPENOPE");
+        std::fs::write(&path, bad).unwrap();
+        match validate_header(&path) {
+            Err(HeaderError::BadMagic) => {}
+            other => panic!("expected BadMagic, got {:?}", debug_header_err(&other)),
+        }
+
+        // Version mismatch
+        let mut bad = [0u8; HEADER_SIZE];
+        bad[0..8].copy_from_slice(MAGIC);
+        bad[8..10].copy_from_slice(&99u16.to_le_bytes());
+        std::fs::write(&path, bad).unwrap();
+        match validate_header(&path) {
+            Err(HeaderError::VersionMismatch { found: 99 }) => {}
+            other => panic!("expected VersionMismatch{{99}}, got {:?}", debug_header_err(&other)),
+        }
+    }
+
+    fn debug_header_err(r: &Result<(u32, u32), HeaderError>) -> String {
+        match r {
+            Ok(_) => "Ok".into(),
+            Err(HeaderError::Missing) => "Missing".into(),
+            Err(HeaderError::Truncated { bytes }) => format!("Truncated{{{bytes}}}"),
+            Err(HeaderError::BadMagic) => "BadMagic".into(),
+            Err(HeaderError::VersionMismatch { found }) => format!("Version{{{found}}}"),
+            Err(HeaderError::PayloadTruncated) => "PayloadTruncated".into(),
+            Err(HeaderError::Io(m)) => format!("Io({m})"),
+        }
+    }
+
+    /// Round-trip through `ScoreCacheMiss::describe()` so the operator-facing
+    /// strings stay stable.
+    #[test]
+    fn score_cache_miss_describe_humanises_each_variant() {
+        assert!(
+            ScoreCacheMiss::MissingChromosomeFile { chromosome: "1".into() }
+                .describe()
+                .contains("missing")
+        );
+        assert!(
+            ScoreCacheMiss::HeaderTruncated { chromosome: "1".into(), bytes: 12 }
+                .describe()
+                .contains("truncated")
+        );
+        assert!(
+            ScoreCacheMiss::BadMagic { chromosome: "X".into() }
+                .describe()
+                .contains("bad magic")
+        );
+        assert!(
+            ScoreCacheMiss::VersionMismatch { chromosome: "1".into(), found: 99 }
+                .describe()
+                .contains("v99")
+        );
+    }
+
+    #[test]
+    fn read_helpers_bounds_checked() {
+        let data = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        assert!(read_u16(&data, 0).is_ok());
+        assert!(read_u16(&data, 8).is_ok());
+        assert!(read_u16(&data, 9).is_err()); // would read offsets 9..11
+        assert!(read_u32(&data, 6).is_ok());
+        assert!(read_u32(&data, 7).is_err());
+        assert!(read_f64(&data, 2).is_ok());
+        assert!(read_f64(&data, 3).is_err());
     }
 
     /// Verify assemble_window_k produces correct block-diagonal K.

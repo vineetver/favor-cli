@@ -255,7 +255,6 @@ pub fn parsimony_normalize(ref_allele: &str, alt_allele: &str, pos: i32) -> (Str
         prefix_trim += 1;
     }
 
-    // Build result
     let norm_ref = &r_bytes[prefix_trim..rlen - suffix_trim];
     let norm_alt = &a_bytes[prefix_trim..alen - suffix_trim];
     let norm_pos = pos + prefix_trim as i32;

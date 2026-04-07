@@ -149,6 +149,13 @@ pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> Stor
         miss_reason: Some(reason),
     };
 
+    // Finish any in-flight swap from a prior crash before probing. Failures
+    // here fall through to the manifest read so the operator gets a typed
+    // miss reason instead of a swap-cleanup error.
+    if let Ok(staging) = staging_path(&store_dir) {
+        let _ = finish_interrupted_swap(&staging, &store_dir);
+    }
+
     let Ok(s) = fs::read_to_string(store_dir.join("manifest.json")) else {
         return miss(ProbeReason::NoManifest);
     };
@@ -291,6 +298,12 @@ pub fn setup_resources(out: &dyn Output) -> Result<Resources, FavorError> {
     Ok(resources)
 }
 
+/// Convenience wrapper that probes the store internally. Use this from
+/// non-pipeline callers (e.g. the dry-run estimator) where the caller
+/// doesn't already hold a `StoreProbe`. Pipeline code should call
+/// `build_or_load_store_with_probe` so the on-disk `manifest.json` is read
+/// exactly once per stage.
+#[allow(dead_code)]
 pub fn build_or_load_store(
     genotypes: &Path,
     annotations: &Path,
@@ -309,7 +322,32 @@ pub fn build_or_load_store(
     } else {
         probe(store_dir, genotypes, annotations)
     };
+    build_or_load_store_with_probe(
+        genotypes,
+        annotations,
+        store_dir,
+        geno_staging_dir,
+        rebuild_store,
+        probe_result,
+        res,
+        out,
+    )
+}
 
+/// Build the store, or reuse it via the supplied probe. The pipeline calls
+/// this so it can record the typed `CacheDecision` once and reuse the same
+/// `StoreProbe` instead of re-reading `manifest.json`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_or_load_store_with_probe(
+    genotypes: &Path,
+    annotations: &Path,
+    store_dir: &Path,
+    geno_staging_dir: &Path,
+    rebuild_store: bool,
+    probe_result: StoreProbe,
+    res: &Resources,
+    out: &dyn Output,
+) -> Result<GenoStoreResult, FavorError> {
     if let Some(manifest) = probe_result.manifest {
         out.status(&format!(
             "Using cached genotype store ({} variants x {} samples)",
@@ -454,18 +492,16 @@ pub fn build(
     annotations_path: &Path,
     out: &dyn Output,
 ) -> Result<StoreManifest, FavorError> {
-    if store_dir.exists() {
-        fs::remove_dir_all(store_dir)
-            .map_err(|e| FavorError::Resource(format!("Clean store dir: {e}")))?;
-    }
-    fs::create_dir_all(store_dir).map_err(|e| {
-        FavorError::Resource(format!("Cannot create '{}': {e}", store_dir.display()))
+    let staging = staging_path(store_dir)?;
+    finish_interrupted_swap(&staging, store_dir)?;
+    fs::create_dir_all(&staging).map_err(|e| {
+        FavorError::Resource(format!("Cannot create '{}': {e}", staging.display()))
     })?;
 
     let key = compute_key(vcf_path, annotations_path)?;
     let n_samples = geno_result.sample_names.len();
 
-    let samples_path = store_dir.join("samples.txt");
+    let samples_path = staging.join("samples.txt");
     fs::write(&samples_path, geno_result.sample_names.join("\n")).map_err(|e| {
         FavorError::Resource(format!("Cannot write '{}': {e}", samples_path.display()))
     })?;
@@ -480,7 +516,7 @@ pub fn build(
     for chrom in &chroms {
         out.status(&format!("  Building sparse genotype store chr{chrom}..."));
 
-        let chrom_dir = store_dir.join(format!("chromosome={chrom}"));
+        let chrom_dir = staging.join(format!("chromosome={chrom}"));
         fs::create_dir_all(&chrom_dir).map_err(|e| {
             FavorError::Resource(format!("Cannot create '{}': {e}", chrom_dir.display()))
         })?;
@@ -518,7 +554,9 @@ pub fn build(
 
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| FavorError::Resource(format!("Manifest serialize: {e}")))?;
-    write_atomic(&store_dir.join("manifest.json"), manifest_json.as_bytes())?;
+    write_atomic(&staging.join("manifest.json"), manifest_json.as_bytes())?;
+
+    atomic_dir_swap(&staging, store_dir)?;
 
     out.success(&format!(
         "Genotype store: {} variants x {} samples, {} genes, {} carriers",
@@ -528,22 +566,105 @@ pub fn build(
     Ok(manifest)
 }
 
-/// Write `bytes` to `path` atomically: write to `path.tmp`, fsync the file,
-/// rename, then fsync the parent directory so the rename survives a crash.
-///
-/// Parent-dir fsync is best-effort: on filesystems where opening a directory
-/// is not allowed (rare on Linux but possible on some network mounts), the
-/// rename has already happened so we accept a degraded durability guarantee
-/// rather than failing the build.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FavorError> {
-    use std::io::Write;
-    let parent = path
-        .parent()
-        .ok_or_else(|| FavorError::Resource(format!("path '{}' has no parent", path.display())))?;
-    let tmp = path.with_extension(format!(
+/// `{store_dir}.staging` — sibling so the recovery code finds it without
+/// an extra config knob.
+pub fn staging_path(store_dir: &Path) -> Result<PathBuf, FavorError> {
+    let parent = store_dir.parent().ok_or_else(|| {
+        FavorError::Resource(format!(
+            "store dir '{}' has no parent",
+            store_dir.display()
+        ))
+    })?;
+    let name = store_dir.file_name().ok_or_else(|| {
+        FavorError::Resource(format!(
+            "store dir '{}' has no file name",
+            store_dir.display()
+        ))
+    })?;
+    let mut staging_name = name.to_os_string();
+    staging_name.push(".staging");
+    Ok(parent.join(staging_name))
+}
+
+/// Replace `final_path` with `staging`. Not strictly atomic — there's a
+/// window between `remove_dir_all` and `rename` where neither exists; a
+/// crash there is recovered by `finish_interrupted_swap` on the next run.
+pub fn atomic_dir_swap(staging: &Path, final_path: &Path) -> Result<(), FavorError> {
+    if final_path.exists() {
+        fs::remove_dir_all(final_path).map_err(|e| {
+            FavorError::Resource(format!(
+                "remove old store {}: {e}",
+                final_path.display()
+            ))
+        })?;
+    }
+    fs::rename(staging, final_path).map_err(|e| {
+        FavorError::Resource(format!(
+            "rename {} -> {}: {e}",
+            staging.display(),
+            final_path.display()
+        ))
+    })?;
+    fsync_parent(final_path);
+    Ok(())
+}
+
+/// Called at the top of `build`. Three cases:
+/// - staging has a `manifest.json` and final doesn't: a prior run crashed
+///   inside `atomic_dir_swap`, between the `remove_dir_all` and the
+///   `rename`. Finish the rename so we don't throw away a good build.
+/// - staging exists with no manifest: prior build died mid-way, the
+///   contents are garbage. Wipe it.
+/// - staging absent: nothing to do.
+pub fn finish_interrupted_swap(staging: &Path, final_path: &Path) -> Result<(), FavorError> {
+    if !staging.exists() {
+        return Ok(());
+    }
+    let staging_complete = staging.join("manifest.json").exists();
+    if staging_complete && !final_path.exists() {
+        fs::rename(staging, final_path).map_err(|e| {
+            FavorError::Resource(format!(
+                "finish swap {} -> {}: {e}",
+                staging.display(),
+                final_path.display()
+            ))
+        })?;
+        fsync_parent(final_path);
+        return Ok(());
+    }
+    fs::remove_dir_all(staging).map_err(|e| {
+        FavorError::Resource(format!(
+            "remove stale staging {}: {e}",
+            staging.display()
+        ))
+    })
+}
+
+/// `path` with `.tmp` appended to its extension. Shared with `write_atomic`
+/// so other callers staging files don't drift on the suffix shape.
+pub fn tmp_path(path: &Path) -> PathBuf {
+    path.with_extension(format!(
         "{}.tmp",
         path.extension().and_then(|s| s.to_str()).unwrap_or("")
-    ));
+    ))
+}
+
+/// fsync the parent directory of `path` so a `rename` of `path` survives
+/// a crash. Best-effort: some network mounts refuse to let you open a
+/// directory, in which case we skip the fsync rather than fail the build.
+pub fn fsync_parent(path: &Path) {
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+}
+
+/// Write `bytes` to `path` atomically: write to `path.tmp`, fsync the file,
+/// rename, then fsync the parent directory so the rename survives a crash.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FavorError> {
+    use std::io::Write;
+    let tmp = tmp_path(path);
     {
         let mut f = File::create(&tmp)
             .map_err(|e| FavorError::Resource(format!("create {}: {e}", tmp.display())))?;
@@ -559,9 +680,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FavorError> {
             path.display()
         ))
     })?;
-    if let Ok(dir) = File::open(parent) {
-        let _ = dir.sync_all();
-    }
+    fsync_parent(path);
     Ok(())
 }
 
@@ -620,5 +739,93 @@ mod tests {
             expected: 3
         })
         .contains("v2"));
+    }
+
+    #[test]
+    fn staging_path_is_sibling_with_staging_suffix() {
+        let store = PathBuf::from("/tmp/foo/store");
+        let staging = staging_path(&store).unwrap();
+        assert_eq!(staging, PathBuf::from("/tmp/foo/store.staging"));
+    }
+
+    #[test]
+    fn atomic_dir_swap_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("store.staging");
+        let final_path = dir.path().join("store");
+
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+
+        atomic_dir_swap(&staging, &final_path).unwrap();
+
+        assert!(final_path.exists());
+        assert!(!staging.exists());
+        assert!(final_path.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn atomic_dir_swap_replaces_existing_final() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("store.staging");
+        let final_path = dir.path().join("store");
+
+        std::fs::create_dir_all(&final_path).unwrap();
+        std::fs::write(final_path.join("old.txt"), b"old").unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("new.txt"), b"new").unwrap();
+
+        atomic_dir_swap(&staging, &final_path).unwrap();
+
+        assert!(final_path.join("new.txt").exists());
+        assert!(!final_path.join("old.txt").exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn finish_interrupted_swap_completes_when_manifest_present() {
+        // Prior run crashed between remove_dir_all(final) and rename(staging,
+        // final). Recovery: finish the swap.
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("store.staging");
+        let final_path = dir.path().join("store");
+
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+
+        finish_interrupted_swap(&staging, &final_path).unwrap();
+
+        assert!(final_path.exists());
+        assert!(final_path.join("manifest.json").exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn finish_interrupted_swap_cleans_unfinished_staging() {
+        // Prior run crashed mid-build (no manifest in staging). Recovery:
+        // wipe the staging dir, leave the existing final alone.
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("store.staging");
+        let final_path = dir.path().join("store");
+
+        std::fs::create_dir_all(&final_path).unwrap();
+        std::fs::write(final_path.join("manifest.json"), b"{}").unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("garbage.txt"), b"x").unwrap();
+
+        finish_interrupted_swap(&staging, &final_path).unwrap();
+
+        assert!(!staging.exists());
+        assert!(final_path.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn finish_interrupted_swap_no_op_when_staging_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("store.staging");
+        let final_path = dir.path().join("store");
+        finish_interrupted_swap(&staging, &final_path).unwrap();
+        assert!(!staging.exists());
+        assert!(!final_path.exists());
     }
 }

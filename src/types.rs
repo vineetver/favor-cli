@@ -452,8 +452,6 @@ pub struct MetaVariant {
 mod tests {
     use super::*;
 
-    // -- Chromosome --------------------------------------------------------
-
     #[test]
     fn parse_autosomes() {
         assert_eq!(
@@ -527,15 +525,11 @@ mod tests {
         assert_eq!(back, c);
     }
 
-    // -- AnnotationWeights -------------------------------------------------
-
     #[test]
     fn channel_counts() {
         assert_eq!(AnnotationWeights::NAMES.len(), 11);
         assert_eq!(AnnotationWeights::DISPLAY_NAMES.len(), 11);
     }
-
-    // -- Display names match existing ANNOTATION_CHANNELS -------------------
 
     #[test]
     fn display_names_match_annotation_channels() {

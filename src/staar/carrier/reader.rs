@@ -132,7 +132,6 @@ impl VariantIndex {
             .map(|(i, e)| (e.vid.clone(), i as u32))
             .collect();
 
-        // Build named weight channels from entries
         let weight_names: [&str; 11] = [
             "cadd_phred",
             "linsight",
@@ -160,8 +159,6 @@ impl VariantIndex {
             weight_channels,
         })
     }
-
-    // ── Mask resolution (compiled on demand) ─────────────────────────────
 
     /// Gene → variant_vcf set (sorted). Empty slice if gene not found.
     pub fn gene_variant_vcfs(&self, gene: &str) -> &[u32] {
@@ -204,8 +201,6 @@ impl VariantIndex {
             .collect()
     }
 
-    // ── Direct access ────────────────────────────────────────────────────
-
     /// Get variant metadata by variant_vcf (O(1) direct index).
     #[inline]
     pub fn get(&self, variant_vcf: u32) -> &VariantIndexEntry {
@@ -226,8 +221,6 @@ impl VariantIndex {
     pub fn all_entries(&self) -> &[VariantIndexEntry] {
         &self.entries
     }
-
-    // ── Weight channel access ────────────────────────────────────────────
 
     /// Get a weight channel by index.
     #[allow(dead_code)]

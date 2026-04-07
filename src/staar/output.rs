@@ -1,7 +1,11 @@
 //! Result writing (parquet) and HTML summary report generation.
+//!
+//! Every artifact here is written via `write_parquet_atomic` or
+//! `store::write_atomic` so a crash mid-write leaves either nothing or
+//! the prior version, never a half-finished parquet on disk.
 
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,10 +22,33 @@ use serde_json::json;
 use crate::column::{Col, STAAR_WEIGHTS};
 use crate::error::FavorError;
 use crate::output::Output;
+use crate::staar::store::{fsync_parent, tmp_path, write_atomic};
 use crate::types::AnnotatedVariant;
 
 use super::model::NullModel;
 use super::{GeneResult, MaskType, TraitType};
+
+/// Run `build` against `out_path.tmp`, then rename onto `out_path` and
+/// fsync the parent. Closure shape so each caller keeps its arrow
+/// builders local.
+fn write_parquet_atomic<F>(out_path: &Path, build: F) -> Result<(), FavorError>
+where
+    F: FnOnce(File) -> Result<(), FavorError>,
+{
+    let tmp = tmp_path(out_path);
+    let file = File::create(&tmp)
+        .map_err(|e| FavorError::Resource(format!("Create {}: {e}", tmp.display())))?;
+    build(file)?;
+    fs::rename(&tmp, out_path).map_err(|e| {
+        FavorError::Resource(format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            out_path.display()
+        ))
+    })?;
+    fsync_parent(out_path);
+    Ok(())
+}
 
 pub fn write_individual_results(
     pvals: &[(usize, f64)],
@@ -32,7 +59,6 @@ pub fn write_individual_results(
     let out_path = output_dir.join("individual.parquet");
     let n = pvals.len();
 
-    // Sort by p-value for output ordering
     let mut sorted: Vec<(usize, f64)> = pvals.to_vec();
     sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -88,20 +114,20 @@ pub fn write_individual_results(
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
 
-    let file = File::create(&out_path).map_err(|e| {
-        FavorError::Resource(format!("Cannot create '{}': {e}", out_path.display()))
+    write_parquet_atomic(&out_path, |file| {
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .build();
+        let mut writer = ArrowWriter::try_new(file, schema, Some(props))
+            .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
+        writer
+            .write(&batch)
+            .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+        writer
+            .close()
+            .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+        Ok(())
     })?;
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
-        .build();
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props))
-        .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
-    writer
-        .write(&batch)
-        .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
-    writer
-        .close()
-        .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
 
     let n_sig = pvals.iter().filter(|(_, p)| *p < 5e-8).count();
     out.success(&format!(
@@ -147,7 +173,6 @@ pub fn write_results(
             ));
         }
 
-        // Sort by STAAR-O p-value
         let mut sorted_results: Vec<&GeneResult> = results.iter().collect();
         sorted_results.sort_by(|a, b| {
             a.staar
@@ -220,7 +245,6 @@ pub fn write_results(
             b_staar_o.append_value(s.staar_o);
         }
 
-        // Build schema: 78 Float32 p-value columns + ACAT-O(Float64) + STAAR-O(Float64)
         let test_names = [
             "Burden(1,25)",
             "Burden(1,1)",
@@ -277,19 +301,20 @@ pub fn write_results(
 
         let batch = RecordBatch::try_new(schema.clone(), columns)
             .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
-        let file = File::create(&out_path)
-            .map_err(|e| FavorError::Resource(format!("Create {}: {e}", out_path.display())))?;
-        let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(Default::default()))
-            .build();
-        let mut writer = ArrowWriter::try_new(file, schema, Some(props))
-            .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
-        writer
-            .write(&batch)
-            .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
-        writer
-            .close()
-            .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+        write_parquet_atomic(&out_path, |file| {
+            let props = WriterProperties::builder()
+                .set_compression(Compression::ZSTD(Default::default()))
+                .build();
+            let mut writer = ArrowWriter::try_new(file, schema, Some(props))
+                .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
+            writer
+                .write(&batch)
+                .map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
+            writer
+                .close()
+                .map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
+            Ok(())
+        })?;
 
         let n_sig = results.iter().filter(|r| r.staar.staar_o < 2.5e-6).count();
         for r in results.iter().filter(|r| r.staar.staar_o < 2.5e-6) {
@@ -312,10 +337,9 @@ pub fn write_results(
         "n_samples": n, "n_rare_variants": n_rare, "maf_cutoff": maf_cutoff,
         "sigma2": null_model.sigma2, "significant_genes": significant_genes,
     });
-    let _ = std::fs::write(
-        output_dir.join("staar.meta.json"),
-        serde_json::to_string_pretty(&meta).unwrap_or_default(),
-    );
+    let meta_bytes = serde_json::to_string_pretty(&meta)
+        .map_err(|e| FavorError::Resource(format!("Serialize staar.meta.json: {e}")))?;
+    write_atomic(&output_dir.join("staar.meta.json"), meta_bytes.as_bytes())?;
 
     match generate_report(
         all_mask_results,
@@ -389,7 +413,7 @@ pub fn generate_report(
     n_rare: i64,
     output_dir: &Path,
     title: &str,
-) -> std::io::Result<()> {
+) -> Result<(), FavorError> {
     let genes = collect_plot_genes(results);
     let pvals = collect_pvalues(results);
     let n_genes: usize = results.iter().map(|(_, r)| r.len()).sum();
@@ -545,7 +569,7 @@ function filterTable() {{
         sug_line = -(5e-4_f64).log10(),
     );
 
-    std::fs::write(output_dir.join("summary.html"), html)?;
+    write_atomic(&output_dir.join("summary.html"), html.as_bytes())?;
     Ok(())
 }
 

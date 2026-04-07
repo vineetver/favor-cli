@@ -354,8 +354,6 @@ fn find_root(q: f64, mu: &[f64], g: &[f64]) -> Option<f64> {
 mod tests {
     use super::*;
 
-    // -- cauchy tests --
-
     #[test]
     fn test_cauchy_combine_basic() {
         let p = cauchy_combine(&[0.01, 0.05, 0.5]);
@@ -448,8 +446,6 @@ mod tests {
         );
     }
 
-    // -- SKAT p-value tests --
-
     #[test]
     fn test_single_eigenvalue() {
         // Q ~ λ χ²(1). Exact: P(Q > t) = P(χ²(1) > t/λ)
@@ -494,8 +490,6 @@ mod tests {
         let p = mixture_chisq_pvalue(mean, &eigenvalues);
         assert!(p > 0.3 && p < 0.7, "p at mean should be ~0.5: {p}");
     }
-
-    // -- SPA tests --
 
     #[test]
     fn cgf_at_zero_is_zero() {

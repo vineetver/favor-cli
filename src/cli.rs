@@ -165,7 +165,7 @@ pub enum Command {
         #[arg(long, default_value = "2000")]
         window_size: u32,
 
-        /// Run per-variant individual score tests
+        /// Run per-variant individual score tests (no-op; producer not yet wired).
         #[arg(long)]
         individual: bool,
 
@@ -219,11 +219,12 @@ pub enum Command {
         #[arg(long)]
         rebuild_store: bool,
 
-        /// Skip genotype store entirely (no caching, one-off analysis)
+        /// Skip the genotype store (no-op; reserved for the streaming path).
         #[arg(long)]
         no_store: bool,
 
-        /// Use feedback loop: load priors from prior runs, record results for future runs
+        /// Load priors from prior runs and record this run's results
+        /// (no-op; reserved for the adaptive-scoring loop).
         #[arg(long)]
         adaptive: bool,
 

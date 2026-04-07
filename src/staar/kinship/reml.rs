@@ -70,8 +70,6 @@ pub const REML_STEP_HALVE_MAX: usize = 50;
 /// to flag a variance component as collapsed onto the boundary.
 pub const BOUNDARY_FACTOR: f64 = 1.01;
 
-// ─── Shared linear-algebra helpers ──────────────────────────────────────────
-
 /// Force `weights` into an owned vector, defaulting to all-ones.
 pub fn weights_or_ones(n: usize, weights: Option<&[f64]>) -> Vec<f64> {
     match weights {
@@ -165,8 +163,6 @@ pub fn matvec_kinship(k: &KinshipMatrix, v: &Mat<f64>) -> Mat<f64> {
     }
     out
 }
-
-// ─── SigmaSolver: per-iteration "frozen Σ" handle ───────────────────────────
 
 /// In-iteration handle for applying Σ⁻¹ and reading the entries the
 /// score / AI matrix need. Built fresh each AI iteration by the
@@ -329,8 +325,6 @@ impl SigmaSolver {
     }
 }
 
-// ─── SolverBuilder trait: per-iteration Σ rebuild hook ──────────────────────
-
 /// Builds a fresh [`SigmaSolver`] from the current variance components.
 /// Implemented once per backend (`DenseBuilder` in `dense.rs`,
 /// `HutchinsonBuilder` and `TakahashiBuilder` in `sparse/mod.rs`). The
@@ -356,8 +350,6 @@ pub trait SolverBuilder {
         Ok(solver.into_inverse())
     }
 }
-
-// ─── ai_step: backend-agnostic single AI-REML iteration ─────────────────────
 
 /// Per-iteration scratch returned by [`ai_step`].
 pub struct AiStep {
@@ -587,8 +579,6 @@ fn solve_dtau(ai: &Mat<f64>, score: &[f64], fixtau: &[bool]) -> Vec<f64> {
     }
     d_tau
 }
-
-// ─── Convergence loop + boundary refit ──────────────────────────────────────
 
 /// Inner AI-REML iteration loop. Runs `ai_step` until the convergence
 /// criterion is met or `REML_MAX_ITER` is exhausted. Step-halving is

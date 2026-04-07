@@ -88,21 +88,14 @@ impl SparseG {
         &self.offsets
     }
 
-    /// Total carrier data size in bytes (from header to offsets table start).
+    /// Carrier-data region size in bytes (header to start of offsets table).
     #[allow(dead_code)]
     pub fn carrier_data_size(&self) -> u64 {
-        if let Some(&_last) = self.offsets.last() {
-            // The carrier data region ends where the offsets table begins.
-            // offsets_start - HEADER_SIZE is the total carrier data bytes.
-            // But we can also compute it from the mmap: offsets_start is stored
-            // in the header. We just need the file-level size of carrier data.
-            // The simplest bound: offsets table starts at some byte, carrier data
-            // precedes it.
-            let offsets_start_in_file = self.mmap.len() - self.offsets.len() * 8;
-            (offsets_start_in_file - SPARSE_G_HEADER_SIZE) as u64
-        } else {
-            0
+        if self.offsets.is_empty() {
+            return 0;
         }
+        let offsets_start_in_file = self.mmap.len() - self.offsets.len() * 8;
+        (offsets_start_in_file - SPARSE_G_HEADER_SIZE) as u64
     }
 
     /// O(1) access: load carrier list for one variant by variant_vcf.
@@ -124,8 +117,9 @@ impl SparseG {
             return Vec::new();
         }
 
-        // Build (original_index, variant_vcf) pairs, sorted by variant_vcf
-        // for sequential mmap access
+        // Sort by variant_vcf so the mmap reads land in monotonically
+        // increasing offsets (page-cache friendly), then permute the
+        // results back into the caller's order.
         let mut indexed: Vec<(usize, u32)> = variant_vcfs
             .iter()
             .enumerate()
@@ -133,13 +127,11 @@ impl SparseG {
             .collect();
         indexed.sort_unstable_by_key(|&(_, v)| v);
 
-        // Read in sorted order (sequential mmap access)
         let mut sorted_results: Vec<(usize, CarrierList)> = Vec::with_capacity(n);
         for &(orig_idx, variant_vcf) in &indexed {
             sorted_results.push((orig_idx, self.load_variant(variant_vcf)));
         }
 
-        // Permute back to caller's order
         sorted_results.sort_unstable_by_key(|&(i, _)| i);
         sorted_results.into_iter().map(|(_, cl)| cl).collect()
     }

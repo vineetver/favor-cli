@@ -14,37 +14,28 @@
 /// derive column names from this enum — never from string literals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Col {
-    // ── Variant identity ──────────────────────────────────────────────
     Chromosome,
     Position,
     RefAllele,
     AltAllele,
 
-    // ── Frequency ─────────────────────────────────────────────────────
     Maf,
 
-    // ── Gene assignment ───────────────────────────────────────────────
     GeneName,
     RegionType,
     Consequence,
 
-    // ── Pathogenicity scores ──────────────────────────────────────────
     CaddPhred,
     Revel,
 
-    // ── Variant identifier ────────────────────────────────────────────
     Vid,
-
-    // ── Dense variant index ────────────────────────────────────────────
     VariantVcf,
 
-    // ── Regulatory flags ──────────────────────────────────────────────
     IsCagePromoter,
     IsCageEnhancer,
     IsCcrePromoter,
     IsCcreEnhancer,
 
-    // ── STAAR annotation weights (11 channels) ───────────────────────
     WCadd,
     WLinsight,
     WFathmmXf,

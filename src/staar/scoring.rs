@@ -148,6 +148,15 @@ pub fn run_score_tests(
 
     let mut plan = MaskPlan::build(&config.mask_categories, out);
 
+    // `score_one_window` always takes the cached-U/K path; SPA on windows
+    // isn't wired yet. Warn once so --spa users know their window p-values
+    // aren't SPA-corrected.
+    if ctx.scoring_mode == ScoringMode::Spa && plan.has_window_work() {
+        out.warn(
+            "--spa: window scoring uses non-SPA p-values; SPA only applies to gene masks",
+        );
+    }
+
     for ci in &manifest.chromosomes {
         let chrom_ctx = ChromCtx::open(store_dir, &ci.name, &ctx.cache_dir)?;
         out.status(&format!(
@@ -158,7 +167,15 @@ pub fn run_score_tests(
         ));
 
         if plan.has_gene_masks() {
-            score_chrom_genes(&chrom_ctx, &plan.gene_predicates, config, analysis, ctx, &mut plan.results, out);
+            score_chrom_genes(
+                &chrom_ctx,
+                &plan.gene_predicates,
+                config,
+                analysis,
+                ctx,
+                &mut plan.results,
+                out,
+            )?;
         }
 
         if plan.has_window_work() {
@@ -166,12 +183,9 @@ pub fn run_score_tests(
         }
     }
 
+    // `--individual` producer not yet wired — see ScoringOutput.individual_pvals.
     Ok((plan.results, Vec::new()))
 }
-
-// ---------------------------------------------------------------------------
-// Per-gene scoring
-// ---------------------------------------------------------------------------
 
 /// All quantities a single gene needs for mask scoring, in a single
 /// maf-pass-filtered local frame. `qualifying` indices into the per-mask loop
@@ -190,8 +204,10 @@ struct GeneInputs {
     end: u32,
 }
 
-/// Score every gene on this chromosome in parallel and append results into
-/// `results` in mask-vector order.
+/// Score every gene on this chromosome in parallel and append results
+/// into `results` in mask-vector order. Per-gene returns
+/// `Result<Option<_>>` so legitimate skips (no qualifying variants) and
+/// real failures don't both look like `None` from a `filter_map`.
 fn score_chrom_genes(
     chrom_ctx: &ChromCtx<'_>,
     mask_predicates: &[(MaskType, MaskPredicate)],
@@ -200,25 +216,33 @@ fn score_chrom_genes(
     ctx: &ScoringContext,
     results: &mut ResultSet,
     out: &dyn Output,
-) {
+) -> Result<(), FavorError> {
     let gene_names: Vec<&String> = chrom_ctx.cache.gene_blocks.keys().collect();
     let mode = ctx.scoring_mode;
     let maf_cutoff = config.maf_cutoff;
 
     let per_gene: Vec<Vec<(usize, GeneResult)>> = gene_names
         .par_iter()
-        .filter_map(|gene_name| {
-            let block = chrom_ctx.cache.gene_blocks.get(*gene_name)?;
-            let inputs = compile_gene_inputs(
+        .map(|gene_name| -> Result<Option<Vec<(usize, GeneResult)>>, FavorError> {
+            let Some(block) = chrom_ctx.cache.gene_blocks.get(*gene_name) else {
+                return Ok(None);
+            };
+            let Some(inputs) = compile_gene_inputs(
                 gene_name,
                 block,
                 chrom_ctx,
                 analysis,
                 maf_cutoff,
                 mode,
-            )?;
+            )?
+            else {
+                return Ok(None);
+            };
             score_gene_masks(&inputs, mask_predicates, chrom_ctx, analysis, ctx)
         })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
         .collect();
 
     for gene_results in per_gene {
@@ -233,6 +257,7 @@ fn score_chrom_genes(
             out.status(&format!("    {}: {} groups", mask_type.file_stem(), n));
         }
     }
+    Ok(())
 }
 
 /// Build the per-gene local frame: maf filter, gene_vcfs, and full U/K.
@@ -252,9 +277,9 @@ fn compile_gene_inputs(
     analysis: &AnalysisVectors,
     maf_cutoff: f64,
     mode: ScoringMode,
-) -> Option<GeneInputs> {
+) -> Result<Option<GeneInputs>, FavorError> {
     if block.m() < 2 {
-        return None;
+        return Ok(None);
     }
     let all_entries = chrom_ctx.variant_index.all_entries();
 
@@ -265,7 +290,7 @@ fn compile_gene_inputs(
         })
         .collect();
     if maf_pass.len() < 2 {
-        return None;
+        return Ok(None);
     }
 
     let gene_vcfs: Vec<u32> = maf_pass
@@ -285,7 +310,7 @@ fn compile_gene_inputs(
 
     if let Some(c) = &carriers {
         if c.len() < 2 {
-            return None;
+            return Ok(None);
         }
     }
 
@@ -303,7 +328,7 @@ fn compile_gene_inputs(
         sparse_score::score_gene_sparse(carriers_ref, analysis)
     };
 
-    Some(GeneInputs {
+    Ok(Some(GeneInputs {
         gene_name: gene_name.to_string(),
         gene_vcfs,
         carriers,
@@ -311,17 +336,18 @@ fn compile_gene_inputs(
         k_full,
         start,
         end,
-    })
+    }))
 }
 
-/// Score every mask predicate against one gene's compiled inputs.
+/// Score every mask predicate against one gene. `Ok(None)` is the "no
+/// mask had ≥2 qualifying variants" skip; real errors propagate.
 fn score_gene_masks(
     inputs: &GeneInputs,
     mask_predicates: &[(MaskType, MaskPredicate)],
     chrom_ctx: &ChromCtx<'_>,
     analysis: &AnalysisVectors,
     ctx: &ScoringContext,
-) -> Option<Vec<(usize, GeneResult)>> {
+) -> Result<Option<Vec<(usize, GeneResult)>>, FavorError> {
     let all_entries = chrom_ctx.variant_index.all_entries();
     let n_vcf = analysis.n_vcf_total;
 
@@ -369,9 +395,9 @@ fn score_gene_masks(
     }
 
     if results.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(results)
+        Ok(Some(results))
     }
 }
 
@@ -420,14 +446,10 @@ fn run_one_test(
             let subset: Vec<CarrierList> = qualifying.iter().map(|&i| carriers[i].clone()).collect();
             // `--ancestry-col --spa --binary-trait` composes both: SPA fires
             // inside the per-population kernel, AI-STAAR Cauchy-combines.
-            staar::ancestry::run_ai_staar_gene(&subset, analysis, ai, ann_matrix, ctx.spa_in_ai_staar)
+            staar::ancestry::run_ai_staar_gene(&subset, analysis, ai, ann_matrix, ctx.spa_active)
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Per-window scoring (sliding + SCANG)
-// ---------------------------------------------------------------------------
 
 /// Score sliding-window and SCANG groups for one chromosome and append into
 /// the result vectors.

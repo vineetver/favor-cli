@@ -13,10 +13,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use faer::Mat;
-use serde::{Deserialize, Serialize};
 
 use crate::column::STAAR_WEIGHTS;
 use crate::data::{AnnotatedSet, VariantSet, VariantSetKind};
@@ -28,6 +26,10 @@ use crate::staar::carrier::AnalysisVectors;
 use crate::staar::masks::ScangParams;
 use crate::staar::model::{augment_covariates, load_known_loci, load_phenotype, NullModel};
 use crate::staar::output::{write_individual_results, write_results};
+use crate::staar::run_manifest::{
+    self, ArtifactKind, CacheDecision, CacheOutcome, ConfigHashInputs, ResumeDecision,
+    ResumeSummary, RunManifest, Stage,
+};
 use crate::staar::score_cache;
 use crate::staar::scoring::{self, ResultSet};
 use crate::staar::store::{self, GenoStoreResult, StoreManifest, STAAR_ANNOTATION_COLUMNS};
@@ -35,10 +37,6 @@ use crate::staar::{
     self, ancestry::AncestryInfo, MaskCategory, NullModelKind, RunMode, ScoringMode, TraitType,
 };
 use crate::types::{AnnotatedVariant, Chromosome};
-
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
 
 pub struct StaarConfig {
     pub genotypes: PathBuf,
@@ -102,10 +100,16 @@ impl StaarConfig {
         }
     }
 
+    /// True if this run uses any kinship-aware path (REML or PQL).
+    /// Single source of truth for the predicate, used by `null_model_kind`
+    /// and the SPA-vs-kinship warning in `warn_mode_combinations`.
+    pub fn has_kinship(&self) -> bool {
+        !self.kinship.is_empty() || self.kinship_groups.is_some()
+    }
+
     /// Pick the null-model fitter from trait type + kinship presence.
     pub fn null_model_kind(&self, trait_type: TraitType) -> NullModelKind {
-        let has_kinship = !self.kinship.is_empty() || self.kinship_groups.is_some();
-        match (trait_type, has_kinship) {
+        match (trait_type, self.has_kinship()) {
             (TraitType::Continuous, false) => NullModelKind::Glm,
             (TraitType::Binary, false) => NullModelKind::Logistic,
             (TraitType::Continuous, true) => NullModelKind::KinshipReml,
@@ -114,227 +118,43 @@ impl StaarConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Run manifest (artifact lifecycle)
-// ---------------------------------------------------------------------------
-
-/// One stage in a `favor staar` run. Order matches execution order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Stage {
-    Validate,
-    EnsureStore,
-    LoadPhenotype,
-    FitNullModel,
-    EmitSumstats,
-    EnsureScoreCache,
-    RunScoring,
-    WriteResults,
-}
-
-impl Stage {
-    pub fn label(self) -> &'static str {
-        match self {
-            Stage::Validate => "validate",
-            Stage::EnsureStore => "ensure_store",
-            Stage::LoadPhenotype => "load_phenotype",
-            Stage::FitNullModel => "fit_null_model",
-            Stage::EmitSumstats => "emit_sumstats",
-            Stage::EnsureScoreCache => "ensure_score_cache",
-            Stage::RunScoring => "run_scoring",
-            Stage::WriteResults => "write_results",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StageStatus {
-    InProgress,
-    Completed,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StageRecord {
-    pub stage: Stage,
-    pub status: StageStatus,
-    pub started_unix: u64,
-    pub completed_unix: Option<u64>,
-}
-
-/// Top-level run manifest written into `{output_dir}/run.json`.
-///
-/// Captures enough state for an operator to ask:
-///   - which run mode this is
-///   - which stages are complete vs in-progress vs failed
-///   - which artifacts were produced
-///
-/// Resumability hook: probe this file at start of `run()` to log which
-/// stages were complete in the last attempt. A future `--resume` can short
-/// circuit completed stages off this manifest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunManifest {
-    pub favor_version: String,
-    pub run_mode: RunMode,
-    pub trait_name: String,
-    pub config_hash: String,
-    pub started_unix: u64,
-    pub stages: Vec<StageRecord>,
-    pub outputs: RunOutputs,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RunOutputs {
-    pub store_dir: Option<PathBuf>,
-    pub score_cache_dir: Option<PathBuf>,
-    pub results_dir: Option<PathBuf>,
-    pub sumstats_dir: Option<PathBuf>,
-    /// Per-stage cache hit/miss decisions in execution order. Operators can
-    /// inspect `run.json` to ask "why did STAAR rebuild the store?" or
-    /// "did the score cache hit?" without grepping stdout logs.
-    #[serde(default)]
-    pub cache_decisions: Vec<CacheDecision>,
-}
-
-/// One cache hit/miss decision the pipeline made.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheDecision {
-    pub artifact: ArtifactKind,
-    pub outcome: CacheOutcome,
-    /// Free-text reason — typically the output of `store::describe_miss`
-    /// or `"cache_key=<hash> matched"` for hits.
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactKind {
-    GenotypeStore,
-    ScoreCache,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CacheOutcome {
-    Hit,
-    Miss,
-    Rebuilt,
-}
-
-impl RunManifest {
-    fn new(config: &StaarConfig) -> Self {
-        Self {
-            favor_version: env!("CARGO_PKG_VERSION").to_string(),
-            run_mode: config.run_mode(),
-            trait_name: config.trait_names[0].clone(),
-            config_hash: config_hash(config),
-            started_unix: now_unix(),
-            stages: Vec::new(),
-            outputs: RunOutputs::default(),
+impl StaarConfig {
+    /// Borrowed view fed into `run_manifest::compute_config_hash`.
+    pub fn hash_inputs(&self) -> ConfigHashInputs<'_> {
+        ConfigHashInputs {
+            genotypes: &self.genotypes,
+            annotations: &self.annotations,
+            phenotype: &self.phenotype,
+            trait_names: &self.trait_names,
+            covariates: &self.covariates,
+            maf_cutoff: self.maf_cutoff,
+            run_mode: self.run_mode(),
+            kinship: &self.kinship,
+            kinship_groups: self.kinship_groups.as_deref(),
         }
     }
 
-    fn begin(&mut self, stage: Stage) {
-        self.stages.retain(|r| r.stage != stage);
-        self.stages.push(StageRecord {
-            stage,
-            status: StageStatus::InProgress,
-            started_unix: now_unix(),
-            completed_unix: None,
-        });
+    pub fn config_hash(&self) -> String {
+        run_manifest::compute_config_hash(&self.hash_inputs())
     }
 
-    fn complete(&mut self, stage: Stage) {
-        if let Some(rec) = self.stages.iter_mut().rev().find(|r| r.stage == stage) {
-            rec.status = StageStatus::Completed;
-            rec.completed_unix = Some(now_unix());
-        }
-    }
-
-    fn fail(&mut self, stage: Stage) {
-        if let Some(rec) = self.stages.iter_mut().rev().find(|r| r.stage == stage) {
-            rec.status = StageStatus::Failed;
-            rec.completed_unix = Some(now_unix());
-        }
-    }
-
-    /// Atomic write to `{output_dir}/run.json` (tmp + fsync + rename + dir
-    /// fsync). Reuses `store::write_atomic` so manifest, score cache, and
-    /// run.json all share the same durability story.
-    pub fn write(&self, output_dir: &Path) -> Result<(), FavorError> {
-        let path = output_dir.join("run.json");
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| FavorError::Resource(format!("Serialize run manifest: {e}")))?;
-        store::write_atomic(&path, json.as_bytes())
-    }
-
-    /// Load an existing manifest if one is present and parses cleanly.
-    pub fn probe(output_dir: &Path) -> Option<Self> {
-        let path = output_dir.join("run.json");
-        let s = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&s).ok()
-    }
-
-    /// Stages that previously completed under this same config.
-    pub fn completed_stages(&self) -> Vec<Stage> {
-        self.stages
-            .iter()
-            .filter(|r| r.status == StageStatus::Completed)
-            .map(|r| r.stage)
-            .collect()
+    pub fn new_run_manifest(&self) -> RunManifest {
+        RunManifest::new(
+            self.run_mode(),
+            self.trait_names[0].clone(),
+            self.config_hash(),
+        )
     }
 }
 
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+/// Output of `stage_run_scoring`. `individual_pvals` is reserved for the
+/// `--individual` per-variant path; today the producer in
+/// `scoring::run_score_tests` returns `Vec::new()`. Field stays so a
+/// future producer doesn't have to ripple a new tuple shape up the stack.
+pub struct ScoringOutput {
+    pub results: ResultSet,
+    pub individual_pvals: Vec<(usize, f64)>,
 }
-
-/// Stable hash of the inputs that determine which results a run produces.
-/// Mirrors `score_cache::cache_key` but covers all fields a stage decision
-/// depends on, so a config change invalidates `run.json` cleanly.
-fn config_hash(config: &StaarConfig) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(config.genotypes.to_string_lossy().as_bytes());
-    h.update(b"|");
-    h.update(config.annotations.to_string_lossy().as_bytes());
-    h.update(b"|");
-    h.update(config.phenotype.to_string_lossy().as_bytes());
-    h.update(b"|");
-    for t in &config.trait_names {
-        h.update(t.as_bytes());
-        h.update(b",");
-    }
-    h.update(b"|");
-    let mut covs = config.covariates.clone();
-    covs.sort();
-    for c in &covs {
-        h.update(c.as_bytes());
-        h.update(b",");
-    }
-    h.update(b"|");
-    h.update(config.maf_cutoff.to_le_bytes());
-    h.update(format!("{:?}", config.run_mode()).as_bytes());
-    h.update(b"|");
-    for k in &config.kinship {
-        h.update(k.to_string_lossy().as_bytes());
-        h.update(b",");
-    }
-    if let Some(g) = &config.kinship_groups {
-        h.update(g.as_bytes());
-    }
-    format!("{:x}", h.finalize())
-}
-
-// ---------------------------------------------------------------------------
-// Pipeline state passed between stages
-// ---------------------------------------------------------------------------
-
-pub type Results = ResultSet;
 
 /// Per-run scoring context: fixed once after the null model is fit.
 pub struct ScoringContext {
@@ -342,10 +162,11 @@ pub struct ScoringContext {
     pub scoring_mode: ScoringMode,
     pub cache_dir: PathBuf,
     pub ancestry: Option<AncestryInfo>,
-    /// True only when SPA was requested AND the trait is binary. Threaded
-    /// into the AI-STAAR backend so the `--ancestry-col --spa` combination
-    /// keeps using SPA inside the per-population kernel.
-    pub spa_in_ai_staar: bool,
+    /// True iff `--spa` was requested AND the trait is binary. Recorded once
+    /// at construction so the `--ancestry-col --spa --binary-trait` triple
+    /// keeps SPA inside the per-population AI-STAAR kernel without
+    /// recomputing the predicate at every gene.
+    pub spa_active: bool,
 }
 
 /// Output of `load_phenotype` stage.
@@ -365,26 +186,24 @@ struct PhenoStageOut {
     genotype_result: staar::genotype::GenotypeResult,
 }
 
-// ---------------------------------------------------------------------------
-// Pipeline
-// ---------------------------------------------------------------------------
-
 pub struct StaarPipeline<'a> {
     config: StaarConfig,
     out: &'a dyn Output,
     res: Resources,
     manifest: RunManifest,
+    resume: ResumeDecision,
 }
 
 impl<'a> StaarPipeline<'a> {
     pub fn new(config: StaarConfig, out: &'a dyn Output) -> Result<Self, FavorError> {
         let res = store::setup_resources(out)?;
-        let manifest = RunManifest::new(&config);
+        let manifest = config.new_run_manifest();
         Ok(Self {
             config,
             out,
             res,
             manifest,
+            resume: ResumeDecision::Fresh,
         })
     }
 
@@ -398,19 +217,25 @@ impl<'a> StaarPipeline<'a> {
             ))
         })?;
 
-        if let Some(prior) = RunManifest::probe(&self.config.output_dir) {
-            if prior.config_hash == self.manifest.config_hash {
-                let done = prior.completed_stages();
-                if !done.is_empty() {
-                    let labels: Vec<&str> = done.iter().map(|s| s.label()).collect();
-                    self.out.status(&format!(
-                        "  Found prior run.json (same config). Previously completed: {}",
-                        labels.join(", ")
-                    ));
-                }
-            } else {
+        let prior = RunManifest::probe(&self.config.output_dir);
+        self.resume = run_manifest::plan_resume(prior, &self.manifest.config_hash);
+        self.manifest.outputs.resume_summary = Some(ResumeSummary::from(&self.resume));
+        match &self.resume {
+            ResumeDecision::Fresh => {}
+            ResumeDecision::Discarded(reason) => {
                 self.out
-                    .warn("  run.json present from a different config — overwriting");
+                    .warn(&format!("  prior run.json discarded: {reason}"));
+            }
+            ResumeDecision::Resume { skippable } if skippable.is_empty() => {
+                self.out
+                    .status("  prior run.json found (same config); no stages eligible to skip");
+            }
+            ResumeDecision::Resume { skippable } => {
+                let labels: Vec<&str> = skippable.iter().map(|s| s.label()).collect();
+                self.out.status(&format!(
+                    "  resuming: skipping {} (durable on disk)",
+                    labels.join(", ")
+                ));
             }
         }
 
@@ -457,20 +282,22 @@ impl<'a> StaarPipeline<'a> {
             scoring_mode: self.config.scoring_mode(pheno.trait_type),
             cache_dir,
             ancestry: pheno.ancestry.clone(),
-            spa_in_ai_staar: self.config.spa && pheno.trait_type == TraitType::Binary,
+            spa_active: self.config.spa && pheno.trait_type == TraitType::Binary,
         };
         self.warn_mode_combinations(pheno.trait_type, ctx.scoring_mode);
 
-        let (results, individual_pvals) =
+        let scoring =
             self.stage(Stage::RunScoring, |p| p.stage_run_scoring(&store, &ctx))?;
 
+        // load_rare_variants walks every chromosome and rebuilds VariantIndex.
+        // Hold the result in a local so the WriteResults stage doesn't trigger
+        // a second walk if it ever needs to inspect the variants again.
         let variants = load_rare_variants(&store.store_dir, &store.manifest, self.config.maf_cutoff)?;
         let n_rare = variants.len() as i64;
 
         self.stage(Stage::WriteResults, |p| {
             p.stage_write_results(
-                &results,
-                &individual_pvals,
+                &scoring,
                 &variants,
                 &null_model,
                 pheno.trait_type,
@@ -486,19 +313,25 @@ impl<'a> StaarPipeline<'a> {
 
     /// Run one stage with begin/complete/fail bookkeeping and a manifest
     /// rewrite at every transition.
+    ///
+    /// Manifest write semantics:
+    ///   - `begin` write is best-effort (an in-progress marker isn't worth
+    ///     killing a long-running stage over).
+    ///   - `complete` write is required: if the operator can't trust the
+    ///     manifest, resume becomes impossible. Surfaced as a `Resource`
+    ///     error to the caller.
+    ///   - `fail` write is best-effort: we already have a real error to
+    ///     return; a secondary fsync failure shouldn't mask it.
     fn stage<T, F>(&mut self, stage: Stage, body: F) -> Result<T, FavorError>
     where
         F: FnOnce(&mut Self) -> Result<T, FavorError>,
     {
         self.manifest.begin(stage);
-        // Ignore write errors here — the run is already in a directory we
-        // just created. A failure to persist a transient in-progress marker
-        // shouldn't kill the run.
         let _ = self.manifest.write(&self.config.output_dir);
         match body(self) {
             Ok(v) => {
                 self.manifest.complete(stage);
-                let _ = self.manifest.write(&self.config.output_dir);
+                self.manifest.write(&self.config.output_dir)?;
                 Ok(v)
             }
             Err(e) => {
@@ -509,13 +342,15 @@ impl<'a> StaarPipeline<'a> {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Stages
-    // -----------------------------------------------------------------------
-
     fn stage_validate(&mut self) -> Result<(), FavorError> {
+        // `build_config` already verified the annotation path exists; if it
+        // disappeared between then and now we want a hard error, not silent
+        // skip — surface the missing-file message rather than no-op.
         if !self.config.annotations.exists() {
-            return Ok(());
+            return Err(FavorError::Input(format!(
+                "Annotations no longer at '{}'. Re-run `favor annotate` or check the path.",
+                self.config.annotations.display()
+            )));
         }
 
         // Typed tier check: STAAR needs all 11 annotation weight columns.
@@ -550,15 +385,20 @@ impl<'a> StaarPipeline<'a> {
     }
 
     fn stage_ensure_store(&mut self) -> Result<GenoStoreResult, FavorError> {
-        // Probe first so we can record the cache decision in run.json
-        // regardless of whether the store is hit or rebuilt below.
-        let probe_result = if self.config.rebuild_store {
+        // One probe — the recorded cache decision and the path actually
+        // taken in `build_or_load_store_with_probe` are sourced from the
+        // same StoreProbe so they cannot drift.
+        let probe = if self.config.rebuild_store {
             self.manifest.outputs.cache_decisions.push(CacheDecision {
                 artifact: ArtifactKind::GenotypeStore,
                 outcome: CacheOutcome::Rebuilt,
                 reason: "rebuild requested by --rebuild-store".into(),
             });
-            None
+            store::StoreProbe {
+                store_dir: self.config.store_dir.clone(),
+                manifest: None,
+                miss_reason: None,
+            }
         } else {
             let probe = store::probe(
                 &self.config.store_dir,
@@ -584,20 +424,17 @@ impl<'a> StaarPipeline<'a> {
                 }
             };
             self.manifest.outputs.cache_decisions.push(decision);
-            probe.manifest.is_some().then_some(probe)
+            probe
         };
 
         let geno_staging_dir = self.config.output_dir.join(".geno_staging");
-        // We re-probe inside `build_or_load_store`; that's a small redundant
-        // file read but keeps the build_or_load_store API one-call-and-done
-        // for non-pipeline callers (notably the dry-run estimator).
-        let _ = probe_result;
-        store::build_or_load_store(
+        store::build_or_load_store_with_probe(
             &self.config.genotypes,
             &self.config.annotations,
             &self.config.store_dir,
             &geno_staging_dir,
             self.config.rebuild_store,
+            probe,
             &self.res,
             self.out,
         )
@@ -660,8 +497,7 @@ impl<'a> StaarPipeline<'a> {
     ) -> Result<NullModel, FavorError> {
         self.out.status("Fitting null model...");
 
-        let kind = self.config.null_model_kind(pheno.trait_type);
-        match kind {
+        match self.config.null_model_kind(pheno.trait_type) {
             NullModelKind::Glm => {
                 let nm = staar::model::fit_glm(&pheno.y, &pheno.x);
                 self.out.status(&format!("  sigma2 = {:.4}", nm.sigma2));
@@ -672,60 +508,72 @@ impl<'a> StaarPipeline<'a> {
                 self.out.status(&format!("  sigma2 = {:.4}", nm.sigma2));
                 Ok(nm)
             }
-            NullModelKind::KinshipReml | NullModelKind::KinshipPql => {
-                let kinships = staar::kinship::load_kinship(
-                    &self.config.kinship,
-                    &pheno.compact_samples,
-                    self.out,
-                )?;
-                let groups = if let Some(ref col) = self.config.kinship_groups {
-                    staar::kinship::load_groups(
-                        &store.engine,
-                        &self.config.phenotype,
-                        col,
-                        &pheno.genotype_result,
-                        &pheno.pheno_mask,
-                        &self.config.column_map,
-                        self.out,
-                    )?
-                } else {
-                    staar::kinship::GroupPartition::single(pheno.n)
-                };
-
-                let state = match kind {
-                    NullModelKind::KinshipReml => {
-                        staar::kinship::fit_reml(&pheno.y, &pheno.x, &kinships, &groups, None)?
-                    }
-                    NullModelKind::KinshipPql => staar::kinship::fit_pql_glmm(
-                        &pheno.y,
-                        &pheno.x,
-                        &kinships,
-                        &groups,
-                        self.out,
-                    )?,
-                    _ => unreachable!(),
-                };
-                self.out.status(&format!(
-                    "  AI-REML converged in {} iterations ({} boundary refits), h² = {:?}",
-                    state.n_iter, state.outer_refits, state.h2,
-                ));
-                let n = pheno.y.nrows();
-                let mut residuals = Mat::<f64>::zeros(n, 1);
-                for i in 0..n {
-                    residuals[(i, 0)] = state.p_y[(i, 0)];
-                }
-                Ok(NullModel {
-                    residuals,
-                    x_matrix: pheno.x.clone(),
-                    xtx_inv: state.cov.clone(),
-                    sigma2: 1.0,
-                    n_samples: n,
-                    fitted_values: None,
-                    working_weights: None,
-                    kinship: Some(state),
-                })
+            kind @ (NullModelKind::KinshipReml | NullModelKind::KinshipPql) => {
+                self.fit_kinship_null_model(kind, pheno, store)
             }
         }
+    }
+
+    /// Kinship-aware null model: load kinship matrices, build the group
+    /// partition (or fall back to a single group), fit REML or PQL, and
+    /// translate the resulting `KinshipState` into a `NullModel`.
+    fn fit_kinship_null_model(
+        &mut self,
+        kind: NullModelKind,
+        pheno: &PhenoStageOut,
+        store: &GenoStoreResult,
+    ) -> Result<NullModel, FavorError> {
+        let kinships = staar::kinship::load_kinship(
+            &self.config.kinship,
+            &pheno.compact_samples,
+            self.out,
+        )?;
+        let groups = match self.config.kinship_groups.as_deref() {
+            Some(col) => staar::kinship::load_groups(
+                &store.engine,
+                &self.config.phenotype,
+                col,
+                &pheno.genotype_result,
+                &pheno.pheno_mask,
+                &self.config.column_map,
+                self.out,
+            )?,
+            None => staar::kinship::GroupPartition::single(pheno.n),
+        };
+
+        let state = match kind {
+            NullModelKind::KinshipReml => {
+                staar::kinship::fit_reml(&pheno.y, &pheno.x, &kinships, &groups, None)?
+            }
+            NullModelKind::KinshipPql => staar::kinship::fit_pql_glmm(
+                &pheno.y,
+                &pheno.x,
+                &kinships,
+                &groups,
+                self.out,
+            )?,
+            _ => unreachable!("fit_kinship_null_model called with non-kinship kind"),
+        };
+        self.out.status(&format!(
+            "  AI-REML converged in {} iterations ({} boundary refits), h² = {:?}",
+            state.n_iter, state.outer_refits, state.h2,
+        ));
+
+        let n = pheno.y.nrows();
+        let mut residuals = Mat::<f64>::zeros(n, 1);
+        for i in 0..n {
+            residuals[(i, 0)] = state.p_y[(i, 0)];
+        }
+        Ok(NullModel {
+            residuals,
+            x_matrix: pheno.x.clone(),
+            xtx_inv: state.cov.clone(),
+            sigma2: 1.0,
+            n_samples: n,
+            fitted_values: None,
+            working_weights: None,
+            kinship: Some(state),
+        })
     }
 
     fn stage_emit_sumstats(
@@ -780,21 +628,24 @@ impl<'a> StaarPipeline<'a> {
         );
         let dir = score_cache::cache_dir(&store.store_dir, &key);
 
-        if score_cache::probe(&store.store_dir, &store.manifest, &key) {
-            self.out.status("  Score cache: hit (reusing cached U/K)");
-            self.manifest.outputs.cache_decisions.push(CacheDecision {
-                artifact: ArtifactKind::ScoreCache,
-                outcome: CacheOutcome::Hit,
-                reason: format!("cache_key={key} matched"),
-            });
-            return Ok(dir);
+        match score_cache::probe(&store.store_dir, &store.manifest, &key) {
+            None => {
+                self.out.status("  Score cache: hit (reusing cached U/K)");
+                self.manifest.outputs.cache_decisions.push(CacheDecision {
+                    artifact: ArtifactKind::ScoreCache,
+                    outcome: CacheOutcome::Hit,
+                    reason: format!("cache_key={key} matched"),
+                });
+                return Ok(dir);
+            }
+            Some(miss) => {
+                self.manifest.outputs.cache_decisions.push(CacheDecision {
+                    artifact: ArtifactKind::ScoreCache,
+                    outcome: CacheOutcome::Miss,
+                    reason: format!("cache_key={key}: {}", miss.describe()),
+                });
+            }
         }
-
-        self.manifest.outputs.cache_decisions.push(CacheDecision {
-            artifact: ArtifactKind::ScoreCache,
-            outcome: CacheOutcome::Miss,
-            reason: format!("no valid scores.bin for cache_key={key}"),
-        });
 
         self.out
             .status("Building score cache (all U/K, no MAF filter)...");
@@ -816,22 +667,24 @@ impl<'a> StaarPipeline<'a> {
         &mut self,
         store: &GenoStoreResult,
         ctx: &ScoringContext,
-    ) -> Result<(Results, Vec<(usize, f64)>), FavorError> {
-        scoring::run_score_tests(
+    ) -> Result<ScoringOutput, FavorError> {
+        let (results, individual_pvals) = scoring::run_score_tests(
             &store.store_dir,
             &store.manifest,
             &self.config,
             &ctx.analysis,
             ctx,
             self.out,
-        )
+        )?;
+        Ok(ScoringOutput {
+            results,
+            individual_pvals,
+        })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn stage_write_results(
         &mut self,
-        results: &Results,
-        individual_pvals: &[(usize, f64)],
+        scoring: &ScoringOutput,
         variants: &[AnnotatedVariant],
         null_model: &NullModel,
         trait_type: TraitType,
@@ -846,12 +699,12 @@ impl<'a> StaarPipeline<'a> {
             ))
         })?;
 
-        if self.config.individual && !individual_pvals.is_empty() {
-            write_individual_results(individual_pvals, variants, &results_dir, self.out)?;
+        if self.config.individual && !scoring.individual_pvals.is_empty() {
+            write_individual_results(&scoring.individual_pvals, variants, &results_dir, self.out)?;
         }
 
         write_results(
-            results,
+            &scoring.results,
             &self.config.trait_names,
             self.config.maf_cutoff,
             &results_dir,
@@ -872,18 +725,13 @@ impl<'a> StaarPipeline<'a> {
             self.out
                 .status("  SPA enabled: saddlepoint approximation for Burden and ACAT-V");
         }
-        let has_kinship = !self.config.kinship.is_empty() || self.config.kinship_groups.is_some();
-        if has_kinship && mode == ScoringMode::Spa {
+        if self.config.has_kinship() && mode == ScoringMode::Spa {
             self.out.warn(
                 "--spa with --kinship: SPA is applied at the score-test layer; the kinship-aware path provides exact variance via the GLMM projection.",
             );
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /// Walk the manifest's chromosomes and collect rare variants for output
 /// writing (sumstats, individual, results headers).
@@ -989,71 +837,106 @@ mod tests {
     }
 
     #[test]
-    fn cache_decisions_round_trip_through_run_manifest() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut m = RunManifest::new(&dummy_config());
-        m.outputs.cache_decisions.push(CacheDecision {
-            artifact: ArtifactKind::GenotypeStore,
-            outcome: CacheOutcome::Miss,
-            reason: "no manifest.json on disk".into(),
-        });
-        m.outputs.cache_decisions.push(CacheDecision {
-            artifact: ArtifactKind::ScoreCache,
-            outcome: CacheOutcome::Hit,
-            reason: "cache_key=abc matched".into(),
-        });
-        m.write(dir.path()).unwrap();
-
-        let loaded = RunManifest::probe(dir.path()).unwrap();
-        assert_eq!(loaded.outputs.cache_decisions.len(), 2);
-        assert_eq!(loaded.outputs.cache_decisions[0].outcome, CacheOutcome::Miss);
-        assert_eq!(loaded.outputs.cache_decisions[0].artifact, ArtifactKind::GenotypeStore);
-        assert_eq!(loaded.outputs.cache_decisions[1].outcome, CacheOutcome::Hit);
-        assert_eq!(loaded.outputs.cache_decisions[1].artifact, ArtifactKind::ScoreCache);
-    }
-
-    #[test]
-    fn run_manifest_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let c = dummy_config();
-        let mut m = RunManifest::new(&c);
-        m.begin(Stage::Validate);
-        m.complete(Stage::Validate);
-        m.begin(Stage::EnsureStore);
-        m.complete(Stage::EnsureStore);
-        m.outputs.store_dir = Some(PathBuf::from("/tmp/store"));
-        m.write(dir.path()).unwrap();
-
-        let loaded = RunManifest::probe(dir.path()).unwrap();
-        assert_eq!(loaded.config_hash, m.config_hash);
-        assert_eq!(loaded.run_mode, RunMode::Analyze);
-        assert_eq!(loaded.completed_stages(), vec![Stage::Validate, Stage::EnsureStore]);
-        assert_eq!(loaded.outputs.store_dir, Some(PathBuf::from("/tmp/store")));
-    }
-
-    #[test]
-    fn run_manifest_fail_marks_stage() {
-        let mut m = RunManifest::new(&dummy_config());
-        m.begin(Stage::FitNullModel);
-        m.fail(Stage::FitNullModel);
-        let rec = m.stages.last().unwrap();
-        assert_eq!(rec.status, StageStatus::Failed);
-        assert!(rec.completed_unix.is_some());
-    }
-
-    #[test]
-    fn config_hash_changes_with_inputs() {
+    fn config_hash_round_trips_through_staar_config() {
+        // Integration check that StaarConfig wires its fields into
+        // ConfigHashInputs the way callers expect: changing any one of
+        // them must change the digest. The exhaustive sort/byte-level
+        // assertions live in run_manifest::tests::compute_config_hash_*.
         let c1 = dummy_config();
-        let h1 = config_hash(&c1);
+        let h1 = c1.config_hash();
         let mut c2 = dummy_config();
         c2.maf_cutoff = 0.05;
-        assert_ne!(h1, config_hash(&c2));
+        assert_ne!(h1, c2.config_hash());
         let mut c3 = dummy_config();
         c3.emit_sumstats = true;
-        assert_ne!(h1, config_hash(&c3));
+        assert_ne!(h1, c3.config_hash());
         let mut c4 = dummy_config();
         c4.covariates = vec!["sex".into(), "age".into()];
         // Covariate order doesn't matter (sorted before hashing).
-        assert_eq!(h1, config_hash(&c4));
+        assert_eq!(h1, c4.config_hash());
+    }
+
+    #[test]
+    fn has_kinship_predicate() {
+        let mut c = dummy_config();
+        assert!(!c.has_kinship());
+        c.kinship.push(PathBuf::from("/k.tsv"));
+        assert!(c.has_kinship());
+
+        let mut c2 = dummy_config();
+        c2.kinship_groups = Some("ancestry".into());
+        assert!(c2.has_kinship());
+    }
+
+    #[test]
+    fn new_run_manifest_uses_config_hash() {
+        let c = dummy_config();
+        let m = c.new_run_manifest();
+        assert_eq!(m.run_mode, c.run_mode());
+        assert_eq!(m.trait_name, c.trait_names[0]);
+        assert_eq!(m.config_hash, c.config_hash());
+    }
+
+    #[test]
+    fn manifest_resume_cycle_round_trips_through_tempdir() {
+        // Stand-in for the prologue of `StaarPipeline::run` — a prior run
+        // marks the durable stages complete, the next process probes the
+        // tempdir and the resume planner is asked to skip them. Catches
+        // refactors that break the StaarConfig → RunManifest → plan_resume
+        // wiring without needing a real VCF.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = dummy_config();
+        config.output_dir = dir.path().to_path_buf();
+        config.store_dir = dir.path().join("store");
+
+        let mut prior = config.new_run_manifest();
+        prior.begin(Stage::Validate);
+        prior.complete(Stage::Validate);
+        prior.begin(Stage::EnsureStore);
+        prior.complete(Stage::EnsureStore);
+        prior.begin(Stage::EnsureScoreCache);
+        prior.complete(Stage::EnsureScoreCache);
+        prior.outputs.cache_decisions.push(CacheDecision {
+            artifact: ArtifactKind::GenotypeStore,
+            outcome: CacheOutcome::Hit,
+            reason: "content fingerprint matched".into(),
+        });
+        prior.write(&config.output_dir).unwrap();
+
+        let probed = RunManifest::probe(&config.output_dir).expect("run.json should round-trip");
+        assert_eq!(probed.config_hash, config.config_hash());
+
+        let decision = run_manifest::plan_resume(Some(probed), &config.config_hash());
+        let skippable = decision.skippable().to_vec();
+        assert!(skippable.contains(&Stage::EnsureStore));
+        assert!(skippable.contains(&Stage::EnsureScoreCache));
+        assert!(!skippable.contains(&Stage::FitNullModel));
+    }
+
+    #[test]
+    fn manifest_resume_discards_when_config_changes() {
+        // Other half of the contract: editing a hashed field invalidates
+        // the prior run.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = dummy_config();
+        config.output_dir = dir.path().to_path_buf();
+        config.store_dir = dir.path().join("store");
+
+        let prior = config.new_run_manifest();
+        prior.write(&config.output_dir).unwrap();
+
+        let mut config2 = dummy_config();
+        config2.output_dir = dir.path().to_path_buf();
+        config2.store_dir = dir.path().join("store");
+        config2.maf_cutoff = 0.05;
+
+        let probed = RunManifest::probe(&config2.output_dir).unwrap();
+        let decision = run_manifest::plan_resume(Some(probed), &config2.config_hash());
+        match decision {
+            ResumeDecision::Discarded(reason) => {
+                assert!(reason.contains("config hash"));
+            }
+            other => panic!("expected Discarded, got {other:?}"),
+        }
     }
 }
