@@ -37,16 +37,7 @@ pub fn handle(
         ));
     }
 
-    let mask_categories: Vec<MaskCategory> = masks
-        .iter()
-        .map(|s| {
-            s.parse::<MaskCategory>().map_err(|_| {
-                FavorError::Input(format!(
-                    "Unknown mask '{s}'. Available: coding, noncoding, sliding-window, scang, custom"
-                ))
-            })
-        })
-        .collect::<Result<_, _>>()?;
+    let mask_categories = crate::commands::parse_mask_categories(&masks)?;
 
     let output_dir = output_path.unwrap_or_else(|| PathBuf::from("meta_staar_results"));
 

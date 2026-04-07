@@ -144,7 +144,7 @@ pub fn run_score_tests(
     ctx: &ScoringContext,
     out: &dyn Output,
 ) -> Result<(ResultSet, Vec<(usize, f64)>), FavorError> {
-    out.status("Step 3/4: Running score tests (carrier-indexed sparse)...");
+    out.status("Running score tests (carrier-indexed sparse)...");
 
     let mut plan = MaskPlan::build(&config.mask_categories, out);
 

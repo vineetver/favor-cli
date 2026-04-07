@@ -124,7 +124,7 @@ pub fn write_results(
     n_rare: i64,
     out: &dyn Output,
 ) -> Result<(), FavorError> {
-    out.status("Step 4/4: Writing results...");
+    out.status("Writing results...");
     let mut significant_genes: Vec<serde_json::Value> = Vec::new();
 
     let channels: Vec<&str> = STAAR_WEIGHTS
