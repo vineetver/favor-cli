@@ -20,6 +20,7 @@ use crate::error::CohortError;
 use crate::staar::carrier::reader::{CarrierList, VariantIndex};
 use crate::staar::sparse_g::SparseG;
 use crate::tui::action::{Action, ActionScope, KeyMap};
+use crate::tui::artifact_view::{ArtifactFilter, ArtifactOutcome, ArtifactView, Predicate};
 use crate::tui::event::AppEvent;
 use crate::tui::screen::{Screen, Transition};
 use crate::tui::state::arrow_predicate::CompiledFilter;
@@ -30,6 +31,8 @@ use crate::tui::widgets::status_bar::StatusBar;
 
 pub struct VariantScreen {
     title: String,
+    summary: Option<String>,
+    companion: Option<PathBuf>,
     scroller: ParquetScroller,
     display_columns: Vec<usize>,
     active_filter: Option<Arc<CompiledFilter>>,
@@ -37,6 +40,7 @@ pub struct VariantScreen {
     chrom_cache: HashMap<String, ChromCacheEntry>,
     sample_names: Option<Vec<String>>,
     error: Option<String>,
+    pending_open: Option<(PathBuf, Option<ArtifactFilter>)>,
 }
 
 enum VariantModal {
@@ -69,15 +73,26 @@ struct ChromCacheEntry {
 }
 
 impl VariantScreen {
-    pub fn new_for_parquet(path: PathBuf) -> Result<Self, CohortError> {
+    fn open(
+        path: PathBuf,
+        title_prefix: Option<&str>,
+        summary: Option<String>,
+        companion: Option<PathBuf>,
+    ) -> Result<Self, CohortError> {
         let scroller = ParquetScroller::open(&path)?;
         let display_columns: Vec<usize> = (0..scroller.schema().fields().len()).collect();
-        let title = path
+        let leaf = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
+        let title = match title_prefix {
+            Some(p) => format!("{p} :: {leaf}"),
+            None => leaf,
+        };
         Ok(Self {
             title,
+            summary,
+            companion,
             scroller,
             display_columns,
             active_filter: None,
@@ -85,21 +100,78 @@ impl VariantScreen {
             chrom_cache: HashMap::new(),
             sample_names: None,
             error: None,
+            pending_open: None,
         })
+    }
+
+    pub fn new_for_parquet(path: PathBuf) -> Result<Self, CohortError> {
+        Self::open(path, None, None, None)
     }
 
     pub fn new_for_annotated_set(set_path: PathBuf) -> Result<Self, CohortError> {
         let parquet = pick_first_chrom_parquet(&set_path)?;
-        let mut s = Self::new_for_parquet(parquet)?;
-        s.title = format!(
-            "{} :: {}",
-            set_path
-                .file_name()
+        let prefix = set_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Self::open(parquet, Some(&prefix), None, None)
+    }
+
+    pub fn new_for_staar_results(
+        results_path: PathBuf,
+        companion_annotated_set: Option<PathBuf>,
+    ) -> Result<Self, CohortError> {
+        let parquet = first_results_parquet(&results_path)?;
+        let prefix = results_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let summary = format!(
+            "STAAR results · enter on a row opens {} filtered to that gene",
+            companion_annotated_set
+                .as_ref()
+                .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            s.title
+                .unwrap_or_else(|| "companion set".into())
         );
-        Ok(s)
+        Self::open(parquet, Some(&prefix), Some(summary), companion_annotated_set)
+    }
+
+    pub fn with_initial_filter(mut self, text: &str) -> Result<Self, CohortError> {
+        let parsed = CompiledFilter::parse(text).map_err(CohortError::Input)?;
+        let arc = Arc::new(parsed);
+        let factory: Arc<dyn RowFilterFactory> = arc.clone();
+        self.scroller.set_filter(Some(factory))?;
+        self.active_filter = Some(arc);
+        self.rebuild_projection()?;
+        Ok(self)
+    }
+
+    fn try_cross_open(&mut self) {
+        let Some((batch, row)) = self.scroller.focused_record() else {
+            return;
+        };
+        let schema = batch.schema();
+        let Ok(idx) = schema.index_of(Col::GeneName.as_str()) else {
+            self.error = Some("row has no gene_name column".into());
+            return;
+        };
+        let arr = batch.column(idx);
+        let Some(s) = arr.as_any().downcast_ref::<StringArray>() else {
+            return;
+        };
+        if s.is_null(row) {
+            return;
+        }
+        let gene = s.value(row).to_string();
+        let Some(target) = self.companion.clone() else {
+            self.error = Some("no companion artifact attached to this view".into());
+            return;
+        };
+        self.pending_open = Some((
+            target,
+            Some(ArtifactFilter::new(Col::GeneName, Predicate::Eq(gene))),
+        ));
     }
 
     fn rebuild_projection(&mut self) -> Result<(), CohortError> {
@@ -459,10 +531,14 @@ impl VariantScreen {
         let cur = self.scroller.current_row_group() + 1;
         let visible = self.scroller.current_batch_len();
         let filter = self.scroller.filter_text().unwrap_or("none");
-        format!(
+        let base = format!(
             "{} · row group {}/{} · {} visible · {} total est · filter: {}",
             self.title, cur, rg.max(1), visible, total, filter
-        )
+        );
+        match <Self as ArtifactView>::header(self) {
+            Some(s) => format!("{base} · {s}"),
+            None => base,
+        }
     }
 
     fn draw_detail(&self, frame: &mut Frame, area: Rect) {
@@ -711,6 +787,7 @@ impl Screen for VariantScreen {
             .bind(KeyCode::Char('x'), none, Action::VariantFilterClear)
             .bind(KeyCode::Char('!'), none, Action::VariantOpenColumnPicker)
             .bind(KeyCode::Char('c'), none, Action::VariantOpenCarrierView)
+            .bind(KeyCode::Enter, none, Action::VariantOpenLinked)
     }
 
     fn handle(&mut self, event: &AppEvent) -> Transition {
@@ -779,6 +856,35 @@ impl Screen for VariantScreen {
                 self.open_carrier_view();
                 Transition::Stay
             }
+            Action::VariantOpenLinked => {
+                self.try_cross_open();
+                if let ArtifactOutcome::OpenArtifact { path, filter } =
+                    <Self as ArtifactView>::outcome(self)
+                {
+                    let companion = self.companion.clone();
+                    let prefix = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned());
+                    let opened = Self::open(path, prefix.as_deref(), None, companion).and_then(
+                        |s| match filter {
+                            Some(f) => {
+                                let text = match &f.predicate {
+                                    Predicate::Eq(v) => {
+                                        format!("{} = \"{}\"", f.column.as_str(), v)
+                                    }
+                                };
+                                s.with_initial_filter(&text)
+                            }
+                            None => Ok(s),
+                        },
+                    );
+                    match opened {
+                        Ok(screen) => return Transition::Push(Box::new(screen)),
+                        Err(e) => self.error = Some(format!("{e}")),
+                    }
+                }
+                Transition::Stay
+            }
             Action::VariantCloseCarrierView | Action::VariantColumnPickerClose => {
                 self.close_modal();
                 Transition::Stay
@@ -786,6 +892,29 @@ impl Screen for VariantScreen {
             _ => Transition::Stay,
         }
     }
+}
+
+impl ArtifactView for VariantScreen {
+    fn header(&self) -> Option<String> {
+        self.summary.clone()
+    }
+
+    fn outcome(&mut self) -> ArtifactOutcome {
+        match self.pending_open.take() {
+            Some((path, filter)) => ArtifactOutcome::OpenArtifact { path, filter },
+            None => ArtifactOutcome::Continue,
+        }
+    }
+}
+
+fn first_results_parquet(results_dir: &Path) -> Result<PathBuf, CohortError> {
+    if let Some(p) = first_parquet_in(results_dir) {
+        return Ok(p);
+    }
+    Err(CohortError::Input(format!(
+        "no parquet files under {}",
+        results_dir.display()
+    )))
 }
 
 fn pick_first_chrom_parquet(set_root: &Path) -> Result<PathBuf, CohortError> {

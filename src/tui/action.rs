@@ -101,6 +101,7 @@ pub enum Action {
     VariantColumnPickerClose,
     VariantOpenCarrierView,
     VariantCloseCarrierView,
+    VariantOpenLinked,
     VariantClose,
 }
 
@@ -156,6 +157,7 @@ const ACTIONS_ALL: &[Action] = &[
     Action::VariantColumnPickerClose,
     Action::VariantOpenCarrierView,
     Action::VariantCloseCarrierView,
+    Action::VariantOpenLinked,
     Action::VariantClose,
 ];
 
@@ -216,6 +218,7 @@ impl Action {
             | Self::VariantColumnPickerClose
             | Self::VariantOpenCarrierView
             | Self::VariantCloseCarrierView
+            | Self::VariantOpenLinked
             | Self::VariantClose => ActionScope::Variant,
         }
     }
@@ -278,6 +281,7 @@ impl Action {
             Self::VariantColumnPickerClose => "Close column picker",
             Self::VariantOpenCarrierView => "Show carriers",
             Self::VariantCloseCarrierView => "Close carrier panel",
+            Self::VariantOpenLinked => "Open linked artifact",
             Self::VariantClose => "Close browser",
         }
     }
@@ -340,6 +344,7 @@ impl Action {
             Self::VariantColumnPickerClose => "close the column picker overlay",
             Self::VariantOpenCarrierView => "show carrier samples for the focused variant",
             Self::VariantCloseCarrierView => "close the carrier panel",
+            Self::VariantOpenLinked => "open the linked artifact filtered by the focused row",
             Self::VariantClose => "leave the variant browser",
         }
     }
@@ -407,6 +412,7 @@ impl Action {
             Self::VariantColumnPickerClose => Some((KeyCode::Esc, none)),
             Self::VariantOpenCarrierView => Some((KeyCode::Char('c'), none)),
             Self::VariantCloseCarrierView => Some((KeyCode::Esc, none)),
+            Self::VariantOpenLinked => Some((KeyCode::Enter, none)),
             Self::VariantClose => Some((KeyCode::Char('q'), none)),
         }
     }
