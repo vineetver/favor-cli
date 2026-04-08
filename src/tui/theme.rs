@@ -15,7 +15,6 @@ pub enum Tone {
     Normal,
     Muted,
     Warn,
-    Bad,
 }
 
 impl Tone {
@@ -25,7 +24,6 @@ impl Tone {
             Tone::Normal => Style::default().fg(FG),
             Tone::Muted => Style::default().fg(MUTED),
             Tone::Warn => Style::default().fg(WARN),
-            Tone::Bad => Style::default().fg(BAD),
         }
     }
 }

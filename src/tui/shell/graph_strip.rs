@@ -112,11 +112,11 @@ fn pad(s: &str, width: usize) -> String {
     }
 }
 
-fn windowed<'a>(
-    nodes: &'a [NodeView],
+fn windowed(
+    nodes: &[NodeView],
     focus: Option<StageId>,
     max_width: usize,
-) -> (Vec<&'a NodeView>, bool, bool) {
+) -> (Vec<&NodeView>, bool, bool) {
     let focus_idx = focus
         .and_then(|f| nodes.iter().position(|n| n.id == f))
         .unwrap_or(0);
