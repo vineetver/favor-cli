@@ -18,3 +18,4 @@
 2026-04-07 [palette-readability] scope-grouped palette, focused row sole primary, descriptions dim
 2026-04-07 [setup-density] strip ascii, collapse env/mem/dirs/packs behind [advanced], single bordered Save, 80x24 fit
 2026-04-07 [workspace-chaining] enter on artifact pushes pre-filled next-stage transform; chain shown in hint bar
+2026-04-07 [help-scope-focus] help opens with originating scope expanded, others collapsed, Tab cycles
