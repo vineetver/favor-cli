@@ -1,0 +1,88 @@
+use crate::commands::AnnotateConfig;
+use crate::config::Tier;
+
+use super::types::{
+    ArtifactKind, FormError, FormField, FormSchema, FormValues, PathKind, RunRequest, SessionCtx,
+    StageGroup, StageId,
+};
+use super::Stage;
+
+pub struct AnnotateStage;
+
+const INPUTS: &[ArtifactKind] = &[ArtifactKind::IngestedSet];
+const OUTPUTS: &[ArtifactKind] = &[ArtifactKind::AnnotatedSet];
+
+impl Stage for AnnotateStage {
+    fn id(&self) -> StageId {
+        StageId("annotate")
+    }
+    fn label(&self) -> &'static str {
+        "Annotate"
+    }
+    fn group(&self) -> StageGroup {
+        StageGroup::Annotate
+    }
+    fn inputs(&self) -> &'static [ArtifactKind] {
+        INPUTS
+    }
+    fn outputs(&self) -> &'static [ArtifactKind] {
+        OUTPUTS
+    }
+
+    fn form_schema(&self, ctx: &SessionCtx) -> FormSchema {
+        FormSchema {
+            fields: vec![
+                FormField::Path {
+                    id: "input",
+                    label: "input",
+                    kind: PathKind::File,
+                    default: None,
+                },
+                FormField::Path {
+                    id: "output",
+                    label: "output",
+                    kind: PathKind::File,
+                    default: None,
+                },
+                FormField::Choice {
+                    id: "tier",
+                    label: "tier",
+                    options: &["base", "full"],
+                    default: Some(ctx.tier.as_str()),
+                },
+                FormField::Path {
+                    id: "data_root",
+                    label: "data root",
+                    kind: PathKind::Dir,
+                    default: Some(ctx.data_root.to_path_buf()),
+                },
+            ],
+            advanced: vec![],
+        }
+    }
+
+    fn build_command(&self, values: &FormValues) -> Result<RunRequest, FormError> {
+        let input = values
+            .path("input")
+            .cloned()
+            .ok_or(FormError::Missing("input"))?;
+        let output = values
+            .path("output")
+            .cloned()
+            .ok_or(FormError::Missing("output"))?;
+        let tier = match values.choice("tier") {
+            Some("full") => Tier::Full,
+            _ => Tier::Base,
+        };
+        let data_root = values
+            .path("data_root")
+            .cloned()
+            .ok_or(FormError::Missing("data_root"))?;
+        Ok(RunRequest::Annotate(AnnotateConfig {
+            input,
+            output,
+            tier,
+            data_root,
+        }))
+    }
+}
