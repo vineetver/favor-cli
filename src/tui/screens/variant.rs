@@ -508,13 +508,17 @@ impl VariantScreen {
     }
 
     fn draw_filter_bar(&self, frame: &mut Frame, area: Rect, modal: &FilterModal) {
-        let line = Line::from(vec![
+        let input = Line::from(vec![
             Span::styled(" filter ", Style::default().fg(theme::WARN).bold()),
             Span::styled("/ ", Style::default().fg(theme::MUTED)),
             Span::styled(modal.buf.as_str(), Style::default().fg(theme::FG)),
             Span::styled("_", Style::default().fg(theme::ACCENT)),
         ]);
-        frame.render_widget(Paragraph::new(line), area);
+        let hint = Line::from(Span::styled(
+            " e.g. af < 0.01 AND consequence contains missense  (enter apply, esc cancel)",
+            theme::hint_bar_style(),
+        ));
+        frame.render_widget(Paragraph::new(vec![input, hint]), area);
     }
 
     fn draw_carrier_panel(&self, frame: &mut Frame, area: Rect, panel: &CarrierModal) {
@@ -600,7 +604,7 @@ impl Screen for VariantScreen {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
         let modal_height: u16 = match &self.modal {
-            VariantModal::Filter(_) => 1,
+            VariantModal::Filter(_) => 2,
             VariantModal::Carrier(_) => 10,
             _ => 0,
         };
