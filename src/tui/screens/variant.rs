@@ -482,7 +482,8 @@ impl VariantScreen {
         let half = pairs.len().div_ceil(2);
         let max_rows = inner.height as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(max_rows);
-        for i in 0..half.min(max_rows) {
+        let shown = half.min(max_rows);
+        for i in 0..shown {
             let mut spans = Vec::new();
             spans.push(Span::styled(
                 format!("  {:<22} ", pairs[i].0),
@@ -503,6 +504,14 @@ impl VariantScreen {
                 ));
             }
             lines.push(Line::from(spans));
+        }
+        if shown < half && shown > 0 {
+            let hidden = half - shown;
+            lines.pop();
+            lines.push(Line::from(Span::styled(
+                format!("  ↓ {hidden} more rows"),
+                Style::default().fg(theme::MUTED),
+            )));
         }
         frame.render_widget(Paragraph::new(lines), inner);
     }
@@ -548,11 +557,22 @@ impl VariantScreen {
         )));
         let visible = inner.height.saturating_sub(1) as usize;
         let names = self.sample_names.as_deref().unwrap_or(&[]);
+        if panel.scroll > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("    ↑ {} above", panel.scroll),
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        let body_cap = visible.saturating_sub(usize::from(panel.scroll > 0));
+        let total = list.entries.len();
+        let end = (panel.scroll + body_cap).min(total);
+        let below = total.saturating_sub(end);
+        let body_take = body_cap.saturating_sub(usize::from(below > 0));
         for entry in list
             .entries
             .iter()
             .skip(panel.scroll)
-            .take(visible)
+            .take(body_take)
         {
             let name = names
                 .get(entry.sample_idx as usize)
@@ -565,6 +585,12 @@ impl VariantScreen {
                     Style::default().fg(theme::WARN),
                 ),
             ]));
+        }
+        if below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("    ↓ {below} more"),
+                Style::default().fg(theme::MUTED),
+            )));
         }
         frame.render_widget(Paragraph::new(lines), inner);
     }
