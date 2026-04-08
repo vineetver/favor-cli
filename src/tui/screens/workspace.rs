@@ -9,10 +9,11 @@ use ratatui::Frame;
 
 use crate::config::{Config, Tier};
 use crate::tui::action::{Action, ActionScope};
+use crate::tui::event::AppEvent;
 use crate::tui::screen::{Screen, Transition};
 use crate::tui::screens::setup::SetupScreen;
 use crate::tui::screens::stage_view::StageView;
-use crate::tui::screens::variant::VariantScreen;
+use crate::tui::screens::variant::{VariantScreen, VariantSpec};
 use crate::tui::shell::graph_strip::compute_graph;
 use crate::tui::shell::{ErrorMessage, ScreenChrome, Shell};
 use crate::tui::stages::types::{ArtifactKind as StageArtifact, SessionCtx};
@@ -68,9 +69,9 @@ impl WorkspaceScreen {
             return Transition::Stay;
         };
         let path = a.path.clone();
-        let result = match &a.kind {
-            ArtifactKind::AnnotatedSet { .. } => VariantScreen::new_for_annotated_set(path),
-            ArtifactKind::ParquetFile => VariantScreen::new_for_parquet(path),
+        let spec = match &a.kind {
+            ArtifactKind::AnnotatedSet { .. } => VariantSpec::for_annotated_set(path),
+            ArtifactKind::ParquetFile => Ok(VariantSpec::for_file(path)),
             ArtifactKind::StaarResults => {
                 let companion = self
                     .state
@@ -78,7 +79,7 @@ impl WorkspaceScreen {
                     .iter()
                     .find(|x| matches!(x.kind, ArtifactKind::AnnotatedSet { .. }))
                     .map(|x| x.path.clone());
-                VariantScreen::new_for_staar_results(path, companion)
+                VariantSpec::for_staar_results(path, companion)
             }
             _ => {
                 self.error = Some(ErrorMessage {
@@ -87,7 +88,7 @@ impl WorkspaceScreen {
                 return Transition::Stay;
             }
         };
-        match result {
+        match spec.and_then(VariantScreen::open) {
             Ok(screen) => {
                 self.error = None;
                 Transition::Push(Box::new(screen))
@@ -185,11 +186,6 @@ impl Screen for WorkspaceScreen {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        if self.state.drain_scan() {
-            self.try_apply_pending_focus();
-            self.sync_focus();
-        }
-
         let present = present_kinds(&self.state);
         let focus_stage = self
             .state
@@ -324,6 +320,14 @@ impl Screen for WorkspaceScreen {
 
     fn scope(&self) -> ActionScope {
         ActionScope::Workspace
+    }
+
+    fn on_other_event(&mut self, event: &AppEvent) -> Transition {
+        if matches!(event, AppEvent::Tick) && self.state.drain_scan() {
+            self.try_apply_pending_focus();
+            self.sync_focus();
+        }
+        Transition::Stay
     }
 
     fn on_action(&mut self, action: Action) -> Transition {

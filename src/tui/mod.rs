@@ -1,6 +1,5 @@
 pub mod action;
 pub mod app;
-pub mod artifact_view;
 pub mod event;
 pub mod output;
 pub mod screen;
