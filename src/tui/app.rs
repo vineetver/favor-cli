@@ -20,6 +20,7 @@ use super::output::{BarRegistry, LogLine, ProgressSnapshot, TuiOutput};
 use super::screen::{RunRequest, Screen, Transition};
 use super::screens::help::HelpScreen;
 use super::screens::run::RunScreen;
+use super::state::{SessionId, SessionState, SessionStore};
 use super::widgets::log_tail::LogTail;
 use super::widgets::palette::{Palette, PaletteOutcome};
 
@@ -41,15 +42,29 @@ pub struct App {
     cmd_rx: Receiver<Result<(), CohortError>>,
     global_keys: KeyMap,
     palette: Option<Palette>,
+    session_store: Option<SessionStore>,
 }
 
 impl App {
     pub fn new(
-        initial: Box<dyn Screen>,
+        mut initial: Box<dyn Screen>,
         log_rx: Receiver<LogLine>,
         shared_bars: BarRegistry,
         tui_out: Arc<TuiOutput>,
     ) -> Self {
+        let session_store = SessionStore::from_home();
+        let mut probe = SessionState::default();
+        initial.contribute_session(&mut probe);
+        if let Some(store) = session_store.as_ref() {
+            if !probe.cwd.as_os_str().is_empty() {
+                let id = SessionId::for_cwd(&probe.cwd);
+                match store.load(&id) {
+                    Ok(Some(state)) => initial.restore_session(&state),
+                    Ok(None) => {}
+                    Err(e) => initial.set_session_error(format!("session load failed: {e}")),
+                }
+            }
+        }
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let none = KeyModifiers::NONE;
         let global_keys = KeyMap::new()
@@ -68,7 +83,23 @@ impl App {
             cmd_rx,
             global_keys,
             palette: None,
+            session_store,
         }
+    }
+
+    fn save_session(&self) {
+        let Some(store) = self.session_store.as_ref() else {
+            return;
+        };
+        let mut state = SessionState::default();
+        for screen in &self.screens {
+            screen.contribute_session(&mut state);
+        }
+        if state.cwd.as_os_str().is_empty() {
+            return;
+        }
+        let id = SessionId::for_cwd(&state.cwd);
+        let _ = store.save(&id, &state);
     }
 
     pub fn run(mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), CohortError> {
@@ -102,6 +133,7 @@ impl App {
                         if k.code == KeyCode::Char('c')
                             && k.modifiers.contains(KeyModifiers::CONTROL)
                         {
+                            self.save_session();
                             return Ok(());
                         }
                         if let Some(palette) = self.palette.as_mut() {
@@ -196,6 +228,7 @@ impl App {
         match transition {
             Transition::Stay => false,
             Transition::Quit => {
+                self.save_session();
                 self.screens.clear();
                 true
             }

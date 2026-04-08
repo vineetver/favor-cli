@@ -5,6 +5,7 @@ use crate::commands::{AnnotateConfig, IngestConfig};
 
 use super::action::{Action, ActionScope, KeyMap};
 use super::event::AppEvent;
+use super::state::SessionState;
 use super::widgets::log_tail::LogTail;
 
 pub trait Screen {
@@ -32,6 +33,12 @@ pub trait Screen {
     }
 
     fn on_focus(&mut self) {}
+
+    fn contribute_session(&self, _state: &mut SessionState) {}
+
+    fn restore_session(&mut self, _state: &SessionState) {}
+
+    fn set_session_error(&mut self, _msg: String) {}
 }
 
 pub enum Transition {

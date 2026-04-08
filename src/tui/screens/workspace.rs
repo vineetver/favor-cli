@@ -15,6 +15,7 @@ use crate::tui::screens::transform::TransformScreen;
 use crate::tui::screens::variant::VariantScreen;
 use crate::tui::state::artifacts::ArtifactKind;
 use crate::tui::state::workspace::WorkspaceState;
+use crate::tui::state::SessionState;
 use crate::tui::theme;
 use crate::tui::widgets::log_tail::LogTail;
 use crate::tui::widgets::status_bar::StatusBar;
@@ -24,6 +25,7 @@ pub struct WorkspaceScreen {
     state: WorkspaceState,
     list_state: ListState,
     notice: Option<String>,
+    pending_focus: Option<PathBuf>,
 }
 
 impl WorkspaceScreen {
@@ -45,6 +47,17 @@ impl WorkspaceScreen {
             state,
             list_state,
             notice: None,
+            pending_focus: None,
+        }
+    }
+
+    fn try_apply_pending_focus(&mut self) {
+        let Some(target) = self.pending_focus.as_ref() else {
+            return;
+        };
+        if let Some(idx) = self.state.artifacts.iter().position(|a| &a.path == target) {
+            self.state.focus = idx;
+            self.pending_focus = None;
         }
     }
 
@@ -99,6 +112,7 @@ impl Screen for WorkspaceScreen {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, log: &LogTail) {
         if self.state.drain_scan() {
+            self.try_apply_pending_focus();
             self.sync_focus();
         }
 
@@ -313,6 +327,25 @@ impl Screen for WorkspaceScreen {
                 None => Transition::Stay,
             },
             _ => Transition::Stay,
+        }
+    }
+
+    fn contribute_session(&self, state: &mut SessionState) {
+        state.cwd = self.state.cwd.clone();
+        if let Some(a) = self.state.focused() {
+            state.last_artifact = Some(a.path.clone());
+        }
+    }
+
+    fn set_session_error(&mut self, msg: String) {
+        self.notice = Some(msg);
+    }
+
+    fn restore_session(&mut self, state: &SessionState) {
+        if let Some(path) = &state.last_artifact {
+            self.pending_focus = Some(path.clone());
+            self.try_apply_pending_focus();
+            self.sync_focus();
         }
     }
 }

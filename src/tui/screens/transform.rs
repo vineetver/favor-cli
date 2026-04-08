@@ -13,6 +13,7 @@ use crate::config::{Config, Tier};
 use crate::tui::action::{Action, ActionScope, KeyMap};
 use crate::tui::screen::{RunRequest, Screen, Transition};
 use crate::tui::state::artifacts::{Artifact, ArtifactKind};
+use crate::tui::state::{BuildTag, SessionState, TransformSnapshot};
 use crate::tui::theme;
 use crate::tui::widgets::file_picker::{self, DirBrowserState};
 use crate::tui::widgets::log_tail::LogTail;
@@ -580,5 +581,22 @@ impl Screen for TransformScreen {
             }
             _ => Transition::Stay,
         }
+    }
+
+    fn contribute_session(&self, state: &mut SessionState) {
+        state.transform = Some(match &self.form {
+            FormState::Ingest(f) => TransformSnapshot::Ingest {
+                inputs: f.inputs.clone(),
+                output: f.output.clone(),
+                emit_sql: f.emit_sql,
+                build: f.build.as_ref().map(BuildTag::from_build),
+            },
+            FormState::Annotate(f) => TransformSnapshot::Annotate {
+                input: f.input.clone(),
+                output: f.output.clone(),
+                tier: f.tier,
+                data_root: f.data_root.clone(),
+            },
+        });
     }
 }
