@@ -672,6 +672,14 @@ impl Screen for SetupScreen {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
+        if area.width < 80 || area.height < 24 {
+            let msg = Paragraph::new(Line::from(Span::styled(
+                "terminal too small (need 80x24)",
+                Style::default().fg(theme::WARN),
+            )));
+            frame.render_widget(msg, area);
+            return;
+        }
         match &mut self.mode {
             Mode::Form => self.draw_form(frame, area),
             Mode::BrowseRoot(state) => file_picker::draw(frame, area, state),
