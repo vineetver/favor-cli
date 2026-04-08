@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::cli::GenomeBuild;
@@ -12,130 +12,158 @@ use crate::commands::{AnnotateConfig, IngestConfig};
 use crate::config::{Config, Tier};
 use crate::tui::action::{Action, ActionScope, KeyMap};
 use crate::tui::screen::{RunRequest, Screen, Transition};
+use crate::tui::stages::types::{FormField, FormSchema, PathKind};
 use crate::tui::state::artifacts::{Artifact, ArtifactKind};
 use crate::tui::state::{BuildTag, SessionState, TransformSnapshot};
 use crate::tui::theme;
 use crate::tui::widgets::file_picker::{self, DirBrowserState};
+use crate::tui::widgets::form::{Form, FormOutcome};
 use crate::tui::widgets::log_tail::LogTail;
 use crate::tui::widgets::status_bar::StatusBar;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FieldOrigin {
-    Inferred,
-    Edited,
+enum Kind {
+    Ingest,
+    Annotate,
 }
 
-pub struct IngestForm {
+enum PickerTarget {
+    IngestAddInput,
+    IngestOutput,
+    AnnotateOutput,
+    AnnotateDataRoot,
+}
+
+pub struct TransformScreen {
+    title: String,
+    kind: Kind,
+    form: Form,
     inputs: Vec<PathBuf>,
-    inputs_origin: FieldOrigin,
-    output: Option<PathBuf>,
-    output_origin: FieldOrigin,
-    emit_sql: bool,
-    emit_sql_origin: FieldOrigin,
-    build: Option<GenomeBuild>,
-    build_origin: FieldOrigin,
-    advanced_open: bool,
+    annotate_input: PathBuf,
+    picker: Option<(DirBrowserState, PickerTarget)>,
+    error: Option<String>,
 }
 
-impl IngestForm {
-    fn from_artifact(art: Option<&Artifact>) -> Self {
-        let inputs = match art {
+fn ingest_schema() -> FormSchema {
+    FormSchema {
+        fields: vec![
+            FormField::Path {
+                id: "inputs",
+                label: "inputs",
+                kind: PathKind::File,
+                default: None,
+            },
+            FormField::Path {
+                id: "output",
+                label: "output",
+                kind: PathKind::Dir,
+                default: None,
+            },
+        ],
+        advanced: vec![
+            FormField::Toggle {
+                id: "emit_sql",
+                label: "emit SQL",
+                default: false,
+            },
+            FormField::Choice {
+                id: "build",
+                label: "build",
+                options: &["auto", "hg38", "hg19"],
+                default: Some("auto"),
+            },
+        ],
+    }
+}
+
+fn annotate_schema(default_tier: Tier) -> FormSchema {
+    FormSchema {
+        fields: vec![
+            FormField::Path {
+                id: "input",
+                label: "input",
+                kind: PathKind::Dir,
+                default: None,
+            },
+            FormField::Path {
+                id: "output",
+                label: "output",
+                kind: PathKind::Dir,
+                default: None,
+            },
+            FormField::Choice {
+                id: "tier",
+                label: "tier",
+                options: &["base", "full"],
+                default: Some(default_tier.as_str()),
+            },
+            FormField::Path {
+                id: "data_root",
+                label: "data root",
+                kind: PathKind::Dir,
+                default: None,
+            },
+        ],
+        advanced: vec![],
+    }
+}
+
+impl TransformScreen {
+    pub fn new_ingest(focused: Option<&Artifact>) -> Self {
+        let inputs: Vec<PathBuf> = match focused {
             Some(a) if matches!(a.kind, ArtifactKind::RawVcf) => vec![a.path.clone()],
             _ => Vec::new(),
         };
+        let mut form = Form::new(ingest_schema(), "Run");
+        if let Some(first) = inputs.first() {
+            form.set_path("inputs", Some(first.clone()));
+        }
         Self {
+            title: "Transform: ingest".into(),
+            kind: Kind::Ingest,
+            form,
             inputs,
-            inputs_origin: FieldOrigin::Inferred,
-            output: None,
-            output_origin: FieldOrigin::Inferred,
-            emit_sql: false,
-            emit_sql_origin: FieldOrigin::Inferred,
-            build: None,
-            build_origin: FieldOrigin::Inferred,
-            advanced_open: false,
+            annotate_input: PathBuf::new(),
+            picker: None,
+            error: None,
         }
     }
 
-    fn visible_fields(&self) -> Vec<usize> {
-        let mut v = vec![0, 1, 2];
-        if self.advanced_open {
-            v.push(3);
-            v.push(4);
+    pub fn new_annotate(art: &Artifact) -> Self {
+        let cfg = Config::load().ok();
+        let tier = cfg.as_ref().map(|c| c.data.tier).unwrap_or(Tier::Base);
+        let data_root = cfg.map(|c| c.root_dir()).unwrap_or_default();
+        let mut form = Form::new(annotate_schema(tier), "Run");
+        form.set_path("input", Some(art.path.clone()));
+        if !data_root.as_os_str().is_empty() {
+            form.set_path("data_root", Some(data_root));
         }
-        v
-    }
-
-    fn field_origin(&self, idx: usize) -> FieldOrigin {
-        match idx {
-            0 => self.inputs_origin,
-            1 => self.output_origin,
-            3 => self.emit_sql_origin,
-            4 => self.build_origin,
-            _ => FieldOrigin::Edited,
-        }
-    }
-
-    fn field_label(&self, idx: usize) -> &'static str {
-        match idx {
-            0 => "inputs",
-            1 => "output",
-            2 => "advanced",
-            3 => "emit SQL",
-            4 => "build",
-            _ => "",
+        Self {
+            title: "Transform: annotate".into(),
+            kind: Kind::Annotate,
+            form,
+            inputs: Vec::new(),
+            annotate_input: art.path.clone(),
+            picker: None,
+            error: None,
         }
     }
 
-    fn field_value(&self, idx: usize) -> String {
-        match idx {
-            0 => {
-                if self.inputs.is_empty() {
-                    "(none — press Enter to add)".into()
-                } else if self.inputs.len() == 1 {
-                    self.inputs[0].display().to_string()
-                } else {
-                    format!("{} files", self.inputs.len())
-                }
-            }
-            1 => match &self.output {
-                Some(p) => p.display().to_string(),
-                None => "(derived from first input)".into(),
-            },
-            2 => if self.advanced_open { "[-]" } else { "[+]" }.into(),
-            3 => if self.emit_sql { "yes" } else { "no" }.into(),
-            4 => match self.build {
-                Some(GenomeBuild::Hg38) => "hg38".into(),
-                Some(GenomeBuild::Hg19) => "hg19".into(),
-                None => "(auto-detect)".into(),
-            },
-            _ => String::new(),
+    fn current_build(&self) -> Option<GenomeBuild> {
+        match self.form.values().choice("build") {
+            Some("hg38") => Some(GenomeBuild::Hg38),
+            Some("hg19") => Some(GenomeBuild::Hg19),
+            _ => None,
         }
     }
 
-    fn command_preview(&self) -> String {
-        let mut parts = vec!["> cohort ingest".to_string()];
-        for p in &self.inputs {
-            parts.push(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    fn current_tier(&self) -> Tier {
+        match self.form.values().choice("tier") {
+            Some("full") => Tier::Full,
+            _ => Tier::Base,
         }
-        if let Some(o) = &self.output {
-            parts.push(format!("-o {}", o.display()));
-        }
-        if self.emit_sql {
-            parts.push("--emit-sql".into());
-        }
-        match self.build {
-            Some(GenomeBuild::Hg38) => parts.push("--build hg38".into()),
-            Some(GenomeBuild::Hg19) => parts.push("--build hg19".into()),
-            None => {}
-        }
-        parts.join(" ")
     }
 
-    fn toggle_advanced(&mut self) {
-        self.advanced_open = !self.advanced_open;
-    }
-
-    fn to_config(&self) -> Result<IngestConfig, String> {
+    fn ingest_config(&self) -> Result<IngestConfig, String> {
         if self.inputs.is_empty() {
             return Err("At least one input file is required.".into());
         }
@@ -144,18 +172,203 @@ impl IngestForm {
                 return Err(format!("Input not found: {}", p.display()));
             }
         }
-        let output = self.output.clone().unwrap_or_else(|| default_ingest_output(&self.inputs[0]));
+        let output = self
+            .form
+            .values()
+            .path("output")
+            .cloned()
+            .unwrap_or_else(|| default_ingest_output(&self.inputs[0]));
         Ok(IngestConfig {
             inputs: self.inputs.clone(),
             output,
-            emit_sql: self.emit_sql,
-            build_override: self.build.clone(),
+            emit_sql: self.form.values().toggle("emit_sql").unwrap_or(false),
+            build_override: self.current_build(),
         })
+    }
+
+    fn annotate_config(&self) -> Result<AnnotateConfig, String> {
+        let input = self.annotate_input.clone();
+        if !input.exists() {
+            return Err(format!("Input not found: {}", input.display()));
+        }
+        if !input.join("meta.json").exists() {
+            return Err(format!(
+                "Input '{}' is not an ingested set (missing meta.json).",
+                input.display()
+            ));
+        }
+        let data_root = self
+            .form
+            .values()
+            .path("data_root")
+            .cloned()
+            .unwrap_or_default();
+        if data_root.as_os_str().is_empty() {
+            return Err("Data root not configured. Run `s` from workspace to open setup.".into());
+        }
+        if !data_root.exists() {
+            return Err(format!("Data root not found: {}", data_root.display()));
+        }
+        let output = self
+            .form
+            .values()
+            .path("output")
+            .cloned()
+            .unwrap_or_else(|| default_annotate_output(&input));
+        Ok(AnnotateConfig {
+            input,
+            output,
+            tier: self.current_tier(),
+            data_root,
+        })
+    }
+
+    fn try_run(&mut self) -> Transition {
+        let result = match self.kind {
+            Kind::Ingest => self.ingest_config().map(RunRequest::Ingest),
+            Kind::Annotate => self.annotate_config().map(RunRequest::Annotate),
+        };
+        match result {
+            Ok(req) => Transition::Run(req),
+            Err(msg) => {
+                self.error = Some(msg);
+                Transition::Stay
+            }
+        }
+    }
+
+    fn open_picker(&mut self, id: &'static str) {
+        let cwd = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let (target, start, prompt, show_files) = match (&self.kind, id) {
+            (Kind::Ingest, "inputs") => {
+                (PickerTarget::IngestAddInput, cwd(), "Select input file", true)
+            }
+            (Kind::Ingest, "output") => {
+                let start = self
+                    .form
+                    .values()
+                    .path("output")
+                    .and_then(|p| p.parent().map(PathBuf::from))
+                    .unwrap_or_else(cwd);
+                (PickerTarget::IngestOutput, start, "Select output directory", false)
+            }
+            (Kind::Annotate, "output") => {
+                let start = self
+                    .form
+                    .values()
+                    .path("output")
+                    .and_then(|p| p.parent().map(PathBuf::from))
+                    .unwrap_or_else(cwd);
+                (PickerTarget::AnnotateOutput, start, "Select output directory", false)
+            }
+            (Kind::Annotate, "data_root") => {
+                let cur = self.form.values().path("data_root").cloned();
+                let start = match cur {
+                    Some(p) if p.exists() => p,
+                    _ => cwd(),
+                };
+                (PickerTarget::AnnotateDataRoot, start, "Select data root directory", false)
+            }
+            _ => return,
+        };
+        self.picker = Some((DirBrowserState::with_files(prompt, &start, show_files), target));
+    }
+
+    fn apply_picker(&mut self, target: PickerTarget, chosen: PathBuf) {
+        match target {
+            PickerTarget::IngestAddInput => {
+                self.inputs.push(chosen.clone());
+                self.form.set_path("inputs", Some(chosen));
+            }
+            PickerTarget::IngestOutput => self.form.set_path("output", Some(chosen)),
+            PickerTarget::AnnotateOutput => self.form.set_path("output", Some(chosen)),
+            PickerTarget::AnnotateDataRoot => self.form.set_path("data_root", Some(chosen)),
+        }
+        self.error = None;
+    }
+
+    fn clear_focused(&mut self) {
+        let id = match self.form.focused_field_id() {
+            Some(i) => i,
+            None => return,
+        };
+        match (&self.kind, id) {
+            (Kind::Ingest, "inputs") => {
+                self.inputs.clear();
+                self.form.set_path("inputs", None);
+            }
+            (_, "output") => self.form.set_path("output", None),
+            _ => {}
+        }
+    }
+
+    fn ingest_preview(&self) -> String {
+        let mut parts = vec!["> cohort ingest".to_string()];
+        for p in &self.inputs {
+            parts.push(
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+        }
+        if let Some(o) = self.form.values().path("output") {
+            parts.push(format!("-o {}", o.display()));
+        }
+        if self.form.values().toggle("emit_sql").unwrap_or(false) {
+            parts.push("--emit-sql".into());
+        }
+        match self.current_build() {
+            Some(GenomeBuild::Hg38) => parts.push("--build hg38".into()),
+            Some(GenomeBuild::Hg19) => parts.push("--build hg19".into()),
+            None => {}
+        }
+        parts.join(" ")
+    }
+
+    fn annotate_preview(&self) -> String {
+        let mut parts = vec![
+            "> cohort annotate".to_string(),
+            self.annotate_input
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ];
+        if matches!(self.current_tier(), Tier::Full) {
+            parts.push("--full".into());
+        }
+        if let Some(o) = self.form.values().path("output") {
+            parts.push(format!("-o {}", o.display()));
+        }
+        parts.join(" ")
+    }
+
+    fn command_preview(&self) -> String {
+        match self.kind {
+            Kind::Ingest => self.ingest_preview(),
+            Kind::Annotate => self.annotate_preview(),
+        }
+    }
+
+    fn drive_form(&mut self, code: KeyCode) -> Transition {
+        self.error = None;
+        match self.form.handle(code) {
+            FormOutcome::Continue | FormOutcome::OpenAdvanced => Transition::Stay,
+            FormOutcome::Cancel => Transition::Pop,
+            FormOutcome::Submit => self.try_run(),
+            FormOutcome::RequestEdit(id) => {
+                self.open_picker(id);
+                Transition::Stay
+            }
+        }
     }
 }
 
 fn default_ingest_output(first: &std::path::Path) -> PathBuf {
-    let stem = first.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let stem = first
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     let stem = stem
         .strip_suffix(".vcf")
         .or_else(|| stem.strip_suffix(".tsv"))
@@ -172,360 +385,17 @@ fn default_ingest_output(first: &std::path::Path) -> PathBuf {
         .join(format!("{stem}.ingested"))
 }
 
-pub struct AnnotateForm {
-    input: PathBuf,
-    input_origin: FieldOrigin,
-    output: Option<PathBuf>,
-    output_origin: FieldOrigin,
-    tier: Tier,
-    tier_origin: FieldOrigin,
-    data_root: PathBuf,
-    data_root_origin: FieldOrigin,
-}
-
-impl AnnotateForm {
-    fn from_artifact(art: &Artifact) -> Self {
-        let cfg = Config::load().ok();
-        let tier = cfg.as_ref().map(|c| c.data.tier).unwrap_or(Tier::Base);
-        let data_root = cfg.map(|c| c.root_dir()).unwrap_or_default();
-        Self {
-            input: art.path.clone(),
-            input_origin: FieldOrigin::Inferred,
-            output: None,
-            output_origin: FieldOrigin::Inferred,
-            tier,
-            tier_origin: FieldOrigin::Inferred,
-            data_root,
-            data_root_origin: FieldOrigin::Inferred,
-        }
-    }
-
-    fn visible_fields(&self) -> Vec<usize> {
-        vec![0, 1, 2, 3]
-    }
-
-    fn field_origin(&self, idx: usize) -> FieldOrigin {
-        match idx {
-            0 => self.input_origin,
-            1 => self.output_origin,
-            2 => self.tier_origin,
-            3 => self.data_root_origin,
-            _ => FieldOrigin::Edited,
-        }
-    }
-
-    fn field_label(&self, idx: usize) -> &'static str {
-        match idx {
-            0 => "input",
-            1 => "output",
-            2 => "tier",
-            3 => "data root",
-            _ => "",
-        }
-    }
-
-    fn field_value(&self, idx: usize) -> String {
-        match idx {
-            0 => self.input.display().to_string(),
-            1 => match &self.output {
-                Some(p) => p.display().to_string(),
-                None => "(derived from input)".into(),
-            },
-            2 => self.tier.as_str().into(),
-            3 => {
-                if self.data_root.as_os_str().is_empty() {
-                    "(not configured — run setup)".into()
-                } else {
-                    self.data_root.display().to_string()
-                }
-            }
-            _ => String::new(),
-        }
-    }
-
-
-    fn command_preview(&self) -> String {
-        let mut parts = vec![
-            "> cohort annotate".to_string(),
-            self.input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-        ];
-        if matches!(self.tier, Tier::Full) {
-            parts.push("--full".into());
-        }
-        if let Some(o) = &self.output {
-            parts.push(format!("-o {}", o.display()));
-        }
-        parts.join(" ")
-    }
-
-    fn to_config(&self) -> Result<AnnotateConfig, String> {
-        if !self.input.exists() {
-            return Err(format!("Input not found: {}", self.input.display()));
-        }
-        if !self.input.join("meta.json").exists() {
-            return Err(format!(
-                "Input '{}' is not an ingested set (missing meta.json).",
-                self.input.display()
-            ));
-        }
-        if self.data_root.as_os_str().is_empty() {
-            return Err("Data root not configured. Run `s` from workspace to open setup.".into());
-        }
-        if !self.data_root.exists() {
-            return Err(format!("Data root not found: {}", self.data_root.display()));
-        }
-        let output = self.output.clone().unwrap_or_else(|| default_annotate_output(&self.input));
-        Ok(AnnotateConfig {
-            input: self.input.clone(),
-            output,
-            tier: self.tier,
-            data_root: self.data_root.clone(),
-        })
-    }
-}
-
 fn default_annotate_output(input: &std::path::Path) -> PathBuf {
-    let name = input.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let name = input
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     let stem = name.strip_suffix(".ingested").unwrap_or(&name);
     input
         .parent()
         .unwrap_or(input)
         .join(format!("{stem}.annotated"))
-}
-
-enum FormState {
-    Ingest(IngestForm),
-    Annotate(AnnotateForm),
-}
-
-enum PickerTarget {
-    IngestAddInput,
-    IngestOutput,
-    AnnotateOutput,
-    AnnotateDataRoot,
-}
-
-pub struct TransformScreen {
-    title: String,
-    form: FormState,
-    focus: usize,
-    picker: Option<(DirBrowserState, PickerTarget)>,
-    error: Option<String>,
-}
-
-impl TransformScreen {
-    pub fn new_ingest(focused: Option<&Artifact>) -> Self {
-        Self {
-            title: "Transform: ingest".into(),
-            form: FormState::Ingest(IngestForm::from_artifact(focused)),
-            focus: 0,
-            picker: None,
-            error: None,
-        }
-    }
-
-    pub fn new_annotate(art: &Artifact) -> Self {
-        Self {
-            title: "Transform: annotate".into(),
-            form: FormState::Annotate(AnnotateForm::from_artifact(art)),
-            focus: 0,
-            picker: None,
-            error: None,
-        }
-    }
-
-    fn visible_fields(&self) -> Vec<usize> {
-        match &self.form {
-            FormState::Ingest(f) => f.visible_fields(),
-            FormState::Annotate(f) => f.visible_fields(),
-        }
-    }
-
-    fn field_count(&self) -> usize {
-        self.visible_fields().len()
-    }
-
-    fn run_field_idx(&self) -> usize {
-        self.field_count()
-    }
-
-    fn focus_count(&self) -> usize {
-        self.field_count() + 1
-    }
-
-    fn current_field_id(&self) -> Option<usize> {
-        self.visible_fields().get(self.focus).copied()
-    }
-
-    fn field_origin(&self, idx: usize) -> FieldOrigin {
-        match &self.form {
-            FormState::Ingest(f) => f.field_origin(idx),
-            FormState::Annotate(f) => f.field_origin(idx),
-        }
-    }
-
-    fn cycle_focus(&mut self, delta: isize) {
-        let n = self.focus_count() as isize;
-        let next = (self.focus as isize + delta).rem_euclid(n);
-        self.focus = next as usize;
-    }
-
-    fn try_run(&mut self) -> Transition {
-        let result: Result<RunRequest, String> = match &self.form {
-            FormState::Ingest(f) => f.to_config().map(RunRequest::Ingest),
-            FormState::Annotate(f) => f.to_config().map(RunRequest::Annotate),
-        };
-        match result {
-            Ok(req) => Transition::Run(req),
-            Err(msg) => {
-                self.error = Some(msg);
-                Transition::Stay
-            }
-        }
-    }
-
-    fn open_picker_for_focus(&mut self) {
-        let fid = match self.current_field_id() {
-            Some(i) => i,
-            None => return,
-        };
-        let (target, start, prompt, show_files) = match (&self.form, fid) {
-            (FormState::Ingest(_), 0) => (
-                PickerTarget::IngestAddInput,
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                "Select input file",
-                true,
-            ),
-            (FormState::Ingest(f), 1) => (
-                PickerTarget::IngestOutput,
-                f.output
-                    .as_deref()
-                    .and_then(|p| p.parent())
-                    .map(PathBuf::from)
-                    .or_else(|| std::env::current_dir().ok())
-                    .unwrap_or_else(|| PathBuf::from(".")),
-                "Select output directory",
-                false,
-            ),
-            (FormState::Annotate(f), 1) => (
-                PickerTarget::AnnotateOutput,
-                f.output
-                    .as_deref()
-                    .and_then(|p| p.parent())
-                    .map(PathBuf::from)
-                    .or_else(|| std::env::current_dir().ok())
-                    .unwrap_or_else(|| PathBuf::from(".")),
-                "Select output directory",
-                false,
-            ),
-            (FormState::Annotate(f), 3) => (
-                PickerTarget::AnnotateDataRoot,
-                if f.data_root.as_os_str().is_empty() || !f.data_root.exists() {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-                } else {
-                    f.data_root.clone()
-                },
-                "Select data root directory",
-                false,
-            ),
-            _ => return,
-        };
-        self.picker = Some((DirBrowserState::with_files(prompt, &start, show_files), target));
-    }
-
-    fn apply_picker_choice(&mut self, target: PickerTarget, chosen: PathBuf) {
-        match (&mut self.form, target) {
-            (FormState::Ingest(f), PickerTarget::IngestAddInput) => {
-                f.inputs.push(chosen);
-                f.inputs_origin = FieldOrigin::Edited;
-            }
-            (FormState::Ingest(f), PickerTarget::IngestOutput) => {
-                f.output = Some(chosen);
-                f.output_origin = FieldOrigin::Edited;
-            }
-            (FormState::Annotate(f), PickerTarget::AnnotateOutput) => {
-                f.output = Some(chosen);
-                f.output_origin = FieldOrigin::Edited;
-            }
-            (FormState::Annotate(f), PickerTarget::AnnotateDataRoot) => {
-                f.data_root = chosen;
-                f.data_root_origin = FieldOrigin::Edited;
-            }
-            _ => {}
-        }
-        self.error = None;
-    }
-
-    fn activate_field(&mut self) -> Transition {
-        if self.focus == self.run_field_idx() {
-            return self.try_run();
-        }
-        let fid = match self.current_field_id() {
-            Some(i) => i,
-            None => return Transition::Stay,
-        };
-        match (&mut self.form, fid) {
-            (FormState::Ingest(f), 2) => {
-                f.toggle_advanced();
-                Transition::Stay
-            }
-            (FormState::Ingest(f), 3) => {
-                f.emit_sql = !f.emit_sql;
-                f.emit_sql_origin = FieldOrigin::Edited;
-                Transition::Stay
-            }
-            (FormState::Ingest(f), 4) => {
-                f.build = match f.build {
-                    None => Some(GenomeBuild::Hg38),
-                    Some(GenomeBuild::Hg38) => Some(GenomeBuild::Hg19),
-                    Some(GenomeBuild::Hg19) => None,
-                };
-                f.build_origin = FieldOrigin::Edited;
-                Transition::Stay
-            }
-            (FormState::Annotate(f), 2) => {
-                f.tier = match f.tier {
-                    Tier::Base => Tier::Full,
-                    Tier::Full => Tier::Base,
-                };
-                f.tier_origin = FieldOrigin::Edited;
-                Transition::Stay
-            }
-            _ => {
-                self.open_picker_for_focus();
-                Transition::Stay
-            }
-        }
-    }
-
-    fn clear_input_at_focus(&mut self) {
-        let fid = match self.current_field_id() {
-            Some(i) => i,
-            None => return,
-        };
-        match (&mut self.form, fid) {
-            (FormState::Ingest(f), 0) => {
-                f.inputs.clear();
-                f.inputs_origin = FieldOrigin::Edited;
-            }
-            (FormState::Ingest(f), 1) => {
-                f.output = None;
-                f.output_origin = FieldOrigin::Inferred;
-            }
-            (FormState::Annotate(f), 1) => {
-                f.output = None;
-                f.output_origin = FieldOrigin::Inferred;
-            }
-            _ => {}
-        }
-    }
-
-    fn command_preview(&self) -> String {
-        match &self.form {
-            FormState::Ingest(f) => f.command_preview(),
-            FormState::Annotate(f) => f.command_preview(),
-        }
-    }
 }
 
 impl Screen for TransformScreen {
@@ -543,9 +413,8 @@ impl Screen for TransformScreen {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2),
-                Constraint::Min(4),
+                Constraint::Min(6),
                 Constraint::Length(1),
-                Constraint::Length(3),
                 Constraint::Length(4),
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -557,52 +426,14 @@ impl Screen for TransformScreen {
             Style::default().fg(theme::ACCENT).bold(),
         )));
         frame.render_widget(title, v[0]);
-        let v = &v[1..];
 
-        let run_focused = self.focus == self.run_field_idx();
-        let visible = self.visible_fields();
-        let items: Vec<ListItem> = visible
-            .iter()
-            .enumerate()
-            .map(|(pos, &fid)| {
-                let is_focus = pos == self.focus;
-                let origin = self.field_origin(fid);
-                let (label, value) = match &self.form {
-                    FormState::Ingest(f) => (f.field_label(fid), f.field_value(fid)),
-                    FormState::Annotate(f) => (f.field_label(fid), f.field_value(fid)),
-                };
-                let value_color = match origin {
-                    FieldOrigin::Inferred => theme::MUTED,
-                    FieldOrigin::Edited => theme::FG,
-                };
-                let label_style = Style::default().fg(theme::MUTED);
-                let value_style = Style::default().fg(value_color);
-                let marker = if is_focus { " > " } else { "   " };
-                ListItem::new(Line::from(vec![
-                    Span::raw(marker),
-                    Span::styled(format!("{label:<14}"), label_style),
-                    Span::styled(value, value_style),
-                ]))
-            })
-            .collect();
-
-        frame.render_widget(List::new(items), v[0]);
+        self.form.render(v[1], frame.buffer_mut());
 
         let preview = Paragraph::new(Line::from(Span::styled(
             format!("  {}", self.command_preview()),
             Style::default().fg(theme::MUTED),
         )));
-        frame.render_widget(preview, v[1]);
-
-        let run_marker = if run_focused { ">" } else { " " };
-        let run_text = Line::from(vec![
-            Span::raw(format!(" {run_marker} ")),
-            Span::styled("Run", Style::default().fg(theme::ACCENT).bold()),
-        ]);
-        let run_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::ACCENT));
-        frame.render_widget(Paragraph::new(run_text).block(run_block), v[2]);
+        frame.render_widget(preview, v[2]);
 
         log.draw(frame, v[3], "Log");
 
@@ -668,7 +499,7 @@ impl Screen for TransformScreen {
                 Action::PickerInto => {
                     if let Some(chosen) = picker.enter_selected() {
                         let (_, target) = self.picker.take().unwrap();
-                        self.apply_picker_choice(target, chosen);
+                        self.apply_picker(target, chosen);
                     }
                 }
                 _ => {}
@@ -677,18 +508,13 @@ impl Screen for TransformScreen {
         }
 
         match action {
-            Action::TransformCancel => Transition::Pop,
-            Action::TransformNextField => {
-                self.cycle_focus(1);
-                Transition::Stay
-            }
-            Action::TransformPrevField => {
-                self.cycle_focus(-1);
-                Transition::Stay
-            }
-            Action::TransformActivate | Action::TransformToggleBool => self.activate_field(),
+            Action::TransformCancel => self.drive_form(KeyCode::Esc),
+            Action::TransformNextField => self.drive_form(KeyCode::Down),
+            Action::TransformPrevField => self.drive_form(KeyCode::Up),
+            Action::TransformActivate => self.drive_form(KeyCode::Enter),
+            Action::TransformToggleBool => self.drive_form(KeyCode::Char(' ')),
             Action::TransformClearField => {
-                self.clear_input_at_focus();
+                self.clear_focused();
                 Transition::Stay
             }
             _ => Transition::Stay,
@@ -696,18 +522,23 @@ impl Screen for TransformScreen {
     }
 
     fn contribute_session(&self, state: &mut SessionState) {
-        state.transform = Some(match &self.form {
-            FormState::Ingest(f) => TransformSnapshot::Ingest {
-                inputs: f.inputs.clone(),
-                output: f.output.clone(),
-                emit_sql: f.emit_sql,
-                build: f.build.as_ref().map(BuildTag::from_build),
+        state.transform = Some(match self.kind {
+            Kind::Ingest => TransformSnapshot::Ingest {
+                inputs: self.inputs.clone(),
+                output: self.form.values().path("output").cloned(),
+                emit_sql: self.form.values().toggle("emit_sql").unwrap_or(false),
+                build: self.current_build().as_ref().map(BuildTag::from_build),
             },
-            FormState::Annotate(f) => TransformSnapshot::Annotate {
-                input: f.input.clone(),
-                output: f.output.clone(),
-                tier: f.tier,
-                data_root: f.data_root.clone(),
+            Kind::Annotate => TransformSnapshot::Annotate {
+                input: self.annotate_input.clone(),
+                output: self.form.values().path("output").cloned(),
+                tier: self.current_tier(),
+                data_root: self
+                    .form
+                    .values()
+                    .path("data_root")
+                    .cloned()
+                    .unwrap_or_default(),
             },
         });
     }
