@@ -18,11 +18,21 @@ use crate::tui::widgets::file_picker::{self, DirBrowserState};
 use crate::tui::widgets::log_tail::LogTail;
 use crate::tui::widgets::status_bar::StatusBar;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldOrigin {
+    Inferred,
+    Edited,
+}
+
 pub struct IngestForm {
     inputs: Vec<PathBuf>,
+    inputs_origin: FieldOrigin,
     output: Option<PathBuf>,
+    output_origin: FieldOrigin,
     emit_sql: bool,
+    emit_sql_origin: FieldOrigin,
     build: Option<GenomeBuild>,
+    build_origin: FieldOrigin,
 }
 
 impl IngestForm {
@@ -33,14 +43,28 @@ impl IngestForm {
         };
         Self {
             inputs,
+            inputs_origin: FieldOrigin::Inferred,
             output: None,
+            output_origin: FieldOrigin::Inferred,
             emit_sql: false,
+            emit_sql_origin: FieldOrigin::Inferred,
             build: None,
+            build_origin: FieldOrigin::Inferred,
+        }
+    }
+
+    fn field_origin(&self, idx: usize) -> FieldOrigin {
+        match idx {
+            0 => self.inputs_origin,
+            1 => self.output_origin,
+            2 => self.emit_sql_origin,
+            3 => self.build_origin,
+            _ => FieldOrigin::Edited,
         }
     }
 
     fn field_count(&self) -> usize {
-        5
+        4
     }
 
     fn field_label(&self, idx: usize) -> &'static str {
@@ -49,7 +73,6 @@ impl IngestForm {
             1 => "output",
             2 => "emit SQL",
             3 => "build",
-            4 => "[ Run ]",
             _ => "",
         }
     }
@@ -137,9 +160,13 @@ fn default_ingest_output(first: &std::path::Path) -> PathBuf {
 
 pub struct AnnotateForm {
     input: PathBuf,
+    input_origin: FieldOrigin,
     output: Option<PathBuf>,
+    output_origin: FieldOrigin,
     tier: Tier,
+    tier_origin: FieldOrigin,
     data_root: PathBuf,
+    data_root_origin: FieldOrigin,
 }
 
 impl AnnotateForm {
@@ -149,14 +176,28 @@ impl AnnotateForm {
         let data_root = cfg.map(|c| c.root_dir()).unwrap_or_else(PathBuf::new);
         Self {
             input: art.path.clone(),
+            input_origin: FieldOrigin::Inferred,
             output: None,
+            output_origin: FieldOrigin::Inferred,
             tier,
+            tier_origin: FieldOrigin::Inferred,
             data_root,
+            data_root_origin: FieldOrigin::Inferred,
         }
     }
 
     fn field_count(&self) -> usize {
-        5
+        4
+    }
+
+    fn field_origin(&self, idx: usize) -> FieldOrigin {
+        match idx {
+            0 => self.input_origin,
+            1 => self.output_origin,
+            2 => self.tier_origin,
+            3 => self.data_root_origin,
+            _ => FieldOrigin::Edited,
+        }
     }
 
     fn field_label(&self, idx: usize) -> &'static str {
@@ -165,7 +206,6 @@ impl AnnotateForm {
             1 => "output",
             2 => "tier",
             3 => "data root",
-            4 => "[ Run ]",
             _ => "",
         }
     }
@@ -188,6 +228,7 @@ impl AnnotateForm {
             _ => String::new(),
         }
     }
+
 
     fn command_preview(&self) -> String {
         let mut parts = vec![
@@ -287,11 +328,22 @@ impl TransformScreen {
     }
 
     fn run_field_idx(&self) -> usize {
-        self.field_count() - 1
+        self.field_count()
+    }
+
+    fn focus_count(&self) -> usize {
+        self.field_count() + 1
+    }
+
+    fn field_origin(&self, idx: usize) -> FieldOrigin {
+        match &self.form {
+            FormState::Ingest(f) => f.field_origin(idx),
+            FormState::Annotate(f) => f.field_origin(idx),
+        }
     }
 
     fn cycle_focus(&mut self, delta: isize) {
-        let n = self.field_count() as isize;
+        let n = self.focus_count() as isize;
         let next = (self.focus as isize + delta).rem_euclid(n);
         self.focus = next as usize;
     }
@@ -359,15 +411,19 @@ impl TransformScreen {
         match (&mut self.form, target) {
             (FormState::Ingest(f), PickerTarget::IngestAddInput) => {
                 f.inputs.push(chosen);
+                f.inputs_origin = FieldOrigin::Edited;
             }
             (FormState::Ingest(f), PickerTarget::IngestOutput) => {
                 f.output = Some(chosen);
+                f.output_origin = FieldOrigin::Edited;
             }
             (FormState::Annotate(f), PickerTarget::AnnotateOutput) => {
                 f.output = Some(chosen);
+                f.output_origin = FieldOrigin::Edited;
             }
             (FormState::Annotate(f), PickerTarget::AnnotateDataRoot) => {
                 f.data_root = chosen;
+                f.data_root_origin = FieldOrigin::Edited;
             }
             _ => {}
         }
@@ -381,6 +437,7 @@ impl TransformScreen {
         match (&mut self.form, self.focus) {
             (FormState::Ingest(f), 2) => {
                 f.emit_sql = !f.emit_sql;
+                f.emit_sql_origin = FieldOrigin::Edited;
                 Transition::Stay
             }
             (FormState::Ingest(f), 3) => {
@@ -389,6 +446,7 @@ impl TransformScreen {
                     Some(GenomeBuild::Hg38) => Some(GenomeBuild::Hg19),
                     Some(GenomeBuild::Hg19) => None,
                 };
+                f.build_origin = FieldOrigin::Edited;
                 Transition::Stay
             }
             (FormState::Annotate(f), 2) => {
@@ -396,6 +454,7 @@ impl TransformScreen {
                     Tier::Base => Tier::Full,
                     Tier::Full => Tier::Base,
                 };
+                f.tier_origin = FieldOrigin::Edited;
                 Transition::Stay
             }
             _ => {
@@ -409,12 +468,15 @@ impl TransformScreen {
         match (&mut self.form, self.focus) {
             (FormState::Ingest(f), 0) => {
                 f.inputs.clear();
+                f.inputs_origin = FieldOrigin::Edited;
             }
             (FormState::Ingest(f), 1) => {
                 f.output = None;
+                f.output_origin = FieldOrigin::Inferred;
             }
             (FormState::Annotate(f), 1) => {
                 f.output = None;
+                f.output_origin = FieldOrigin::Inferred;
             }
             _ => {}
         }
@@ -442,31 +504,30 @@ impl Screen for TransformScreen {
         let v = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(6),
+                Constraint::Min(4),
                 Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(4),
                 Constraint::Length(1),
-                Constraint::Length(6),
                 Constraint::Length(1),
             ])
             .split(area);
 
+        let run_focused = self.focus == self.run_field_idx();
         let items: Vec<ListItem> = (0..self.field_count())
             .map(|i| {
                 let is_focus = i == self.focus;
+                let origin = self.field_origin(i);
                 let (label, value) = match &self.form {
                     FormState::Ingest(f) => (f.field_label(i), f.field_value(i)),
                     FormState::Annotate(f) => (f.field_label(i), f.field_value(i)),
                 };
-                let label_style = if is_focus {
-                    Style::default().fg(theme::ACCENT).bold()
-                } else {
-                    Style::default().fg(theme::MUTED)
+                let value_color = match origin {
+                    FieldOrigin::Inferred => theme::MUTED,
+                    FieldOrigin::Edited => theme::FG,
                 };
-                let value_style = if is_focus {
-                    Style::default().fg(theme::FG).bold()
-                } else {
-                    Style::default().fg(theme::FG)
-                };
+                let label_style = Style::default().fg(theme::MUTED);
+                let value_style = Style::default().fg(value_color);
                 let marker = if is_focus { " > " } else { "   " };
                 ListItem::new(Line::from(vec![
                     Span::raw(marker),
@@ -476,20 +537,25 @@ impl Screen for TransformScreen {
             })
             .collect();
 
-        let form_title = format!(" {} ", self.title);
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(form_title)
-                .border_style(Style::default().fg(theme::ACCENT)),
-        );
-        frame.render_widget(list, v[0]);
+        frame.render_widget(List::new(items), v[0]);
 
         let preview = Paragraph::new(Line::from(Span::styled(
             format!("  {}", self.command_preview()),
             Style::default().fg(theme::MUTED),
         )));
         frame.render_widget(preview, v[1]);
+
+        let run_marker = if run_focused { ">" } else { " " };
+        let run_text = Line::from(vec![
+            Span::raw(format!(" {run_marker} ")),
+            Span::styled("Run", Style::default().fg(theme::ACCENT).bold()),
+        ]);
+        let run_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT));
+        frame.render_widget(Paragraph::new(run_text).block(run_block), v[2]);
+
+        log.draw(frame, v[3], "Log");
 
         let error_line = match &self.error {
             Some(msg) => Line::from(Span::styled(
@@ -498,15 +564,13 @@ impl Screen for TransformScreen {
             )),
             None => Line::from(""),
         };
-        frame.render_widget(Paragraph::new(error_line), v[2]);
-
-        log.draw(frame, v[3], "Log");
+        frame.render_widget(Paragraph::new(error_line), v[4]);
 
         StatusBar {
             title: &self.title,
             keys: "tab/shift-tab move  enter activate  backspace clear  esc back",
         }
-        .render(frame, v[4]);
+        .render(frame, v[5]);
     }
 
     fn scope(&self) -> ActionScope {
