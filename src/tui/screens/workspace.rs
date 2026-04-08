@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::config::Config;
@@ -13,18 +14,21 @@ use crate::tui::screen::{Screen, Transition};
 use crate::tui::screens::setup::SetupScreen;
 use crate::tui::screens::transform::TransformScreen;
 use crate::tui::screens::variant::VariantScreen;
-use crate::tui::state::artifacts::ArtifactKind;
+use crate::tui::shell::graph_strip::compute_graph;
+use crate::tui::shell::{Binding, ErrorMessage, ScreenChrome, Shell};
+use crate::tui::stages::types::ArtifactKind as StageArtifact;
+use crate::tui::stages::{Stage, StageId, STAGES};
+use crate::tui::state::artifacts::{Artifact, ArtifactKind};
 use crate::tui::state::workspace::WorkspaceState;
 use crate::tui::state::SessionState;
 use crate::tui::theme;
 use crate::tui::widgets::log_tail::LogTail;
-use crate::tui::widgets::status_bar::StatusBar;
 
 pub struct WorkspaceScreen {
     title: String,
     state: WorkspaceState,
     list_state: ListState,
-    notice: Option<String>,
+    error: Option<ErrorMessage>,
     pending_focus: Option<PathBuf>,
 }
 
@@ -46,7 +50,7 @@ impl WorkspaceScreen {
             title: "Workspace".to_string(),
             state,
             list_state,
-            notice: None,
+            error: None,
             pending_focus: None,
         }
     }
@@ -61,28 +65,6 @@ impl WorkspaceScreen {
         }
     }
 
-    fn hint_line(&self) -> String {
-        let base = "j/k move  r rescan  s setup  ? help  q quit";
-        match self.state.focused() {
-            Some(a) => {
-                let chain = next_chain(&a.kind);
-                let mut parts: Vec<String> = Vec::new();
-                if chain != Chain::None {
-                    parts.push(format!("enter {}", chain.label()));
-                }
-                if can_browse(&a.kind) && chain != Chain::Browse {
-                    parts.push("v browse".into());
-                }
-                if parts.is_empty() {
-                    base.to_string()
-                } else {
-                    format!("{}  ·  {base}", parts.join("  ·  "))
-                }
-            }
-            None => base.to_string(),
-        }
-    }
-
     fn browse_focused(&mut self) -> Transition {
         let Some(a) = self.state.focused() else {
             return Transition::Stay;
@@ -92,17 +74,21 @@ impl WorkspaceScreen {
             ArtifactKind::AnnotatedSet { .. } => VariantScreen::new_for_annotated_set(path),
             ArtifactKind::ParquetFile => VariantScreen::new_for_parquet(path),
             _ => {
-                self.notice = Some(format!("cannot browse {}", a.kind.title()));
+                self.error = Some(ErrorMessage {
+                    text: format!("cannot browse {}", a.kind.title()),
+                });
                 return Transition::Stay;
             }
         };
         match result {
             Ok(screen) => {
-                self.notice = None;
+                self.error = None;
                 Transition::Push(Box::new(screen))
             }
             Err(e) => {
-                self.notice = Some(format!("cannot open: {e}"));
+                self.error = Some(ErrorMessage {
+                    text: format!("cannot open: {e}"),
+                });
                 Transition::Stay
             }
         }
@@ -117,34 +103,35 @@ impl WorkspaceScreen {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Chain {
-    Ingest,
-    Annotate,
-    Browse,
-    None,
+fn classify(kind: &ArtifactKind) -> Option<StageArtifact> {
+    match kind {
+        ArtifactKind::RawVcf => Some(StageArtifact::VcfDir),
+        ArtifactKind::IngestedSet => Some(StageArtifact::IngestedSet),
+        ArtifactKind::AnnotatedSet { .. } => Some(StageArtifact::AnnotatedSet),
+        ArtifactKind::GenotypeStore => Some(StageArtifact::GenotypeStore),
+        ArtifactKind::StaarResults => Some(StageArtifact::StaarResults),
+        _ => None,
+    }
 }
 
-impl Chain {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Ingest => "ingest",
-            Self::Annotate => "annotate",
-            Self::Browse => "browse",
-            Self::None => "—",
+fn present_kinds(state: &WorkspaceState) -> Vec<StageArtifact> {
+    let mut kinds: Vec<StageArtifact> = Vec::new();
+    for a in &state.artifacts {
+        if let Some(k) = classify(&a.kind) {
+            if !kinds.contains(&k) {
+                kinds.push(k);
+            }
         }
     }
+    kinds
 }
 
-fn next_chain(kind: &ArtifactKind) -> Chain {
-    match kind {
-        ArtifactKind::RawVcf => Chain::Ingest,
-        ArtifactKind::IngestedSet => Chain::Annotate,
-        ArtifactKind::AnnotatedSet { .. } => Chain::Browse,
-        ArtifactKind::ParquetFile => Chain::Browse,
-        ArtifactKind::StaarResults => Chain::Browse,
-        _ => Chain::None,
-    }
+fn next_stage_for(kind: &ArtifactKind) -> Option<&'static dyn Stage> {
+    let sk = classify(kind)?;
+    STAGES
+        .iter()
+        .copied()
+        .find(|s| s.inputs().iter().any(|i| *i == sk))
 }
 
 fn can_browse(kind: &ArtifactKind) -> bool {
@@ -154,17 +141,11 @@ fn can_browse(kind: &ArtifactKind) -> bool {
     )
 }
 
-fn actions_for(kind: &ArtifactKind) -> &'static [&'static str] {
-    match kind {
-        ArtifactKind::RawVcf => &["ingest", "browse"],
-        ArtifactKind::PhenotypeTsv => &["use as phenotype"],
-        ArtifactKind::KinshipTsv => &["use as kinship"],
-        ArtifactKind::ParquetFile => &["browse"],
-        ArtifactKind::IngestedSet => &["annotate", "browse"],
-        ArtifactKind::AnnotatedSet { .. } => &["staar", "enrich", "browse"],
-        ArtifactKind::GenotypeStore => &["inspect"],
-        ArtifactKind::StaarResults => &["browse"],
-        ArtifactKind::AnnotationRoot => &["status"],
+fn open_next(stage_id: StageId, art: &Artifact) -> Option<Box<dyn Screen>> {
+    match stage_id.as_str() {
+        "ingest" => Some(Box::new(TransformScreen::new_ingest(Some(art)))),
+        "annotate" => Some(Box::new(TransformScreen::new_annotate(art))),
+        _ => None,
     }
 }
 
@@ -194,25 +175,25 @@ impl Screen for WorkspaceScreen {
         self.sync_focus();
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, log: &LogTail) {
+    fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
         if self.state.drain_scan() {
             self.try_apply_pending_focus();
             self.sync_focus();
         }
 
-        let v = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(4),
-                Constraint::Length(6),
-                Constraint::Length(1),
-            ])
-            .split(area);
+        let present = present_kinds(&self.state);
+        let focus_stage = self
+            .state
+            .focused()
+            .and_then(|a| next_stage_for(&a.kind))
+            .map(|s| s.id());
+        let graph = compute_graph(&present, focus_stage);
 
-        let h = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(v[0]);
+        let list_title = if self.state.scanning {
+            format!(" Artifacts ({}, scanning…) ", self.state.artifacts.len())
+        } else {
+            format!(" Artifacts ({}) ", self.state.artifacts.len())
+        };
 
         let items: Vec<ListItem> = self
             .state
@@ -236,25 +217,6 @@ impl Screen for WorkspaceScreen {
                 ListItem::new(line)
             })
             .collect();
-
-        let list_title = if self.state.scanning {
-            format!(
-                " Artifacts ({}, scanning…) ",
-                self.state.artifacts.len()
-            )
-        } else {
-            format!(" Artifacts ({}) ", self.state.artifacts.len())
-        };
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(list_title)
-                    .border_style(Style::default().fg(theme::ACCENT)),
-            )
-            .highlight_style(Style::default().bg(theme::MUTED).fg(theme::FG))
-            .highlight_symbol(" > ");
-        frame.render_stateful_widget(list, h[0], &mut self.list_state);
 
         let detail_lines: Vec<Line> = match self.state.focused() {
             Some(a) => {
@@ -286,12 +248,18 @@ impl Screen for WorkspaceScreen {
                 }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "  actions",
+                    "  next",
                     Style::default().fg(theme::ACCENT),
                 )));
-                for action in actions_for(&a.kind) {
+                if let Some(stage) = next_stage_for(&a.kind) {
                     lines.push(Line::from(Span::styled(
-                        format!("    {action}"),
+                        format!("    {}", stage.label()),
+                        Style::default().fg(theme::FG),
+                    )));
+                }
+                if can_browse(&a.kind) {
+                    lines.push(Line::from(Span::styled(
+                        "    browse",
                         Style::default().fg(theme::FG),
                     )));
                 }
@@ -310,26 +278,47 @@ impl Screen for WorkspaceScreen {
             }
         };
 
-        let detail = Paragraph::new(detail_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Detail ")
-                .border_style(Style::default().fg(theme::MUTED)),
-        );
-        frame.render_widget(detail, h[1]);
+        let hint = [
+            Binding::new((KeyCode::Enter, KeyModifiers::NONE), "open next"),
+            Binding::new((KeyCode::Char('v'), KeyModifiers::NONE), "browse"),
+            Binding::new((KeyCode::Char('r'), KeyModifiers::NONE), "rescan"),
+            Binding::new((KeyCode::Char('s'), KeyModifiers::NONE), "setup"),
+            Binding::new((KeyCode::Char('q'), KeyModifiers::NONE), "quit"),
+        ];
 
-        log.draw(frame, v[1], "Log");
-
-        let hint = self.hint_line();
-        let status_keys = match &self.notice {
-            Some(msg) => msg.as_str(),
-            None => hint.as_str(),
-        };
-        StatusBar {
+        let chrome = ScreenChrome {
             title: &self.title,
-            keys: status_keys,
-        }
-        .render(frame, v[2]);
+            status: None,
+            error: self.error.as_ref(),
+            hint: &hint,
+            graph: Some(graph),
+        };
+
+        let list_state = &mut self.list_state;
+        let body = |inner: Rect, buf: &mut Buffer| {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(inner);
+            let list = List::new(items)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(list_title)
+                        .border_style(Style::default().fg(theme::ACCENT)),
+                )
+                .highlight_style(Style::default().bg(theme::MUTED).fg(theme::FG))
+                .highlight_symbol(" > ");
+            ratatui::widgets::StatefulWidget::render(list, cols[0], buf, list_state);
+            let detail = Paragraph::new(detail_lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Detail ")
+                    .border_style(Style::default().fg(theme::MUTED)),
+            );
+            detail.render(cols[1], buf);
+        };
+        Shell::new(chrome, body).render(area, frame.buffer_mut());
     }
 
     fn scope(&self) -> ActionScope {
@@ -367,33 +356,27 @@ impl Screen for WorkspaceScreen {
             Action::WorkspaceRescan => {
                 self.state.rescan();
                 self.sync_focus();
-                self.notice = None;
+                self.error = None;
                 Transition::Stay
             }
             Action::WorkspaceOpenSetup => Transition::Push(Box::new(SetupScreen::new())),
             Action::WorkspaceOpenFocused => {
-                let chain = match self.state.focused() {
-                    Some(a) => next_chain(&a.kind),
-                    None => return Transition::Stay,
+                let Some(a) = self.state.focused() else {
+                    return Transition::Stay;
                 };
-                match chain {
-                    Chain::Ingest => {
-                        let a = self.state.focused().unwrap();
-                        self.notice = None;
-                        Transition::Push(Box::new(TransformScreen::new_ingest(Some(a))))
-                    }
-                    Chain::Annotate => {
-                        let a = self.state.focused().unwrap();
-                        self.notice = None;
-                        Transition::Push(Box::new(TransformScreen::new_annotate(a)))
-                    }
-                    Chain::Browse => self.browse_focused(),
-                    Chain::None => {
-                        let title = self.state.focused().unwrap().kind.title().to_string();
-                        self.notice = Some(format!("no next stage for {title}"));
-                        Transition::Stay
+                if let Some(stage) = next_stage_for(&a.kind) {
+                    if let Some(screen) = open_next(stage.id(), a) {
+                        self.error = None;
+                        return Transition::Push(screen);
                     }
                 }
+                if can_browse(&a.kind) {
+                    return self.browse_focused();
+                }
+                self.error = Some(ErrorMessage {
+                    text: format!("no next stage for {}", a.kind.title()),
+                });
+                Transition::Stay
             }
             Action::WorkspaceBrowseFocused => self.browse_focused(),
             _ => Transition::Stay,
@@ -408,7 +391,7 @@ impl Screen for WorkspaceScreen {
     }
 
     fn set_session_error(&mut self, msg: String) {
-        self.notice = Some(msg);
+        self.error = Some(ErrorMessage { text: msg });
     }
 
     fn restore_session(&mut self, state: &SessionState) {
