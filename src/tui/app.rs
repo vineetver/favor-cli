@@ -16,13 +16,13 @@ use crate::output::Output;
 
 use super::action::{Action, KeyMap};
 use super::event::AppEvent;
-use super::output::{BarRegistry, LogLine, ProgressSnapshot, TuiOutput};
+use super::output::{BarRegistry, LogLevel, LogLine, ProgressSnapshot, TuiOutput};
 use super::screen::{RunRequest, Screen, Transition};
 use super::screens::help::HelpScreen;
-use super::screens::run::{RunScreen, RunWiring};
 use super::state::{SessionId, SessionState, SessionStore};
 use super::widgets::log_tail::LogTail;
 use super::widgets::palette::{Palette, PaletteOutcome};
+use super::widgets::run_overlay::{dim_area, RunOutcome, RunOverlay};
 
 struct BarEntry {
     id: u64,
@@ -42,6 +42,7 @@ pub struct App {
     cmd_rx: Receiver<Result<(), CohortError>>,
     global_keys: KeyMap,
     palette: Option<Palette>,
+    overlay: Option<RunOverlay>,
     session_store: Option<SessionStore>,
 }
 
@@ -83,6 +84,7 @@ impl App {
             cmd_rx,
             global_keys,
             palette: None,
+            overlay: None,
             session_store,
         }
     }
@@ -114,11 +116,17 @@ impl App {
             {
                 let log_ref: &LogTail = &self.log;
                 let palette_ref = self.palette.as_ref();
+                let overlay_ref = self.overlay.as_ref();
                 let screen = &mut self.screens[top_idx];
                 terminal
                     .draw(|f| {
                         let area = f.area();
                         screen.draw(f, area, log_ref);
+                        if let Some(o) = overlay_ref {
+                            let buf = f.buffer_mut();
+                            dim_area(area, buf);
+                            o.render(area, buf);
+                        }
                         if let Some(p) = palette_ref {
                             p.draw(f, area);
                         }
@@ -135,6 +143,26 @@ impl App {
                         {
                             self.save_session();
                             return Ok(());
+                        }
+                        if let Some(overlay) = self.overlay.as_mut() {
+                            if let Some(outcome) = overlay.handle(k) {
+                                debug_assert!(overlay.is_finished());
+                                self.overlay = None;
+                                match outcome {
+                                    RunOutcome::Succeeded { artifact } => {
+                                        let _ = self.screens[top_idx]
+                                            .handle(&AppEvent::RunFinished(artifact));
+                                    }
+                                    RunOutcome::Failed { error } => {
+                                        self.log.push_log(LogLine {
+                                            level: LogLevel::Error,
+                                            message: error,
+                                        });
+                                    }
+                                    RunOutcome::Cancelled => {}
+                                }
+                            }
+                            continue;
                         }
                         if let Some(palette) = self.palette.as_mut() {
                             match palette.handle_key(k) {
@@ -249,13 +277,10 @@ impl App {
                 true
             }
             Transition::Run(req) => {
-                let description = req.description();
-                let artifact = req.expected_artifact();
                 let cancel = self.tui_out.arm_cancel();
-                let wiring = RunWiring::Wired { cancel };
+                self.overlay = Some(RunOverlay::launch(&req, cancel));
                 self.spawn_command(req);
-                self.screens.push(Box::new(RunScreen::new(description, wiring, artifact)));
-                true
+                false
             }
         }
     }
@@ -271,9 +296,31 @@ impl App {
 
     fn apply_to_log(&mut self, ev: &AppEvent) {
         match ev {
-            AppEvent::Log(line) => self.log.push_log(line.clone()),
-            AppEvent::ProgressUpdate(snap) => self.log.push_snapshot(snap.clone()),
+            AppEvent::Log(line) => {
+                if let Some(o) = self.overlay.as_mut() {
+                    o.push_log(line.clone());
+                }
+                self.log.push_log(line.clone());
+            }
+            AppEvent::ProgressUpdate(snap) => {
+                if let Some(o) = self.overlay.as_mut() {
+                    o.push_progress(snap.clone());
+                }
+                self.log.push_snapshot(snap.clone());
+            }
             AppEvent::ProgressSweep(id) => self.log.sweep(*id),
+            AppEvent::RunFinished(path) => {
+                let _ = path.as_path();
+            }
+            AppEvent::CommandDone(res) => {
+                if let Some(o) = self.overlay.as_mut() {
+                    let mirror = match res {
+                        Ok(()) => Ok(()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    o.on_command_done(mirror);
+                }
+            }
             _ => {}
         }
     }
