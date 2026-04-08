@@ -32,9 +32,10 @@ use sha2::{Digest, Sha256};
 use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::carrier::sparse_score;
-use crate::staar::carrier::{AnalysisVectors, VariantIndex};
-use crate::staar::sparse_g::SparseG;
-use crate::staar::store::StoreManifest;
+use crate::staar::carrier::AnalysisVectors;
+use crate::store::cohort::sparse_g::SparseG;
+use crate::store::cohort::variants::VariantIndex;
+use crate::store::cohort::CohortManifest;
 
 const MAGIC: &[u8; 8] = b"FVSCORE2";
 const VERSION: u16 = 4;
@@ -199,7 +200,7 @@ impl ScoreCacheMiss {
 /// `Some(ScoreCacheMiss)` describing the first chromosome that failed.
 pub fn probe(
     store_dir: &Path,
-    manifest: &StoreManifest,
+    manifest: &CohortManifest,
     key: &str,
 ) -> Option<ScoreCacheMiss> {
     let dir = cache_dir(store_dir, key);

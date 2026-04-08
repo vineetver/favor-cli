@@ -5,7 +5,7 @@ use serde_json::json;
 use crate::cli::GenomeBuild;
 use crate::commands::{self, IngestConfig};
 use crate::config::Config;
-use crate::data::{VariantSetKind, VariantSetWriter};
+use crate::store::list::{VariantSetKind, VariantSetWriter};
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::format::FormatRegistry;

@@ -5,11 +5,11 @@
 
 use faer::Mat;
 
-use super::carrier::reader::{CarrierEntry, CarrierList};
 use super::carrier::sparse_score::{self, AnalysisVectors};
 use super::model::NullModel;
 use super::score::{self, StaarResult};
 use super::stats;
+use crate::store::cohort::variants::{CarrierEntry, CarrierList};
 
 #[derive(Clone)]
 pub struct AncestryInfo {

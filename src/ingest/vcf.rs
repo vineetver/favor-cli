@@ -19,7 +19,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use crate::data::VariantSetWriter;
+use crate::store::list::VariantSetWriter;
 use crate::error::CohortError;
 use crate::output::Output;
 

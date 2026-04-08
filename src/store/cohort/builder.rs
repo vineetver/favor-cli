@@ -25,7 +25,7 @@ use crate::column::{self, Col, STAAR_WEIGHTS};
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::output::Output;
-use crate::staar::carrier::encoding::*;
+use super::encoding::*;
 
 pub struct BuildStats {
     pub n_variants: usize,

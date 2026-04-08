@@ -8,15 +8,15 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use crate::commands;
-use crate::data::VariantSet;
 use crate::error::CohortError;
 use crate::output::Output;
-use crate::staar::masks::ScangParams;
-use crate::staar::pipeline::{StaarConfig, StaarPipeline};
-use crate::staar::store;
 use crate::staar;
+use crate::staar::masks::ScangParams;
 #[cfg(test)]
 use crate::staar::MaskCategory;
+use crate::staar::pipeline::{StaarConfig, StaarPipeline};
+use crate::store::cohort;
+use crate::store::list::VariantSet;
 
 const GB: u64 = 1024 * 1024 * 1024;
 
@@ -205,7 +205,7 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), CohortErro
     let overhead = 4 * GB;
     let recommended = chr1_geno + overhead;
 
-    let probe_result = store::probe(&config.store_dir, &config.genotypes, &config.annotations);
+    let probe_result = cohort::probe(&config.store_dir, &config.genotypes, &config.annotations);
 
     let (cache_status, store_info, recommended_bytes) = match &probe_result.manifest {
         Some(m) => (

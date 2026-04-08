@@ -1,8 +1,8 @@
 //! Result writing (parquet) and HTML summary report generation.
 //!
-//! Every artifact here is written via `write_parquet_atomic` or
-//! `store::write_atomic` so a crash mid-write leaves either nothing or
-//! the prior version, never a half-finished parquet on disk.
+//! Every artifact here is written atomically (write to .tmp, fsync, rename,
+//! fsync parent) so a crash mid-write leaves either nothing or the prior
+//! version, never a half-finished parquet on disk.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -22,7 +22,7 @@ use serde_json::json;
 use crate::column::{Col, STAAR_WEIGHTS};
 use crate::error::CohortError;
 use crate::output::Output;
-use crate::staar::store::{fsync_parent, tmp_path, write_atomic};
+use crate::store::manifest::{fsync_parent, tmp_path, write_atomic};
 use crate::types::AnnotatedVariant;
 
 use super::model::NullModel;

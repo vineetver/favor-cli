@@ -3,7 +3,7 @@ use serde_json::json;
 use parquet::file::reader::FileReader;
 
 use crate::config::{Config, DirProbe, Tier};
-use crate::data::AnnotationDb;
+use crate::store::annotation::AnnotationDb;
 use crate::error::CohortError;
 use crate::output::Output;
 

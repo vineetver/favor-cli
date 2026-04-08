@@ -22,14 +22,15 @@ use super::carrier::sparse_score;
 use super::carrier::AnalysisVectors;
 use super::masks::MaskGroup;
 use super::score;
-use super::sparse_g::SparseG;
 use super::GeneResult;
 use crate::column::{Col, STAAR_WEIGHTS};
-use crate::data::parquet_column_names;
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement};
 use crate::output::Output;
+use crate::store::cohort::sparse_g::SparseG;
+use crate::store::cohort::variants::VariantIndex;
+use crate::store::list::parquet_column_names;
 use crate::types::{
     AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation,
     MetaVariant, RegionType, RegulatoryFlags,
@@ -739,7 +740,7 @@ pub fn emit_sumstats(
 
         let chrom_dir = store_dir.join(format!("chromosome={chrom}"));
         let sparse_g = SparseG::open(&chrom_dir)?;
-        let variant_index = super::carrier::VariantIndex::load(&chrom_dir)?;
+        let variant_index = VariantIndex::load(&chrom_dir)?;
         emit_chromosome_sparse(
             &sparse_g,
             &variant_index,
@@ -766,7 +767,7 @@ pub fn emit_sumstats(
 #[allow(clippy::too_many_arguments)]
 fn emit_chromosome_sparse(
     sparse_g: &SparseG,
-    variant_index: &super::carrier::VariantIndex,
+    variant_index: &VariantIndex,
     analysis: &AnalysisVectors,
     variants: &[AnnotatedVariant],
     chrom_indices: &[usize],

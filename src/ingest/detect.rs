@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::{Analysis, BuildGuess, CoordBase, Delimiter};
 use crate::config::Config;
-use crate::data::AnnotationDb;
+use crate::store::annotation::AnnotationDb;
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 

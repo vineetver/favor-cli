@@ -1,8 +1,8 @@
 //! `run.json` shape and resume planner for `cohort staar`.
 //!
 //! Owns the `Stage` enum, the on-disk manifest, the cache-decision log,
-//! and `plan_resume`. Disk writes go through `store::write_atomic` so a
-//! crash leaves either no `run.json` or the prior version.
+//! and `plan_resume`. Disk writes go through `write_atomic` so a crash
+//! leaves either no `run.json` or the prior version.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -10,8 +10,8 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::error::CohortError;
-use crate::staar::store;
 use crate::staar::RunMode;
+use crate::store::manifest::write_atomic;
 
 /// One stage in a `cohort staar` run. Order matches execution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,7 +147,7 @@ impl From<&ResumeDecision> for ResumeSummary {
 pub struct CacheDecision {
     pub artifact: ArtifactKind,
     pub outcome: CacheOutcome,
-    /// Free-text reason — typically the output of `store::describe_miss`
+    /// Free-text reason — typically the output of `cohort::describe_miss`
     /// or `"cache_key=<hash> matched"` for hits.
     pub reason: String,
 }
@@ -223,12 +223,11 @@ impl RunManifest {
         }
     }
 
-    /// Atomic write to `{output_dir}/run.json` via `store::write_atomic`.
     pub fn write(&self, output_dir: &Path) -> Result<(), CohortError> {
         let path = output_dir.join("run.json");
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| CohortError::Resource(format!("Serialize run manifest: {e}")))?;
-        store::write_atomic(&path, json.as_bytes())
+        write_atomic(&path, json.as_bytes())
     }
 
     /// Load an existing manifest if one is present and parses cleanly.

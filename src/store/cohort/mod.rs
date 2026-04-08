@@ -1,4 +1,4 @@
-//! Genotype store: build, cache, probe, and manifest management.
+//! Genotype cohort store: build, cache, probe, and manifest management.
 //!
 //! On first run the store is built from the VCF x annotation join. Subsequent
 //! runs with the same VCF and annotations skip both steps entirely and load
@@ -6,7 +6,7 @@
 //!
 //! Layout:
 //! ```text
-//! .genotype_store/
+//! <store_dir>/
 //!   manifest.json
 //!   samples.txt
 //!   chromosome={chr}/
@@ -14,6 +14,13 @@
 //!     variants.parquet     # aligned metadata vectors, row i = variant_vcf i
 //!     membership.parquet   # (variant_vcf, gene_name) many-to-many
 //! ```
+
+pub mod builder;
+pub mod encoding;
+pub mod membership;
+pub mod sparse_g;
+pub mod validate;
+pub mod variants;
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -23,15 +30,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::column;
-use crate::data::{VariantSet, VariantSetKind};
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement};
 use crate::output::Output;
 use crate::resource::Resources;
+use crate::store::list::{VariantSet, VariantSetKind};
 
 #[derive(Serialize, Deserialize)]
-pub struct StoreManifest {
+pub struct CohortManifest {
     pub version: u32,
     pub key: String,
     pub n_samples: usize,
@@ -136,7 +143,7 @@ pub enum ProbeReason {
 pub struct StoreProbe {
     pub store_dir: PathBuf,
     /// `Some` only when a valid, key-matching, fully-materialized store exists.
-    pub manifest: Option<StoreManifest>,
+    pub manifest: Option<CohortManifest>,
     /// Populated only when `manifest` is `None`.
     pub miss_reason: Option<ProbeReason>,
 }
@@ -159,7 +166,7 @@ pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> Stor
     let Ok(s) = fs::read_to_string(store_dir.join("manifest.json")) else {
         return miss(ProbeReason::NoManifest);
     };
-    let Ok(manifest) = serde_json::from_str::<StoreManifest>(&s) else {
+    let Ok(manifest) = serde_json::from_str::<CohortManifest>(&s) else {
         return miss(ProbeReason::UnreadableManifest);
     };
     let Ok(key) = compute_key(vcf_path, annotations_path) else {
@@ -264,7 +271,7 @@ pub const STAAR_ANNOTATION_COLUMNS: &[ColumnRequirement] = &[
 pub struct GenoStoreResult {
     pub sample_names: Vec<String>,
     pub store_dir: PathBuf,
-    pub manifest: StoreManifest,
+    pub manifest: CohortManifest,
     pub engine: DfEngine,
     pub geno_output_dir: Option<PathBuf>,
 }
@@ -274,8 +281,8 @@ impl GenoStoreResult {
     /// sample-list + parquet directory pair (phenotype loading, kinship
     /// group loading, known-loci joins). Replaces hand-built clones at
     /// every call site.
-    pub fn to_genotype_result(&self) -> super::genotype::GenotypeResult {
-        super::genotype::GenotypeResult {
+    pub fn to_genotype_result(&self) -> crate::staar::genotype::GenotypeResult {
+        crate::staar::genotype::GenotypeResult {
             sample_names: self.sample_names.clone(),
             output_dir: self
                 .geno_output_dir
@@ -486,12 +493,12 @@ pub fn run_annotation_join(
 
 pub fn build(
     engine: &DfEngine,
-    geno_result: &super::genotype::GenotypeResult,
+    geno_result: &crate::staar::genotype::GenotypeResult,
     store_dir: &Path,
     vcf_path: &Path,
     annotations_path: &Path,
     out: &dyn Output,
-) -> Result<StoreManifest, CohortError> {
+) -> Result<CohortManifest, CohortError> {
     let staging = staging_path(store_dir)?;
     finish_interrupted_swap(&staging, store_dir)?;
     fs::create_dir_all(&staging).map_err(|e| {
@@ -525,7 +532,7 @@ pub fn build(
             "{}/chromosome={chrom}/data.parquet",
             geno_result.output_dir.display()
         );
-        let stats = crate::staar::sparse_g_writer::build_chromosome(
+        let stats = builder::build_chromosome(
             engine, &geno_path, chrom, &chrom_dir, n_samples, out,
         )?;
 
@@ -542,7 +549,7 @@ pub fn build(
         total_carriers += stats.total_carriers;
     }
 
-    let manifest = StoreManifest {
+    let manifest = CohortManifest {
         version: 3,
         key,
         n_samples,
@@ -640,49 +647,7 @@ pub fn finish_interrupted_swap(staging: &Path, final_path: &Path) -> Result<(), 
     })
 }
 
-/// `path` with `.tmp` appended to its extension. Shared with `write_atomic`
-/// so other callers staging files don't drift on the suffix shape.
-pub fn tmp_path(path: &Path) -> PathBuf {
-    path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|s| s.to_str()).unwrap_or("")
-    ))
-}
-
-/// fsync the parent directory of `path` so a `rename` of `path` survives
-/// a crash. Best-effort: some network mounts refuse to let you open a
-/// directory, in which case we skip the fsync rather than fail the build.
-pub fn fsync_parent(path: &Path) {
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
-}
-
-/// Write `bytes` to `path` atomically: write to `path.tmp`, fsync the file,
-/// rename, then fsync the parent directory so the rename survives a crash.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CohortError> {
-    use std::io::Write;
-    let tmp = tmp_path(path);
-    {
-        let mut f = File::create(&tmp)
-            .map_err(|e| CohortError::Resource(format!("create {}: {e}", tmp.display())))?;
-        f.write_all(bytes)
-            .map_err(|e| CohortError::Resource(format!("write {}: {e}", tmp.display())))?;
-        f.sync_all()
-            .map_err(|e| CohortError::Resource(format!("fsync {}: {e}", tmp.display())))?;
-    }
-    fs::rename(&tmp, path).map_err(|e| {
-        CohortError::Resource(format!(
-            "rename {} -> {}: {e}",
-            tmp.display(),
-            path.display()
-        ))
-    })?;
-    fsync_parent(path);
-    Ok(())
-}
+use crate::store::manifest::{fsync_parent, write_atomic};
 
 fn now_string() -> String {
     let d = SystemTime::now()
@@ -714,20 +679,6 @@ mod tests {
         let p = probe(dir.path(), &bogus_vcf, &bogus_ann);
         assert!(p.manifest.is_none());
         assert_eq!(p.miss_reason, Some(ProbeReason::UnreadableManifest));
-    }
-
-    #[test]
-    fn write_atomic_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("manifest.json");
-        write_atomic(&path, b"hello world").unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
-        // No leftover .tmp.
-        let entries: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .collect();
-        assert_eq!(entries.len(), 1);
     }
 
     #[test]

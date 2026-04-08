@@ -12,14 +12,8 @@ pub mod output;
 pub mod pipeline;
 pub mod run_manifest;
 pub mod score;
-pub mod score_cache;
 pub mod scoring;
-pub mod sparse_g;
-pub mod sparse_g_writer;
 pub mod stats;
-pub mod store;
-#[allow(dead_code)]
-pub mod store_validate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraitType {

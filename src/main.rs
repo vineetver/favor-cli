@@ -11,6 +11,7 @@ mod ingest;
 mod output;
 mod resource;
 mod staar;
+mod store;
 #[cfg(test)]
 mod test_fixtures;
 mod setup;

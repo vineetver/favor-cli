@@ -18,14 +18,15 @@ use rayon::prelude::*;
 use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::carrier::sparse_score;
-use crate::staar::carrier::{AnalysisVectors, CarrierList, VariantIndex, VariantIndexEntry};
+use crate::staar::carrier::AnalysisVectors;
 use crate::staar::masks::{self, MaskGroup};
 use crate::staar::pipeline::{ScoringContext, StaarConfig};
 use crate::staar::score;
-use crate::staar::score_cache::{self, ChromScoreCache, GeneKBlock};
-use crate::staar::sparse_g::SparseG;
-use crate::staar::store::StoreManifest;
 use crate::staar::{self, GeneResult, MaskCategory, MaskType, ScoringMode};
+use crate::store::cache::score_cache::{self, ChromScoreCache, GeneKBlock};
+use crate::store::cohort::sparse_g::SparseG;
+use crate::store::cohort::variants::{CarrierList, VariantIndex, VariantIndexEntry};
+use crate::store::cohort::CohortManifest;
 use crate::types::{AnnotatedVariant, Chromosome};
 
 /// Function-pointer mask predicate over an `AnnotatedVariant`.
@@ -138,7 +139,7 @@ impl<'a> ChromCtx<'a> {
 /// per-mask gene/window result vectors plus individual p-values.
 pub fn run_score_tests(
     store_dir: &Path,
-    manifest: &StoreManifest,
+    manifest: &CohortManifest,
     config: &StaarConfig,
     analysis: &AnalysisVectors,
     ctx: &ScoringContext,

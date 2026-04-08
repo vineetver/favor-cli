@@ -1,21 +1,15 @@
-//! Structural invariant validation for the genotype store.
-//!
-//! Checks that the store is internally consistent:
-//! - variant_vcf alignment (row i == variant_vcf i)
-//! - sparse_g offsets valid and carrier data well-formed
-//! - no duplicate carriers within a variant
-//! - membership references valid variant_vcfs
-//! - sortedness invariants
-//!
-//! Any violation is a hard error — data cannot be trusted.
+//! Structural invariants for the genotype store. Any violation is a hard
+//! error — the data cannot be trusted.
+
+#![allow(dead_code)]
 
 use std::collections::HashSet;
 use std::path::Path;
 
+use super::sparse_g::SparseG;
+use super::variants::VariantIndex;
+use super::CohortManifest;
 use crate::error::CohortError;
-use crate::staar::carrier::reader::VariantIndex;
-use crate::staar::sparse_g::SparseG;
-use crate::staar::store::StoreManifest;
 
 pub struct CheckResult {
     pub name: &'static str,
@@ -26,7 +20,7 @@ pub struct CheckResult {
 /// Validate all structural invariants for the entire store.
 pub fn validate_store(
     store_dir: &Path,
-    manifest: &StoreManifest,
+    manifest: &CohortManifest,
 ) -> Result<Vec<CheckResult>, CohortError> {
     let mut results = Vec::new();
 

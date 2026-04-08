@@ -13,15 +13,15 @@ use std::path::Path;
 
 use memmap2::Mmap;
 
+use super::encoding::*;
+use super::variants::{CarrierEntry, CarrierList};
 use crate::error::CohortError;
-use crate::staar::carrier::encoding::*;
-use crate::staar::carrier::reader::{CarrierEntry, CarrierList};
 
 /// Memory-mapped sparse genotype matrix for one chromosome.
 ///
 /// Indexed by variant_vcf. No gene concept — just (sample_id, variant_vcf) → dosage.
 /// variant_vcf is a dense, immutable index over the variant universe for this chromosome.
-#[allow(dead_code)] // accessors used by store_validate and future diagnostics
+#[allow(dead_code)]
 pub struct SparseG {
     mmap: Mmap,
     n_samples: u32,

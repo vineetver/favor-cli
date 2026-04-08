@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::config::{DirProbe, Tier};
-use crate::data::{VariantSet, VariantSetKind};
+use crate::store::list::{VariantSet, VariantSetKind};
 use crate::ingest::format::FormatRegistry;
 use crate::ingest::InputFormat;
 

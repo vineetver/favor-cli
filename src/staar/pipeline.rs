@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use faer::Mat;
 
 use crate::column::STAAR_WEIGHTS;
-use crate::data::{AnnotatedSet, VariantSet, VariantSetKind};
 use crate::error::CohortError;
 use crate::ingest::ColumnContract;
 use crate::output::{bail_if_cancelled, Output};
@@ -30,12 +29,13 @@ use crate::staar::run_manifest::{
     self, ArtifactKind, CacheDecision, CacheOutcome, ConfigHashInputs, ResumeDecision,
     ResumeSummary, RunManifest, Stage,
 };
-use crate::staar::score_cache;
 use crate::staar::scoring::{self, ResultSet};
-use crate::staar::store::{self, GenoStoreResult, StoreManifest, STAAR_ANNOTATION_COLUMNS};
 use crate::staar::{
     self, ancestry::AncestryInfo, MaskCategory, NullModelKind, RunMode, ScoringMode, TraitType,
 };
+use crate::store::cache::score_cache;
+use crate::store::cohort::{self, CohortManifest, GenoStoreResult, STAAR_ANNOTATION_COLUMNS};
+use crate::store::list::{AnnotatedSet, VariantSet, VariantSetKind};
 use crate::types::{AnnotatedVariant, Chromosome};
 
 pub struct StaarConfig {
@@ -196,7 +196,7 @@ pub struct StaarPipeline<'a> {
 
 impl<'a> StaarPipeline<'a> {
     pub fn new(config: StaarConfig, out: &'a dyn Output) -> Result<Self, CohortError> {
-        let res = store::setup_resources(out)?;
+        let res = cohort::setup_resources(out)?;
         let manifest = config.new_run_manifest();
         Ok(Self {
             config,
@@ -396,13 +396,13 @@ impl<'a> StaarPipeline<'a> {
                 outcome: CacheOutcome::Rebuilt,
                 reason: "rebuild requested by --rebuild-store".into(),
             });
-            store::StoreProbe {
+            cohort::StoreProbe {
                 store_dir: self.config.store_dir.clone(),
                 manifest: None,
                 miss_reason: None,
             }
         } else {
-            let probe = store::probe(
+            let probe = cohort::probe(
                 &self.config.store_dir,
                 &self.config.genotypes,
                 &self.config.annotations,
@@ -417,7 +417,7 @@ impl<'a> StaarPipeline<'a> {
                 let reason = probe
                     .miss_reason
                     .as_ref()
-                    .map(store::describe_miss)
+                    .map(cohort::describe_miss)
                     .unwrap_or_else(|| "unknown miss".into());
                 CacheDecision {
                     artifact: ArtifactKind::GenotypeStore,
@@ -430,7 +430,7 @@ impl<'a> StaarPipeline<'a> {
         };
 
         let geno_staging_dir = self.config.output_dir.join(".geno_staging");
-        store::build_or_load_store_with_probe(
+        cohort::build_or_load_store_with_probe(
             &self.config.genotypes,
             &self.config.annotations,
             &self.config.store_dir,
@@ -657,8 +657,8 @@ impl<'a> StaarPipeline<'a> {
 
         for ci in &store.manifest.chromosomes {
             let chrom_dir = store.store_dir.join(format!("chromosome={}", ci.name));
-            let sg = crate::staar::sparse_g::SparseG::open(&chrom_dir)?;
-            let vi = crate::staar::carrier::VariantIndex::load(&chrom_dir)?;
+            let sg = crate::store::cohort::sparse_g::SparseG::open(&chrom_dir)?;
+            let vi = crate::store::cohort::variants::VariantIndex::load(&chrom_dir)?;
             score_cache::build_chromosome(&sg, &vi, analysis, &dir, &ci.name, self.out)?;
         }
 
@@ -739,14 +739,14 @@ impl<'a> StaarPipeline<'a> {
 /// writing (sumstats, individual, results headers).
 fn load_rare_variants(
     store_dir: &Path,
-    manifest: &StoreManifest,
+    manifest: &CohortManifest,
     maf_cutoff: f64,
 ) -> Result<Vec<AnnotatedVariant>, CohortError> {
     let mut all = Vec::with_capacity(manifest.n_variants);
     for ci in &manifest.chromosomes {
         let chrom: Chromosome = ci.name.parse().unwrap_or(Chromosome::Autosome(1));
         let chrom_dir = store_dir.join(format!("chromosome={}", ci.name));
-        let index = crate::staar::carrier::VariantIndex::load(&chrom_dir)?;
+        let index = crate::store::cohort::variants::VariantIndex::load(&chrom_dir)?;
         for entry in index.all_entries() {
             if entry.maf < maf_cutoff {
                 all.push(entry.to_annotated_variant(chrom));

@@ -4,8 +4,10 @@ use serde_json::json;
 
 use crate::commands::{self, AnnotateConfig};
 use crate::config::{Config, Tier};
-use crate::data::{parquet_column_names, parquet_row_count, AnnotationDb};
-use crate::data::{VariantSet, VariantSetKind, VariantSetWriter};
+use crate::store::annotation::AnnotationDb;
+use crate::store::list::{
+    parquet_column_names, parquet_row_count, VariantSet, VariantSetKind, VariantSetWriter,
+};
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement, JoinKey};

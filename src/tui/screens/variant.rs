@@ -18,8 +18,8 @@ use ratatui::Frame;
 
 use crate::column::Col;
 use crate::error::CohortError;
-use crate::staar::carrier::reader::{CarrierList, VariantIndex};
-use crate::staar::sparse_g::SparseG;
+use crate::store::cohort::sparse_g::SparseG;
+use crate::store::cohort::variants::{CarrierList, VariantIndex};
 use crate::tui::action::{Action, ActionScope};
 use crate::tui::shell::{ErrorMessage, ScreenChrome, Shell};
 use crate::tui::state::app::{AppState, Outcome, View};

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use faer::linalg::solvers::Solve;
 use faer::{unzip, zip, Mat};
 
-use super::reader::{CarrierEntry, CarrierList};
+use crate::store::cohort::variants::{CarrierEntry, CarrierList};
 use crate::error::CohortError;
 use crate::staar::kinship::{check_memory_budget, KinshipInverse, KinshipState};
 use crate::staar::model::NullModel;

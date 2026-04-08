@@ -34,6 +34,11 @@ pub struct Cli {
     /// Override auto-detected thread count (otherwise SLURM/cgroup/nproc)
     #[arg(long, global = true)]
     pub threads: Option<usize>,
+
+    /// Path to the cohort store root. Falls back to FAVOR_STORE, then a
+    /// parent-walk for `.cohort/`, then `<cwd>/.cohort/`.
+    #[arg(long, global = true)]
+    pub store_path: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
