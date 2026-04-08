@@ -1,10 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::action::{format_binding, Action, ActionScope};
@@ -22,6 +22,11 @@ pub struct Palette {
     cursor: usize,
     scope: ActionScope,
     matcher: Matcher,
+}
+
+enum Row {
+    Header(ActionScope),
+    Action(Action, usize),
 }
 
 impl Palette {
@@ -94,10 +99,7 @@ impl Palette {
             .collect();
 
         if self.query.is_empty() {
-            self.matches = candidates
-                .into_iter()
-                .map(|(a, _)| (a, 0))
-                .collect();
+            self.matches = candidates.into_iter().map(|(a, _)| (a, 0)).collect();
         } else {
             let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
             let mut buf: Vec<char> = Vec::new();
@@ -118,90 +120,137 @@ impl Palette {
         }
     }
 
+    fn rows(&self) -> Vec<Row> {
+        let mut by_scope: Vec<(ActionScope, Vec<(Action, usize)>)> = Vec::new();
+        for (idx, (action, _)) in self.matches.iter().enumerate() {
+            let scope = action.scope();
+            match by_scope.iter_mut().find(|(s, _)| *s == scope) {
+                Some((_, v)) => v.push((*action, idx)),
+                None => by_scope.push((scope, vec![(*action, idx)])),
+            }
+        }
+        if self.query.is_empty() {
+            by_scope.sort_by_key(|(s, _)| {
+                ActionScope::ordered().iter().position(|x| x == s).unwrap_or(usize::MAX)
+            });
+        }
+        let mut rows = Vec::with_capacity(self.matches.len() + by_scope.len());
+        for (scope, items) in by_scope {
+            rows.push(Row::Header(scope));
+            for (a, i) in items {
+                rows.push(Row::Action(a, i));
+            }
+        }
+        rows
+    }
+
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
         let overlay = centered(area, 60, 60);
         frame.render_widget(Clear, overlay);
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Command palette — {} ", self.scope.title()))
+            .title(format!(" command palette · {} ", self.scope.title().to_lowercase()))
             .border_style(Style::default().fg(theme::ACCENT))
             .padding(Padding::new(1, 1, 0, 0));
+        let inner = block.inner(overlay);
         frame.render_widget(block, overlay);
 
-        let inner = Rect {
-            x: overlay.x + 2,
-            y: overlay.y + 1,
-            width: overlay.width.saturating_sub(4),
-            height: overlay.height.saturating_sub(2),
-        };
+        if inner.height < 3 || inner.width < 10 {
+            return;
+        }
 
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(3),
-                Constraint::Length(1),
-            ])
-            .split(inner);
+        let prompt_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
+        let body_height = inner.height.saturating_sub(2);
+        let body_area = Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            width: inner.width,
+            height: body_height,
+        };
+        let footer_area = Rect {
+            x: inner.x,
+            y: inner.y + inner.height - 1,
+            width: inner.width,
+            height: 1,
+        };
 
         let prompt = Paragraph::new(Line::from(vec![
             Span::styled("> ", Style::default().fg(theme::WARN).bold()),
             Span::styled(self.query.as_str(), Style::default().fg(theme::FG)),
             Span::styled("_", Style::default().fg(theme::ACCENT)),
         ]));
-        frame.render_widget(prompt, layout[0]);
+        frame.render_widget(prompt, prompt_area);
 
-        let divider = Paragraph::new(Span::styled(
-            "-".repeat(layout[1].width as usize),
-            Style::default().fg(theme::MUTED),
-        ));
-        frame.render_widget(divider, layout[1]);
+        let rows = self.rows();
+        let focus_row_in_rows = rows.iter().position(|r| matches!(r, Row::Action(_, i) if *i == self.cursor));
+        let visible = body_area.height as usize;
+        let start = match focus_row_in_rows {
+            Some(pos) if pos >= visible => pos + 1 - visible,
+            _ => 0,
+        };
 
-        let visible_height = layout[2].height as usize;
-        let start = self.cursor.saturating_sub(visible_height.saturating_sub(1));
-        let items: Vec<ListItem> = self
-            .matches
+        let gutter_w: usize = 2;
+        let key_w: usize = 12;
+        let title_w: usize = 24;
+
+        let lines: Vec<Line> = rows
             .iter()
-            .enumerate()
             .skip(start)
-            .take(visible_height)
-            .map(|(i, (action, _))| {
-                let is_sel = i == self.cursor;
-                let marker = if is_sel { " > " } else { "   " };
-                let title_style = if is_sel {
-                    Style::default().fg(theme::ACCENT).bold()
-                } else {
-                    Style::default().fg(theme::FG)
-                };
-                let key_label = action
-                    .default_key()
-                    .map(|(c, m)| format_binding(c, m))
-                    .unwrap_or_default();
-                ListItem::new(Line::from(vec![
-                    Span::raw(marker),
-                    Span::styled(format!("{:<10}", key_label), Style::default().fg(theme::WARN)),
-                    Span::styled(format!("{:<28}", action.title()), title_style),
-                    Span::styled(action.description(), Style::default().fg(theme::MUTED)),
-                ]))
+            .take(visible)
+            .map(|row| match row {
+                Row::Header(scope) => Line::from(Span::styled(
+                    format!("{:>w$}{}", "", scope.title().to_lowercase(), w = gutter_w),
+                    Style::default().fg(theme::MUTED).add_modifier(Modifier::DIM),
+                )),
+                Row::Action(action, idx) => {
+                    let is_sel = *idx == self.cursor;
+                    let gutter = if is_sel {
+                        Span::styled(
+                            format!("{} ", theme::FOCUS_GLYPH),
+                            Style::default().fg(theme::ACCENT).bold(),
+                        )
+                    } else {
+                        Span::raw(format!("{:w$}", "", w = gutter_w))
+                    };
+                    let key_label = action
+                        .default_key()
+                        .map(|(c, m)| format_binding(c, m))
+                        .unwrap_or_default();
+                    let title_style = if is_sel {
+                        Style::default().fg(theme::FG).bold()
+                    } else {
+                        Style::default().fg(theme::MUTED)
+                    };
+                    let desc_style = if is_sel {
+                        Style::default().fg(theme::MUTED)
+                    } else {
+                        Style::default().fg(theme::MUTED).add_modifier(Modifier::DIM)
+                    };
+                    let key_style = if is_sel {
+                        Style::default().fg(theme::WARN)
+                    } else {
+                        Style::default().fg(theme::MUTED).add_modifier(Modifier::DIM)
+                    };
+                    Line::from(vec![
+                        gutter,
+                        Span::styled(format!("{:<kw$}", key_label, kw = key_w), key_style),
+                        Span::styled(format!("{:<tw$}", action.title(), tw = title_w), title_style),
+                        Span::styled(action.description(), desc_style),
+                    ])
+                }
             })
             .collect();
-        let list = List::new(items);
-        frame.render_widget(list, layout[2]);
+        frame.render_widget(Paragraph::new(lines), body_area);
 
+        let action_count = self.matches.len();
         let footer = Paragraph::new(Line::from(vec![
             Span::styled(
-                format!("{} match", self.matches.len()),
-                Style::default().fg(theme::MUTED),
+                format!("{} match{}    enter run    esc close", action_count, if action_count == 1 { "" } else { "es" }),
+                theme::hint_bar_style(),
             ),
-            Span::styled(
-                if self.matches.len() == 1 { "" } else { "es" },
-                Style::default().fg(theme::MUTED),
-            ),
-            Span::styled("    enter run    esc close", Style::default().fg(theme::MUTED)),
         ]));
-        frame.render_widget(footer, layout[3]);
+        frame.render_widget(footer, footer_area);
     }
 }
 
