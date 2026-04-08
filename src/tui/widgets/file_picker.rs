@@ -23,10 +23,6 @@ pub struct DirBrowserState {
 }
 
 impl DirBrowserState {
-    pub fn new(prompt: &str, start: &Path) -> Self {
-        Self::with_files(prompt, start, false)
-    }
-
     pub fn with_files(prompt: &str, start: &Path, show_files: bool) -> Self {
         let current_dir = if start.is_dir() {
             start.to_path_buf()
@@ -133,84 +129,6 @@ pub fn list_entries(dir: &Path, show_files: bool) -> Vec<String> {
     entries.extend(dirs);
     entries.extend(files);
     entries
-}
-
-pub fn tab_complete(partial: &str) -> Option<String> {
-    let path = Path::new(partial);
-    let (parent, prefix) = if partial.ends_with('/') {
-        if path.is_dir() {
-            return list_first_child(path);
-        }
-        return None;
-    } else {
-        let parent = path.parent()?;
-        let prefix = path.file_name()?.to_string_lossy().to_string();
-        (parent, prefix)
-    };
-
-    if !parent.is_dir() {
-        return None;
-    }
-
-    let matches: Vec<String> = std::fs::read_dir(parent)
-        .ok()?
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            if name.starts_with(&prefix) {
-                Some(name)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    match matches.len() {
-        0 => None,
-        1 => {
-            let completed = parent.join(&matches[0]);
-            Some(format!("{}/", completed.to_string_lossy()))
-        }
-        _ => {
-            let lcp = longest_common_prefix(&matches);
-            let completed = parent.join(&lcp);
-            Some(completed.to_string_lossy().to_string())
-        }
-    }
-}
-
-fn list_first_child(dir: &Path) -> Option<String> {
-    let mut entries: Vec<String> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect();
-    entries.sort();
-    if entries.len() == 1 {
-        Some(format!("{}/{}/", dir.to_string_lossy(), entries[0]))
-    } else {
-        None
-    }
-}
-
-fn longest_common_prefix(strings: &[String]) -> String {
-    if strings.is_empty() {
-        return String::new();
-    }
-    let first = &strings[0];
-    let mut len = first.len();
-    for s in &strings[1..] {
-        len = len.min(s.len());
-        for (i, (a, b)) in first.bytes().zip(s.bytes()).enumerate() {
-            if a != b {
-                len = len.min(i);
-                break;
-            }
-        }
-    }
-    first[..len].to_string()
 }
 
 pub fn draw(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut DirBrowserState) {

@@ -1,6 +1,6 @@
 use std::io::{self, Stdout};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -19,7 +19,7 @@ use super::event::AppEvent;
 use super::output::{BarRegistry, LogLine, ProgressSnapshot, TuiOutput};
 use super::screen::{Screen, Transition};
 use super::screens::help::HelpScreen;
-use super::stages::types::RunRequest;
+use super::stages::types::{RunRequest, SetupConfig};
 use super::state::{SessionId, SessionState, SessionStore};
 use super::widgets::palette::{Palette, PaletteOutcome};
 use super::widgets::run_overlay::{dim_area, RunOverlay};
@@ -41,6 +41,7 @@ pub struct App {
     palette: Option<Palette>,
     overlay: Option<RunOverlay>,
     session_store: Option<SessionStore>,
+    setup_sink: Option<Arc<Mutex<Option<SetupConfig>>>>,
 }
 
 impl App {
@@ -81,7 +82,13 @@ impl App {
             palette: None,
             overlay: None,
             session_store,
+            setup_sink: None,
         }
+    }
+
+    pub fn with_setup_sink(mut self, sink: Arc<Mutex<Option<SetupConfig>>>) -> Self {
+        self.setup_sink = Some(sink);
+        self
     }
 
     fn save_session(&self) {
@@ -262,6 +269,11 @@ impl App {
     }
 
     fn spawn_command(&self, req: RunRequest) {
+        if let RunRequest::Setup(cfg) = &req {
+            if let Some(sink) = self.setup_sink.as_ref() {
+                *sink.lock().unwrap() = Some(cfg.clone());
+            }
+        }
         let out = Arc::clone(&self.tui_out);
         let tx = self.cmd_tx.clone();
         std::thread::spawn(move || {
@@ -332,7 +344,27 @@ fn dispatch(req: RunRequest, out: &dyn Output) -> Result<(), CohortError> {
         RunRequest::Annotate(cfg) => commands::annotate::run_annotate(&cfg, out),
         RunRequest::Staar(cfg) => StaarPipeline::new(*cfg, out)?.run(),
         RunRequest::MetaStaar(cfg) => commands::meta_staar::run_meta_staar(&cfg, out),
+        RunRequest::Setup(cfg) => apply_setup(cfg, out),
     }
+}
+
+fn apply_setup(cfg: SetupConfig, out: &dyn Output) -> Result<(), CohortError> {
+    let mut existing = crate::config::Config::load().unwrap_or_default();
+    existing.data.tier = cfg.tier;
+    existing.data.root_dir = cfg.root_dir.to_string_lossy().to_string();
+    existing.data.packs = cfg.packs.clone();
+    if cfg.environment.is_some() {
+        existing.resources.environment = cfg.environment;
+    }
+    if cfg.memory_budget.is_some() {
+        existing.resources.memory_budget = cfg.memory_budget.clone();
+    }
+    existing.save()?;
+    out.success(&format!(
+        "saved configuration to {}",
+        crate::config::Config::config_path().display()
+    ));
+    Ok(())
 }
 
 pub fn make_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {

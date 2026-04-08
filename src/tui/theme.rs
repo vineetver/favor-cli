@@ -13,8 +13,6 @@ pub const FOCUS_GLYPH: &str = "▌";
 pub enum Tone {
     Focus,
     Normal,
-    Muted,
-    Warn,
 }
 
 impl Tone {
@@ -22,8 +20,6 @@ impl Tone {
         match self {
             Tone::Focus => Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             Tone::Normal => Style::default().fg(FG),
-            Tone::Muted => Style::default().fg(MUTED),
-            Tone::Warn => Style::default().fg(WARN),
         }
     }
 }

@@ -252,7 +252,7 @@ pub fn setup(
     };
 
     let tier = outcome.tier;
-    let root = outcome.root;
+    let root = outcome.root_dir;
     let selected_packs = outcome.packs;
     let environment = outcome.environment;
     let memory_budget = outcome.memory_budget;

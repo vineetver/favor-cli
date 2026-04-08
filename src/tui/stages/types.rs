@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::commands::{AnnotateConfig, IngestConfig, MetaStaarConfig};
-use crate::config::Tier;
+use crate::config::{Environment, Tier};
 use crate::staar::pipeline::StaarConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,6 +58,7 @@ pub enum FormField {
     MultiSelect {
         id: &'static str,
         label: &'static str,
+        options: &'static [&'static str],
         default: &'static [&'static str],
     },
 }
@@ -166,11 +167,21 @@ pub struct SessionCtx<'a> {
     pub focused: Option<&'a Path>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SetupConfig {
+    pub tier: Tier,
+    pub root_dir: PathBuf,
+    pub packs: Vec<String>,
+    pub environment: Option<Environment>,
+    pub memory_budget: Option<String>,
+}
+
 pub enum RunRequest {
     Ingest(IngestConfig),
     Annotate(AnnotateConfig),
     Staar(Box<StaarConfig>),
     MetaStaar(MetaStaarConfig),
+    Setup(SetupConfig),
 }
 
 impl RunRequest {
@@ -199,6 +210,7 @@ impl RunRequest {
             RunRequest::MetaStaar(cfg) => {
                 format!("Meta-STAAR ({} studies)", cfg.study_dirs.len())
             }
+            RunRequest::Setup(cfg) => format!("Setup → {}", cfg.root_dir.display()),
         }
     }
 
@@ -208,6 +220,7 @@ impl RunRequest {
             RunRequest::Annotate(cfg) => cfg.output.clone(),
             RunRequest::Staar(cfg) => cfg.output_dir.clone(),
             RunRequest::MetaStaar(cfg) => cfg.output_dir.clone(),
+            RunRequest::Setup(cfg) => cfg.root_dir.clone(),
         }
     }
 }

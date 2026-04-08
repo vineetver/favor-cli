@@ -52,12 +52,6 @@ impl Form {
             .insert(id, FieldData::Path(FieldValue::Edited(path)));
     }
 
-    pub fn set_text(&mut self, id: &'static str, text: String) {
-        self.values
-            .values
-            .insert(id, FieldData::Text(FieldValue::Edited(text)));
-    }
-
     pub fn set_multi(&mut self, id: &'static str, items: Vec<String>) {
         self.values
             .values

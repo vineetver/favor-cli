@@ -2,8 +2,10 @@ use std::path::PathBuf;
 
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::widgets::Widget;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Style, Stylize};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::tui::action::{Action, ActionScope};
@@ -11,14 +13,29 @@ use crate::tui::screen::{Screen, Transition};
 use crate::tui::shell::{ErrorMessage, ScreenChrome, Shell};
 use crate::tui::stages::types::{FormField, PathKind, SessionCtx};
 use crate::tui::stages::Stage;
+use crate::tui::theme::{self, Tone, FOCUS_GLYPH};
 use crate::tui::widgets::file_picker::{self, DirBrowserState};
 use crate::tui::widgets::form::{Form, FormOutcome};
+
+struct MultiPickerState {
+    field_id: &'static str,
+    label: &'static str,
+    options: &'static [&'static str],
+    cursor: usize,
+    checked: Vec<bool>,
+}
+
+enum Editor {
+    None,
+    Path(DirBrowserState, &'static str),
+    Multi(MultiPickerState),
+}
 
 pub struct StageView {
     stage: &'static dyn Stage,
     title: String,
     form: Form,
-    picker: Option<(DirBrowserState, &'static str)>,
+    editor: Editor,
     error: Option<ErrorMessage>,
 }
 
@@ -31,12 +48,12 @@ impl StageView {
             stage,
             title,
             form,
-            picker: None,
+            editor: Editor::None,
             error: None,
         }
     }
 
-    fn open_picker(&mut self, id: &'static str) {
+    fn open_path_picker(&mut self, id: &'static str) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let kind = match self.form.field(id) {
             Some(FormField::Path { kind, .. }) => *kind,
@@ -55,14 +72,46 @@ impl StageView {
             })
             .unwrap_or(cwd);
         let show_files = !matches!(kind, PathKind::Dir);
-        self.picker = Some((
+        self.editor = Editor::Path(
             DirBrowserState::with_files("Select path", &start, show_files),
             id,
-        ));
+        );
     }
 
-    fn apply_picker(&mut self, id: &'static str, chosen: PathBuf) {
+    fn open_multi_picker(&mut self, id: &'static str) {
+        let (label, options) = match self.form.field(id) {
+            Some(FormField::MultiSelect { label, options, .. }) => (*label, *options),
+            _ => return,
+        };
+        let current = self.form.values().multi(id).cloned().unwrap_or_default();
+        let checked: Vec<bool> = options.iter().map(|o| current.iter().any(|c| c == o)).collect();
+        self.editor = Editor::Multi(MultiPickerState {
+            field_id: id,
+            label,
+            options,
+            cursor: 0,
+            checked,
+        });
+    }
+
+    fn apply_path(&mut self, id: &'static str, chosen: PathBuf) {
         self.form.set_path(id, Some(chosen));
+        self.error = None;
+    }
+
+    fn commit_multi(&mut self) {
+        if let Editor::Multi(state) = &self.editor {
+            let id = state.field_id;
+            let picks: Vec<String> = state
+                .options
+                .iter()
+                .zip(state.checked.iter())
+                .filter(|(_, &on)| on)
+                .map(|(o, _)| (*o).to_string())
+                .collect();
+            self.form.set_multi(id, picks);
+        }
+        self.editor = Editor::None;
         self.error = None;
     }
 
@@ -83,10 +132,54 @@ impl StageView {
             FormOutcome::Cancel => Transition::Pop,
             FormOutcome::Submit => self.try_run(),
             FormOutcome::RequestEdit(id) => {
-                self.open_picker(id);
+                match self.form.field(id) {
+                    Some(FormField::Path { .. }) => self.open_path_picker(id),
+                    Some(FormField::MultiSelect { .. }) => self.open_multi_picker(id),
+                    _ => {}
+                }
                 Transition::Stay
             }
         }
+    }
+
+    fn draw_multi(frame: &mut Frame, area: Rect, state: &MultiPickerState) {
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(4),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        let title = Paragraph::new(Line::from(Span::styled(
+            format!("  {}", state.label),
+            Style::default().fg(theme::ACCENT).bold(),
+        )));
+        frame.render_widget(title, layout[0]);
+
+        let lines: Vec<Line> = state
+            .options
+            .iter()
+            .enumerate()
+            .map(|(i, opt)| {
+                let g = if i == state.cursor { FOCUS_GLYPH } else { " " };
+                let mark = if state.checked[i] { "[x]" } else { "[ ]" };
+                let tone = if i == state.cursor { Tone::Focus } else { Tone::Normal };
+                Line::from(vec![
+                    Span::styled(format!(" {g} {mark} "), tone.style()),
+                    Span::styled((*opt).to_string(), tone.style()),
+                ])
+            })
+            .collect();
+        let body = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::ACCENT)),
+        );
+        frame.render_widget(body, layout[1]);
+
+        let hint = "  space toggle   a toggle all   enter done   esc cancel";
+        frame.render_widget(Paragraph::new(hint).style(theme::hint_bar_style()), layout[2]);
     }
 
     fn clear_focused(&mut self) {
@@ -113,9 +206,16 @@ impl Screen for StageView {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        if let Some((picker, _)) = self.picker.as_mut() {
-            file_picker::draw(frame, area, picker);
-            return;
+        match &mut self.editor {
+            Editor::Path(picker, _) => {
+                file_picker::draw(frame, area, picker);
+                return;
+            }
+            Editor::Multi(state) => {
+                Self::draw_multi(frame, area, state);
+                return;
+            }
+            Editor::None => {}
         }
         let chrome = ScreenChrome {
             title: &self.title,
@@ -132,28 +232,51 @@ impl Screen for StageView {
     }
 
     fn scope(&self) -> ActionScope {
-        if self.picker.is_some() {
-            ActionScope::FilePicker
-        } else {
-            ActionScope::Transform
+        match &self.editor {
+            Editor::Path(_, _) => ActionScope::FilePicker,
+            _ => ActionScope::Transform,
         }
     }
 
     fn on_action(&mut self, action: Action) -> Transition {
-        if let Some((picker, _)) = self.picker.as_mut() {
+        if let Editor::Path(picker, _) = &mut self.editor {
             match action {
                 Action::PickerCancel => {
-                    self.picker = None;
+                    self.editor = Editor::None;
                 }
                 Action::PickerUp => picker.select_up(),
                 Action::PickerDown => picker.select_down(),
                 Action::PickerParent => picker.go_parent(),
                 Action::PickerInto => {
                     if let Some(chosen) = picker.enter_selected() {
-                        let (_, id) = self.picker.take().unwrap();
-                        self.apply_picker(id, chosen);
+                        if let Editor::Path(_, id) = std::mem::replace(&mut self.editor, Editor::None) {
+                            self.apply_path(id, chosen);
+                        }
                     }
                 }
+                _ => {}
+            }
+            return Transition::Stay;
+        }
+        if let Editor::Multi(state) = &mut self.editor {
+            match action {
+                Action::TransformCancel => self.editor = Editor::None,
+                Action::TransformPrevField => {
+                    if state.cursor > 0 {
+                        state.cursor -= 1;
+                    }
+                }
+                Action::TransformNextField => {
+                    if state.cursor + 1 < state.options.len() {
+                        state.cursor += 1;
+                    }
+                }
+                Action::TransformToggleBool => {
+                    if let Some(c) = state.checked.get_mut(state.cursor) {
+                        *c = !*c;
+                    }
+                }
+                Action::TransformActivate => self.commit_multi(),
                 _ => {}
             }
             return Transition::Stay;

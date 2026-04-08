@@ -3,11 +3,15 @@ pub mod types;
 pub mod annotate;
 pub mod ingest;
 pub mod meta_staar;
+pub mod setup;
 pub mod staar;
 
+pub use setup::SetupStage;
 pub use types::{
     ArtifactKind, FormError, FormSchema, FormValues, RunRequest, SessionCtx, StageId,
 };
+
+pub static SETUP_STAGE: SetupStage = SetupStage;
 
 pub trait Stage: Send + Sync + 'static {
     fn id(&self) -> StageId;

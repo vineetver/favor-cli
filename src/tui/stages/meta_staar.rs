@@ -14,6 +14,7 @@ const INPUTS: &[ArtifactKind] = &[ArtifactKind::SumStats];
 const OUTPUTS: &[ArtifactKind] = &[ArtifactKind::MetaStaarResults];
 
 const MASK_DEFAULT: &[&str] = &["coding"];
+const MASK_OPTIONS: &[&str] = &["coding", "noncoding", "sliding-window", "scang"];
 
 impl Stage for MetaStaarStage {
     fn id(&self) -> StageId {
@@ -42,6 +43,7 @@ impl Stage for MetaStaarStage {
                 FormField::MultiSelect {
                     id: "masks",
                     label: "masks",
+                    options: MASK_OPTIONS,
                     default: MASK_DEFAULT,
                 },
                 FormField::Path {

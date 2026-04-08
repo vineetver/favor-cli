@@ -17,6 +17,7 @@ const INPUTS: &[ArtifactKind] = &[ArtifactKind::AnnotatedSet, ArtifactKind::Geno
 const OUTPUTS: &[ArtifactKind] = &[ArtifactKind::StaarResults, ArtifactKind::SumStats];
 
 const MASK_DEFAULT: &[&str] = &["coding"];
+const MASK_OPTIONS: &[&str] = &["coding", "noncoding", "sliding-window", "scang"];
 
 impl Stage for StaarStage {
     fn id(&self) -> StageId {
@@ -67,6 +68,7 @@ impl Stage for StaarStage {
                 FormField::MultiSelect {
                     id: "masks",
                     label: "masks",
+                    options: MASK_OPTIONS,
                     default: MASK_DEFAULT,
                 },
             ],

@@ -4,7 +4,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 pub enum ActionScope {
     Global,
     Workspace,
-    Setup,
     Transform,
     FilePicker,
     Run,
@@ -18,7 +17,6 @@ impl ActionScope {
         match self {
             Self::Global => "Global",
             Self::Workspace => "Workspace",
-            Self::Setup => "Setup",
             Self::Transform => "Transform",
             Self::FilePicker => "File picker",
             Self::Run => "Run",
@@ -32,7 +30,6 @@ impl ActionScope {
         &[
             ActionScope::Global,
             ActionScope::Workspace,
-            ActionScope::Setup,
             ActionScope::Transform,
             ActionScope::FilePicker,
             ActionScope::Run,
@@ -80,13 +77,6 @@ pub enum Action {
     HelpClose,
     HelpCycleScope,
 
-    SetupCancel,
-    SetupConfirm,
-    SetupNext,
-    SetupPrev,
-    SetupToggle,
-    SetupToggleAll,
-
     VariantScrollRowUp,
     VariantScrollRowDown,
     VariantPrevRowGroup,
@@ -119,12 +109,6 @@ const ACTIONS_ALL: &[Action] = &[
     Action::WorkspaceOpenSetup,
     Action::WorkspaceOpenFocused,
     Action::WorkspaceBrowseFocused,
-    Action::SetupPrev,
-    Action::SetupNext,
-    Action::SetupConfirm,
-    Action::SetupCancel,
-    Action::SetupToggle,
-    Action::SetupToggleAll,
     Action::TransformPrevField,
     Action::TransformNextField,
     Action::TransformActivate,
@@ -173,13 +157,6 @@ impl Action {
             | Self::WorkspaceOpenSetup
             | Self::WorkspaceOpenFocused
             | Self::WorkspaceBrowseFocused => ActionScope::Workspace,
-
-            Self::SetupCancel
-            | Self::SetupConfirm
-            | Self::SetupNext
-            | Self::SetupPrev
-            | Self::SetupToggle
-            | Self::SetupToggleAll => ActionScope::Setup,
 
             Self::TransformNextField
             | Self::TransformPrevField
@@ -257,13 +234,6 @@ impl Action {
             Self::HelpClose => "Close help",
             Self::HelpCycleScope => "Cycle scope",
 
-            Self::SetupCancel => "Cancel setup",
-            Self::SetupConfirm => "Confirm",
-            Self::SetupNext => "Next",
-            Self::SetupPrev => "Previous",
-            Self::SetupToggle => "Toggle",
-            Self::SetupToggleAll => "Toggle all",
-
             Self::VariantScrollRowUp => "Scroll up",
             Self::VariantScrollRowDown => "Scroll down",
             Self::VariantPrevRowGroup => "Previous row group",
@@ -319,13 +289,6 @@ impl Action {
 
             Self::HelpClose => "close help",
             Self::HelpCycleScope => "expand the next scope group",
-
-            Self::SetupCancel => "exit the setup wizard",
-            Self::SetupConfirm => "confirm the current selection",
-            Self::SetupNext => "move to the next option",
-            Self::SetupPrev => "move to the previous option",
-            Self::SetupToggle => "toggle the highlighted option",
-            Self::SetupToggleAll => "toggle every option in the list",
 
             Self::VariantScrollRowUp => "move row focus up within the row group",
             Self::VariantScrollRowDown => "move row focus down within the row group",
@@ -387,13 +350,6 @@ impl Action {
 
             Self::HelpClose => Some((KeyCode::Esc, none)),
             Self::HelpCycleScope => Some((KeyCode::Tab, none)),
-
-            Self::SetupCancel => Some((KeyCode::Esc, none)),
-            Self::SetupConfirm => Some((KeyCode::Enter, none)),
-            Self::SetupNext => Some((KeyCode::Down, none)),
-            Self::SetupPrev => Some((KeyCode::Up, none)),
-            Self::SetupToggle => Some((KeyCode::Char(' '), none)),
-            Self::SetupToggleAll => Some((KeyCode::Char('a'), none)),
 
             Self::VariantScrollRowUp => Some((KeyCode::Char('k'), none)),
             Self::VariantScrollRowDown => Some((KeyCode::Char('j'), none)),

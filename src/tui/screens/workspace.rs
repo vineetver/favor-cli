@@ -11,13 +11,12 @@ use crate::config::{Config, Tier};
 use crate::tui::action::{Action, ActionScope};
 use crate::tui::event::AppEvent;
 use crate::tui::screen::{Screen, Transition};
-use crate::tui::screens::setup::SetupScreen;
 use crate::tui::screens::stage_view::StageView;
 use crate::tui::screens::variant::{VariantScreen, VariantSpec};
 use crate::tui::shell::graph_strip::compute_graph;
 use crate::tui::shell::{ErrorMessage, ScreenChrome, Shell};
 use crate::tui::stages::types::{ArtifactKind as StageArtifact, SessionCtx};
-use crate::tui::stages::{self, Stage};
+use crate::tui::stages::{self, Stage, SETUP_STAGE};
 use crate::tui::state::artifacts::{Artifact, ArtifactKind};
 use crate::tui::state::workspace::WorkspaceState;
 use crate::tui::state::SessionState;
@@ -349,7 +348,17 @@ impl Screen for WorkspaceScreen {
                 self.error = None;
                 Transition::Stay
             }
-            Action::WorkspaceOpenSetup => Transition::Push(Box::new(SetupScreen::new())),
+            Action::WorkspaceOpenSetup => {
+                let cfg = Config::load().ok();
+                let tier = cfg.as_ref().map(|c| c.data.tier).unwrap_or(Tier::Base);
+                let data_root = cfg.map(|c| c.root_dir()).unwrap_or_default();
+                let ctx = SessionCtx {
+                    data_root: &data_root,
+                    tier,
+                    focused: None,
+                };
+                Transition::Push(Box::new(StageView::new(&SETUP_STAGE, ctx)))
+            }
             Action::WorkspaceOpenFocused => {
                 let Some(a) = self.state.focused() else {
                     return Transition::Stay;

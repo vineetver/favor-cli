@@ -46,10 +46,6 @@ impl Pack {
         PACKS.iter().find(|p| p.id == id)
     }
 
-    pub fn optional() -> Vec<&'static Pack> {
-        PACKS.iter().filter(|p| !p.always_installed).collect()
-    }
-
     pub fn required() -> Vec<&'static Pack> {
         PACKS.iter().filter(|p| p.always_installed).collect()
     }
