@@ -77,6 +77,16 @@ pub trait Output {
     fn table(&self, headers: &[&str], rows: &[Vec<String>]);
     /// `total == 0` is a spinner (unknown length). Machine mode is a no-op.
     fn progress(&self, total: u64, label: &str) -> Progress;
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+pub fn bail_if_cancelled(out: &dyn Output) -> Result<(), CohortError> {
+    if out.is_cancelled() {
+        return Err(CohortError::Cancelled);
+    }
+    Ok(())
 }
 
 pub fn create(mode: &OutputMode) -> Box<dyn Output> {

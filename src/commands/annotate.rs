@@ -9,7 +9,7 @@ use crate::data::{VariantSet, VariantSetKind, VariantSetWriter};
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement, JoinKey};
-use crate::output::Output;
+use crate::output::{bail_if_cancelled, Output};
 use crate::resource::Resources;
 
 const ANNOTATE_JOIN_COLUMNS: &[ColumnRequirement] = &[
@@ -138,6 +138,7 @@ pub fn run_annotate(config: &AnnotateConfig, out: &dyn Output) -> Result<(), Coh
         config.tier.size_human()
     ));
 
+    bail_if_cancelled(out)?;
     let result = annotate_join(&input, &db, &engine, &config.output, out)?;
     report_result(&result, config, &engine, &input, &db, out)
 }
@@ -255,6 +256,7 @@ fn join_per_chromosome(
 
     let mut columns_set = false;
     for (i, chrom) in chroms.iter().enumerate() {
+        bail_if_cancelled(out)?;
         let chrom_parquet = match db.chrom_parquet(chrom) {
             Some(p) => p,
             None => {

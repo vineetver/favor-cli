@@ -7,6 +7,7 @@ pub enum CohortError {
     Resource(String),
     Analysis(String),
     Internal(anyhow::Error),
+    Cancelled,
 }
 
 impl CohortError {
@@ -17,6 +18,7 @@ impl CohortError {
             Self::Resource(_) => 3,
             Self::Analysis(_) => 4,
             Self::Internal(_) => 5,
+            Self::Cancelled => 130,
         }
     }
 
@@ -27,6 +29,7 @@ impl CohortError {
             Self::Resource(_) => "resource_error",
             Self::Analysis(_) => "analysis_error",
             Self::Internal(_) => "internal_error",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -39,6 +42,7 @@ impl fmt::Display for CohortError {
             | Self::Resource(msg)
             | Self::Analysis(msg) => write!(f, "{msg}"),
             Self::Internal(err) => write!(f, "{err}"),
+            Self::Cancelled => write!(f, "cancelled by user"),
         }
     }
 }

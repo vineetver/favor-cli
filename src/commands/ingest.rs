@@ -10,7 +10,7 @@ use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::format::FormatRegistry;
 use crate::ingest::{self, BuildGuess, InputFormat};
-use crate::output::Output;
+use crate::output::{bail_if_cancelled, Output};
 use crate::resource::Resources;
 
 /// Resolve inputs: expand directories to their VCF/parquet contents, validate all exist.
@@ -218,6 +218,7 @@ fn ingest_vcf(config: &IngestConfig, out: &dyn Output) -> Result<(), CohortError
         VariantSetWriter::new(&config.output, ingest::JoinKey::ChromPosRefAlt, &source_str)?;
     vs_writer.set_kind(VariantSetKind::Ingested);
 
+    bail_if_cancelled(out)?;
     let result = ingest::vcf::ingest_vcfs(
         &config.inputs,
         &mut vs_writer,
@@ -225,6 +226,7 @@ fn ingest_vcf(config: &IngestConfig, out: &dyn Output) -> Result<(), CohortError
         resources.threads,
         out,
     )?;
+    bail_if_cancelled(out)?;
     let vs = vs_writer.finish()?;
 
     out.success(&format!(
@@ -302,6 +304,7 @@ fn ingest_tabular(
     let resources = Resources::detect_configured();
     let engine = DfEngine::new(&resources)?;
 
+    bail_if_cancelled(out)?;
     register_tabular_inputs(&engine, &config.inputs, analysis)?;
 
     let select_sql = ingest::sql::generate_select(analysis);

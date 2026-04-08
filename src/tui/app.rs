@@ -19,7 +19,7 @@ use super::event::AppEvent;
 use super::output::{BarRegistry, LogLine, ProgressSnapshot, TuiOutput};
 use super::screen::{RunRequest, Screen, Transition};
 use super::screens::help::HelpScreen;
-use super::screens::run::RunScreen;
+use super::screens::run::{RunScreen, RunWiring};
 use super::widgets::log_tail::LogTail;
 use super::widgets::palette::{Palette, PaletteOutcome};
 
@@ -217,8 +217,11 @@ impl App {
             }
             Transition::Run(req) => {
                 let description = req.description();
+                let artifact = req.expected_artifact();
+                let cancel = self.tui_out.arm_cancel();
+                let wiring = RunWiring::Wired { cancel };
                 self.spawn_command(req);
-                self.screens.push(Box::new(RunScreen::new(description)));
+                self.screens.push(Box::new(RunScreen::new(description, wiring, artifact)));
                 true
             }
         }

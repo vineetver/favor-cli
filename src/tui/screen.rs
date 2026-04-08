@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
@@ -72,6 +74,13 @@ impl RunRequest {
                     .to_string_lossy();
                 format!("Annotating {name} ({} tier)", cfg.tier.as_str())
             }
+        }
+    }
+
+    pub fn expected_artifact(&self) -> PathBuf {
+        match self {
+            RunRequest::Ingest(cfg) => cfg.output.clone(),
+            RunRequest::Annotate(cfg) => cfg.output.clone(),
         }
     }
 }

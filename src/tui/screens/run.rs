@@ -1,3 +1,7 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Style, Stylize};
@@ -12,6 +16,12 @@ use crate::tui::theme;
 use crate::tui::widgets::log_tail::LogTail;
 use crate::tui::widgets::status_bar::StatusBar;
 
+pub enum RunWiring {
+    Wired { cancel: Arc<AtomicBool> },
+    #[allow(dead_code)]
+    Detach,
+}
+
 pub enum RunState {
     Running,
     Ok,
@@ -21,14 +31,18 @@ pub enum RunState {
 pub struct RunScreen {
     title: String,
     state: RunState,
+    wiring: RunWiring,
+    artifact: PathBuf,
     cancel_requested: bool,
 }
 
 impl RunScreen {
-    pub fn new(title: String) -> Self {
+    pub fn new(title: String, wiring: RunWiring, artifact: PathBuf) -> Self {
         Self {
             title,
             state: RunState::Running,
+            wiring,
+            artifact,
             cancel_requested: false,
         }
     }
@@ -57,6 +71,9 @@ impl Screen for RunScreen {
         match action {
             Action::RunCancelRequest => {
                 self.cancel_requested = true;
+                if let RunWiring::Wired { cancel } = &self.wiring {
+                    cancel.store(true, Ordering::Relaxed);
+                }
                 Transition::Stay
             }
             Action::RunReturn => Transition::Pop,
@@ -68,7 +85,16 @@ impl Screen for RunScreen {
         match event {
             AppEvent::CommandDone(res) => {
                 self.state = match res {
-                    Ok(()) => RunState::Ok,
+                    Ok(()) => {
+                        if self.artifact.exists() {
+                            RunState::Ok
+                        } else {
+                            RunState::Err(format!(
+                                "command reported success but artifact missing: {}",
+                                self.artifact.display()
+                            ))
+                        }
+                    }
                     Err(e) => RunState::Err(e.to_string()),
                 };
                 Transition::Stay
@@ -93,9 +119,14 @@ impl Screen for RunScreen {
             RunState::Ok => ("done", theme::OK),
             RunState::Err(_) => ("failed", theme::BAD),
         };
+        let mark = match &self.state {
+            RunState::Ok => Span::styled(" \u{2713} ", Style::default().fg(theme::OK).bold()),
+            _ => Span::raw("   "),
+        };
         let header = Paragraph::new(Line::from(vec![
             Span::styled(format!("  {}  ", self.title), Style::default().fg(theme::FG).bold()),
             Span::styled(format!("[{status_label}]"), Style::default().fg(status_color).bold()),
+            mark,
         ]));
         frame.render_widget(header, v[0]);
 
@@ -110,13 +141,13 @@ impl Screen for RunScreen {
         };
         frame.render_widget(Paragraph::new(err_line), v[2]);
 
-        let keys = match &self.state {
-            RunState::Running if self.cancel_requested => {
-                "cancel detaches view on completion (commands not interruptible)"
-            }
-            RunState::Running => "c cancel (advisory)  ctrl-c quit",
-            RunState::Ok => "enter return to workspace",
-            RunState::Err(_) => "enter return to workspace",
+        let keys = match (&self.state, &self.wiring, self.cancel_requested) {
+            (RunState::Running, RunWiring::Wired { .. }, false) => "c cancel  ctrl-c quit",
+            (RunState::Running, RunWiring::Wired { .. }, true) => "cancelling at next stage boundary...",
+            (RunState::Running, RunWiring::Detach, false) => "c detach  ctrl-c quit",
+            (RunState::Running, RunWiring::Detach, true) => "detached; command continues to completion",
+            (RunState::Ok, _, _) => "enter return to workspace",
+            (RunState::Err(_), _, _) => "enter return to workspace",
         };
         StatusBar {
             title: &self.title,

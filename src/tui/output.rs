@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -35,11 +36,26 @@ pub type BarRegistry = Arc<Mutex<Vec<Arc<ProgressBar>>>>;
 pub struct TuiOutput {
     log_tx: Sender<LogLine>,
     bars: BarRegistry,
+    cancel: Mutex<Arc<AtomicBool>>,
 }
 
 impl TuiOutput {
     pub fn new(log_tx: Sender<LogLine>, bars: BarRegistry) -> Self {
-        Self { log_tx, bars }
+        Self {
+            log_tx,
+            bars,
+            cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
+        }
+    }
+
+    pub fn arm_cancel(&self) -> Arc<AtomicBool> {
+        let fresh = Arc::new(AtomicBool::new(false));
+        *self.cancel.lock().unwrap() = Arc::clone(&fresh);
+        fresh
+    }
+
+    fn cancel_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel.lock().unwrap())
     }
 
     fn emit(&self, level: LogLevel, message: String) {
@@ -86,5 +102,9 @@ impl Output for TuiOutput {
         let arc = Arc::new(pb);
         self.bars.lock().unwrap().push(arc.clone());
         Progress::from_arc(arc)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_handle().load(Ordering::Relaxed)
     }
 }

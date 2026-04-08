@@ -20,7 +20,7 @@ use crate::column::STAAR_WEIGHTS;
 use crate::data::{AnnotatedSet, VariantSet, VariantSetKind};
 use crate::error::CohortError;
 use crate::ingest::ColumnContract;
-use crate::output::Output;
+use crate::output::{bail_if_cancelled, Output};
 use crate::resource::Resources;
 use crate::staar::carrier::AnalysisVectors;
 use crate::staar::masks::ScangParams;
@@ -326,12 +326,14 @@ impl<'a> StaarPipeline<'a> {
     where
         F: FnOnce(&mut Self) -> Result<T, CohortError>,
     {
+        bail_if_cancelled(self.out)?;
         self.manifest.begin(stage);
         let _ = self.manifest.write(&self.config.output_dir);
         match body(self) {
             Ok(v) => {
                 self.manifest.complete(stage);
                 self.manifest.write(&self.config.output_dir)?;
+                bail_if_cancelled(self.out)?;
                 Ok(v)
             }
             Err(e) => {
