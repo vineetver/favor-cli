@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 pub const ACCENT: Color = Color::Cyan;
 pub const MUTED: Color = Color::DarkGray;
@@ -9,8 +9,33 @@ pub const FG: Color = Color::White;
 
 pub const FOCUS_GLYPH: &str = "▌";
 
+#[derive(Clone, Copy)]
+pub enum Tone {
+    Focus,
+    Normal,
+    Muted,
+    Warn,
+    Bad,
+}
+
+impl Tone {
+    pub fn style(self) -> Style {
+        match self {
+            Tone::Focus => Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Tone::Normal => Style::default().fg(FG),
+            Tone::Muted => Style::default().fg(MUTED),
+            Tone::Warn => Style::default().fg(WARN),
+            Tone::Bad => Style::default().fg(BAD),
+        }
+    }
+}
+
 pub fn hint_bar_style() -> Style {
     Style::default().fg(MUTED)
+}
+
+pub fn error_slot_style() -> Style {
+    Style::default().fg(BAD)
 }
 
 pub const GLYPH_VCF: &str = "v";

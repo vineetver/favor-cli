@@ -16,3 +16,4 @@
 2026-04-07 [transform-primary-action] Run is sole bordered element, inferred fields dim, error slot above hint bar
 2026-04-07 [variant-modal-arbitration] one modal at a time via VariantModal enum, table sole bordered element
 2026-04-07 [palette-readability] scope-grouped palette, focused row sole primary, descriptions dim
+2026-04-07 [setup-density] strip ascii, collapse env/mem/dirs/packs behind [advanced], single bordered Save, 80x24 fit
