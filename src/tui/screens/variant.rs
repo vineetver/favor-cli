@@ -32,35 +32,31 @@ pub struct VariantScreen {
     title: String,
     scroller: ParquetScroller,
     display_columns: Vec<usize>,
-    filter_bar: FilterBarState,
-    column_picker: Option<ColumnPickerState>,
-    carrier: Option<CarrierPanelState>,
+    active_filter: Option<Arc<CompiledFilter>>,
+    modal: VariantModal,
     chrom_cache: HashMap<String, ChromCacheEntry>,
     sample_names: Option<Vec<String>>,
     error: Option<String>,
-    sub_mode: SubMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubMode {
-    Browse,
-    FilterEdit,
-    ColumnPicker,
-    Carrier,
+enum VariantModal {
+    None,
+    Filter(FilterModal),
+    Columns(ColumnsModal),
+    Carrier(CarrierModal),
 }
 
-struct FilterBarState {
+struct FilterModal {
     buf: String,
-    compiled: Option<Arc<CompiledFilter>>,
     parse_error: Option<String>,
 }
 
-struct ColumnPickerState {
+struct ColumnsModal {
     cursor: usize,
     selected: Vec<bool>,
 }
 
-struct CarrierPanelState {
+struct CarrierModal {
     vid: String,
     carriers: Option<CarrierList>,
     error: Option<String>,
@@ -84,17 +80,11 @@ impl VariantScreen {
             title,
             scroller,
             display_columns,
-            filter_bar: FilterBarState {
-                buf: String::new(),
-                compiled: None,
-                parse_error: None,
-            },
-            column_picker: None,
-            carrier: None,
+            active_filter: None,
+            modal: VariantModal::None,
             chrom_cache: HashMap::new(),
             sample_names: None,
             error: None,
-            sub_mode: SubMode::Browse,
         })
     }
 
@@ -120,7 +110,7 @@ impl VariantScreen {
                 wanted[i] = true;
             }
         }
-        if let Some(filter) = &self.filter_bar.compiled {
+        if let Some(filter) = &self.active_filter {
             let schema = self.scroller.schema().clone();
             for clause in filter.clauses() {
                 if let Ok(idx) = schema.index_of(&clause.column) {
@@ -141,10 +131,12 @@ impl VariantScreen {
     }
 
     fn apply_filter_text(&mut self) {
-        let text = self.filter_bar.buf.trim().to_string();
+        let VariantModal::Filter(modal) = &mut self.modal else {
+            return;
+        };
+        let text = modal.buf.trim().to_string();
         if text.is_empty() {
-            self.filter_bar.compiled = None;
-            self.filter_bar.parse_error = None;
+            self.active_filter = None;
             if let Err(e) = self
                 .scroller
                 .set_filter(None)
@@ -152,39 +144,48 @@ impl VariantScreen {
             {
                 self.error = Some(format!("{e}"));
             }
-            self.sub_mode = SubMode::Browse;
+            self.modal = VariantModal::None;
             return;
         }
         let parsed = match CompiledFilter::parse(&text) {
             Ok(c) => c,
             Err(e) => {
-                self.filter_bar.parse_error = Some(e);
+                modal.parse_error = Some(e);
                 return;
             }
         };
         let arc = Arc::new(parsed);
-        self.filter_bar.compiled = Some(arc.clone());
-        let factory: Arc<dyn RowFilterFactory> = arc;
+        let factory: Arc<dyn RowFilterFactory> = arc.clone();
         if let Err(e) = self.scroller.set_filter(Some(factory)) {
-            self.filter_bar.parse_error = Some(format!("{e}"));
-            self.filter_bar.compiled = None;
+            if let VariantModal::Filter(m) = &mut self.modal {
+                m.parse_error = Some(format!("{e}"));
+            }
             let _ = self.scroller.set_filter(None);
             return;
         }
+        self.active_filter = Some(arc);
         if let Err(e) = self.rebuild_projection() {
-            self.filter_bar.parse_error = Some(format!("{e}"));
+            if let VariantModal::Filter(m) = &mut self.modal {
+                m.parse_error = Some(format!("{e}"));
+            }
             return;
         }
-        self.filter_bar.parse_error = None;
-        self.sub_mode = SubMode::Browse;
+        self.modal = VariantModal::None;
     }
 
     fn clear_filter(&mut self) {
-        self.filter_bar.buf.clear();
-        self.filter_bar.compiled = None;
-        self.filter_bar.parse_error = None;
+        self.active_filter = None;
         let _ = self.scroller.set_filter(None);
         let _ = self.rebuild_projection();
+    }
+
+    fn open_filter(&mut self) {
+        let buf = self
+            .scroller
+            .filter_text()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        self.modal = VariantModal::Filter(FilterModal { buf, parse_error: None });
     }
 
     fn open_column_picker(&mut self) {
@@ -195,12 +196,11 @@ impl VariantScreen {
                 selected[i] = true;
             }
         }
-        self.column_picker = Some(ColumnPickerState { cursor: 0, selected });
-        self.sub_mode = SubMode::ColumnPicker;
+        self.modal = VariantModal::Columns(ColumnsModal { cursor: 0, selected });
     }
 
     fn close_column_picker(&mut self) {
-        if let Some(picker) = self.column_picker.take() {
+        if let VariantModal::Columns(picker) = std::mem::replace(&mut self.modal, VariantModal::None) {
             self.display_columns = picker
                 .selected
                 .iter()
@@ -215,7 +215,6 @@ impl VariantScreen {
                 self.error = Some(format!("{e}"));
             }
         }
-        self.sub_mode = SubMode::Browse;
     }
 
     fn open_carrier_view(&mut self) {
@@ -226,7 +225,7 @@ impl VariantScreen {
         let vid = match find_vid(batch, &schema, row) {
             Some(v) => v,
             None => {
-                self.carrier = Some(CarrierPanelState {
+                self.modal = VariantModal::Carrier(CarrierModal {
                     vid: String::new(),
                     carriers: None,
                     error: Some(
@@ -235,14 +234,13 @@ impl VariantScreen {
                     ),
                     scroll: 0,
                 });
-                self.sub_mode = SubMode::Carrier;
                 return;
             }
         };
         let chrom = chrom_from_path_or_batch(self.scroller.path(), batch, &schema, row)
             .unwrap_or_default();
         let path = self.scroller.path().to_path_buf();
-        let mut panel = CarrierPanelState {
+        let mut panel = CarrierModal {
             vid: vid.clone(),
             carriers: None,
             error: None,
@@ -252,13 +250,15 @@ impl VariantScreen {
             Ok(list) => panel.carriers = Some(list),
             Err(e) => panel.error = Some(format!("{e}")),
         }
-        self.carrier = Some(panel);
-        self.sub_mode = SubMode::Carrier;
+        self.modal = VariantModal::Carrier(panel);
     }
 
-    fn close_carrier_view(&mut self) {
-        self.carrier = None;
-        self.sub_mode = SubMode::Browse;
+    fn close_modal(&mut self) {
+        if matches!(self.modal, VariantModal::Columns(_)) {
+            self.close_column_picker();
+            return;
+        }
+        self.modal = VariantModal::None;
     }
 
     fn load_carriers(
@@ -300,92 +300,78 @@ impl VariantScreen {
         Ok(entry.sparse_g.load_variant(vvcf))
     }
 
-    fn handle_filter_edit_key(&mut self, key: KeyEvent) -> Transition {
-        match (key.code, key.modifiers) {
-            (KeyCode::Esc, _) => {
-                self.filter_bar.parse_error = None;
-                self.sub_mode = SubMode::Browse;
-                Transition::Stay
-            }
-            (KeyCode::Enter, _) => {
-                self.apply_filter_text();
-                Transition::Stay
-            }
-            (KeyCode::Backspace, _) => {
-                self.filter_bar.buf.pop();
-                self.filter_bar.parse_error = None;
-                Transition::Stay
-            }
-            (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                self.filter_bar.buf.clear();
-                self.filter_bar.parse_error = None;
-                Transition::Stay
-            }
-            (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) => {
-                self.filter_bar.buf.push(c);
-                self.filter_bar.parse_error = None;
-                Transition::Stay
-            }
-            _ => Transition::Stay,
-        }
-    }
-
-    fn handle_column_picker_key(&mut self, key: KeyEvent) -> Transition {
-        let Some(picker) = self.column_picker.as_mut() else {
-            self.sub_mode = SubMode::Browse;
+    fn handle_modal_key(&mut self, key: KeyEvent) -> Transition {
+        if matches!(key.code, KeyCode::Esc) {
+            self.close_modal();
             return Transition::Stay;
-        };
-        let n = picker.selected.len();
-        match key.code {
-            KeyCode::Esc | KeyCode::Enter => {
-                self.close_column_picker();
-                Transition::Stay
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if n > 0 && picker.cursor + 1 < n {
-                    picker.cursor += 1;
-                }
-                Transition::Stay
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if picker.cursor > 0 {
-                    picker.cursor -= 1;
-                }
-                Transition::Stay
-            }
-            KeyCode::Char(' ') => {
-                if picker.cursor < n {
-                    picker.selected[picker.cursor] = !picker.selected[picker.cursor];
-                }
-                Transition::Stay
-            }
-            _ => Transition::Stay,
         }
-    }
-
-    fn handle_carrier_key(&mut self, key: KeyEvent) -> Transition {
-        match key.code {
-            KeyCode::Esc => {
-                self.close_carrier_view();
+        match &mut self.modal {
+            VariantModal::None => Transition::Stay,
+            VariantModal::Filter(modal) => {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Enter, _) => {
+                        self.apply_filter_text();
+                    }
+                    (KeyCode::Backspace, _) => {
+                        modal.buf.pop();
+                        modal.parse_error = None;
+                    }
+                    (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
+                        modal.buf.clear();
+                        modal.parse_error = None;
+                    }
+                    (KeyCode::Char(c), m)
+                        if !m.contains(KeyModifiers::CONTROL)
+                            && !m.contains(KeyModifiers::ALT) =>
+                    {
+                        modal.buf.push(c);
+                        modal.parse_error = None;
+                    }
+                    _ => {}
+                }
                 Transition::Stay
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(panel) = self.carrier.as_mut() {
-                    if let Some(list) = &panel.carriers {
-                        if panel.scroll + 1 < list.len() {
-                            panel.scroll += 1;
+            VariantModal::Columns(picker) => {
+                let n = picker.selected.len();
+                match key.code {
+                    KeyCode::Enter => {
+                        self.close_column_picker();
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if n > 0 && picker.cursor + 1 < n {
+                            picker.cursor += 1;
                         }
                     }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if picker.cursor > 0 {
+                            picker.cursor -= 1;
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        if picker.cursor < n {
+                            picker.selected[picker.cursor] = !picker.selected[picker.cursor];
+                        }
+                    }
+                    _ => {}
                 }
                 Transition::Stay
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(panel) = self.carrier.as_mut() {
-                    panel.scroll = panel.scroll.saturating_sub(1);
+            VariantModal::Carrier(panel) => {
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if let Some(list) = &panel.carriers {
+                            if panel.scroll + 1 < list.len() {
+                                panel.scroll += 1;
+                            }
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        panel.scroll = panel.scroll.saturating_sub(1);
+                    }
+                    _ => {}
                 }
                 Transition::Stay
             }
-            _ => Transition::Stay,
         }
     }
 
@@ -393,7 +379,7 @@ impl VariantScreen {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", self.header_text()))
-            .border_style(Style::default().fg(theme::ACCENT));
+            .border_style(Style::default().fg(theme::MUTED));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -419,37 +405,49 @@ impl VariantScreen {
             .iter()
             .filter_map(|i| schema.index_of(self.scroller.schema().field(*i).name()).ok())
             .collect();
-        let widths = compute_widths(batch, &cols, inner.width as usize);
-        let header_line = Line::from(
-            cols.iter()
-                .zip(widths.iter())
-                .map(|(c, w)| {
-                    Span::styled(
-                        pad(&schema.field(*c).name(), *w),
-                        Style::default().fg(theme::ACCENT).bold(),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
+        let gutter_w = theme::FOCUS_GLYPH.chars().count() + 1;
+        let body_w = (inner.width as usize).saturating_sub(gutter_w);
+        let widths = compute_widths(batch, &cols, body_w);
+        let blank_gutter: String = " ".repeat(gutter_w);
+        let mut header_spans = vec![Span::raw(blank_gutter.clone())];
+        header_spans.extend(cols.iter().zip(widths.iter()).map(|(c, w)| {
+            Span::styled(
+                pad(&schema.field(*c).name(), *w),
+                Style::default().fg(theme::ACCENT).bold(),
+            )
+        }));
+        let header_line = Line::from(header_spans);
 
         let visible_rows = inner.height.saturating_sub(1) as usize;
         let total = batch.num_rows();
-        let start = focus.saturating_sub(visible_rows / 2).min(total.saturating_sub(visible_rows.max(1)));
+        let start = focus
+            .saturating_sub(visible_rows / 2)
+            .min(total.saturating_sub(visible_rows.max(1)));
         let end = (start + visible_rows).min(total);
 
         let mut lines: Vec<Line> = Vec::with_capacity(end - start + 1);
         lines.push(header_line);
         for row in start..end {
-            let style = if row == focus {
-                Style::default().bg(theme::MUTED).fg(theme::FG).bold()
+            let is_focus = row == focus;
+            let mut spans: Vec<Span> = Vec::with_capacity(cols.len() + 1);
+            if is_focus {
+                spans.push(Span::styled(
+                    format!("{} ", theme::FOCUS_GLYPH),
+                    Style::default().fg(theme::ACCENT).bold(),
+                ));
+            } else {
+                spans.push(Span::raw(blank_gutter.clone()));
+            }
+            let style = if is_focus {
+                Style::default().fg(theme::FG).bold()
             } else {
                 Style::default().fg(theme::FG)
             };
-            let spans: Vec<Span> = cols
-                .iter()
-                .zip(widths.iter())
-                .map(|(c, w)| Span::styled(pad(&format_cell(batch, *c, row), *w), style))
-                .collect();
+            spans.extend(
+                cols.iter()
+                    .zip(widths.iter())
+                    .map(|(c, w)| Span::styled(pad(&format_cell(batch, *c, row), *w), style)),
+            );
             lines.push(Line::from(spans));
         }
         frame.render_widget(Paragraph::new(lines), inner);
@@ -468,13 +466,7 @@ impl VariantScreen {
     }
 
     fn draw_detail(&self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Detail ")
-            .border_style(Style::default().fg(theme::MUTED));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
+        let inner = area;
         let Some((batch, row)) = self.scroller.focused_record() else {
             return;
         };
@@ -515,50 +507,31 @@ impl VariantScreen {
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
-    fn draw_filter_bar(&self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Filter ")
-            .border_style(Style::default().fg(theme::ACCENT));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let mut lines = vec![Line::from(vec![
-            Span::styled("/ ", Style::default().fg(theme::WARN).bold()),
-            Span::styled(self.filter_bar.buf.as_str(), Style::default().fg(theme::FG)),
+    fn draw_filter_bar(&self, frame: &mut Frame, area: Rect, modal: &FilterModal) {
+        let line = Line::from(vec![
+            Span::styled(" filter ", Style::default().fg(theme::WARN).bold()),
+            Span::styled("/ ", Style::default().fg(theme::MUTED)),
+            Span::styled(modal.buf.as_str(), Style::default().fg(theme::FG)),
             Span::styled("_", Style::default().fg(theme::ACCENT)),
-        ])];
-        if let Some(err) = &self.filter_bar.parse_error {
-            lines.push(Line::from(Span::styled(
-                format!("  error: {err}"),
-                Style::default().fg(theme::BAD),
-            )));
-        }
-        frame.render_widget(Paragraph::new(lines), inner);
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
     }
 
-    fn draw_carrier_panel(&self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Carriers ")
-            .border_style(Style::default().fg(theme::ACCENT));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let Some(panel) = &self.carrier else {
-            return;
-        };
+    fn draw_carrier_panel(&self, frame: &mut Frame, area: Rect, panel: &CarrierModal) {
         if let Some(err) = &panel.error {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    format!("  {err}"),
+                    format!(" carriers: {err}"),
                     Style::default().fg(theme::BAD),
                 ))),
-                inner,
+                area,
             );
             return;
         }
         let Some(list) = &panel.carriers else {
             return;
         };
+        let inner = area;
         let header = format!(
             "  {} carriers of {}",
             list.len(),
@@ -592,18 +565,10 @@ impl VariantScreen {
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
-    fn draw_column_picker(&self, frame: &mut Frame, area: Rect) {
-        let Some(picker) = &self.column_picker else {
-            return;
-        };
+    fn draw_column_picker(&self, frame: &mut Frame, area: Rect, picker: &ColumnsModal) {
         let overlay = centered(area, 50, 70);
         frame.render_widget(Clear, overlay);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Columns — space toggle, enter close ")
-            .border_style(Style::default().fg(theme::ACCENT));
-        let inner = block.inner(overlay);
-        frame.render_widget(block, overlay);
+        let inner = overlay;
         let schema = self.scroller.schema();
         let items: Vec<ListItem> = schema
             .fields()
@@ -634,37 +599,61 @@ impl Screen for VariantScreen {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
-        let bottom_height: u16 = match self.sub_mode {
-            SubMode::FilterEdit => 4,
-            SubMode::Carrier => 10,
-            _ => 1,
+        let modal_height: u16 = match &self.modal {
+            VariantModal::Filter(_) => 1,
+            VariantModal::Carrier(_) => 10,
+            _ => 0,
         };
+        let detail_height: u16 = if area.height >= 24 { 8 } else { 0 };
         let v = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(6),
-                Constraint::Length(8),
-                Constraint::Length(bottom_height),
+                Constraint::Length(detail_height),
+                Constraint::Length(modal_height),
+                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(area);
 
         self.draw_table(frame, v[0]);
-        self.draw_detail(frame, v[1]);
-        match self.sub_mode {
-            SubMode::FilterEdit => self.draw_filter_bar(frame, v[2]),
-            SubMode::Carrier => self.draw_carrier_panel(frame, v[2]),
+        if detail_height > 0 && matches!(self.modal, VariantModal::None) {
+            self.draw_detail(frame, v[1]);
+        }
+        match &self.modal {
+            VariantModal::Filter(m) => self.draw_filter_bar(frame, v[2], m),
+            VariantModal::Carrier(p) => self.draw_carrier_panel(frame, v[2], p),
             _ => {}
         }
 
-        let status = self
+        let error_line = self
             .error
             .clone()
-            .unwrap_or_else(|| "/ filter  ! columns  c carriers  { } page  g G start/end  q back".into());
-        StatusBar { title: &self.title, keys: &status }.render(frame, v[3]);
+            .or_else(|| match &self.modal {
+                VariantModal::Filter(m) => m.parse_error.clone().map(|e| format!("error: {e}")),
+                _ => None,
+            })
+            .unwrap_or_default();
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {error_line}"),
+                Style::default().fg(theme::BAD),
+            ))),
+            v[3],
+        );
 
-        if self.sub_mode == SubMode::ColumnPicker {
-            self.draw_column_picker(frame, area);
+        let hint = match &self.modal {
+            VariantModal::None => {
+                "/ filter  ! columns  c carriers  { } page  g G start/end  q back"
+            }
+            VariantModal::Filter(_) => "enter apply  esc cancel  ctrl-u clear",
+            VariantModal::Columns(_) => "space toggle  enter close  esc cancel",
+            VariantModal::Carrier(_) => "j k scroll  esc close",
+        };
+        StatusBar { title: &self.title, keys: hint }.render(frame, v[4]);
+
+        if let VariantModal::Columns(p) = &self.modal {
+            self.draw_column_picker(frame, area, p);
         }
     }
 
@@ -673,7 +662,7 @@ impl Screen for VariantScreen {
     }
 
     fn keys(&self) -> KeyMap {
-        if self.sub_mode != SubMode::Browse {
+        if !matches!(self.modal, VariantModal::None) {
             return KeyMap::new();
         }
         let none = KeyModifiers::NONE;
@@ -694,22 +683,17 @@ impl Screen for VariantScreen {
             .bind(KeyCode::Char('c'), none, Action::VariantOpenCarrierView)
     }
 
-    /// Sub-modes (filter edit, column picker, carrier panel) bypass the
-    /// scoped KeyMap so raw keystrokes go directly to the active sub-widget.
-    /// Same correctness invariant as SetupScreen::handle.
     fn handle(&mut self, event: &AppEvent) -> Transition {
         let AppEvent::Key(k) = event else {
             return Transition::Stay;
         };
-        match self.sub_mode {
-            SubMode::FilterEdit => self.handle_filter_edit_key(*k),
-            SubMode::ColumnPicker => self.handle_column_picker_key(*k),
-            SubMode::Carrier => self.handle_carrier_key(*k),
-            SubMode::Browse => match self.keys().lookup(k.code, k.modifiers) {
+        if matches!(self.modal, VariantModal::None) {
+            return match self.keys().lookup(k.code, k.modifiers) {
                 Some(action) => self.on_action(action),
                 None => Transition::Stay,
-            },
+            };
         }
+        self.handle_modal_key(*k)
     }
 
     fn on_action(&mut self, action: Action) -> Transition {
@@ -750,8 +734,7 @@ impl Screen for VariantScreen {
                 Transition::Stay
             }
             Action::VariantOpenFilter => {
-                self.sub_mode = SubMode::FilterEdit;
-                self.filter_bar.parse_error = None;
+                self.open_filter();
                 Transition::Stay
             }
             Action::VariantFilterClear => {
@@ -766,12 +749,8 @@ impl Screen for VariantScreen {
                 self.open_carrier_view();
                 Transition::Stay
             }
-            Action::VariantCloseCarrierView => {
-                self.close_carrier_view();
-                Transition::Stay
-            }
-            Action::VariantColumnPickerClose => {
-                self.close_column_picker();
+            Action::VariantCloseCarrierView | Action::VariantColumnPickerClose => {
+                self.close_modal();
                 Transition::Stay
             }
             _ => Transition::Stay,

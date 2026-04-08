@@ -16,3 +16,5 @@ pub const GLYPH_ANNOTATED: &str = "A";
 pub const GLYPH_GENO_STORE: &str = "G";
 pub const GLYPH_STAAR: &str = "S";
 pub const GLYPH_ANNOROOT: &str = "R";
+
+pub const FOCUS_GLYPH: &str = "▌";
