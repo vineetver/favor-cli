@@ -48,6 +48,53 @@ impl WorkspaceScreen {
         }
     }
 
+    fn hint_line(&self) -> String {
+        let base = "j/k move  r rescan  s setup  ? help  q quit";
+        match self.state.focused() {
+            Some(a) => {
+                let chain = next_chain(&a.kind);
+                let mut parts: Vec<String> = Vec::new();
+                if chain != Chain::None {
+                    parts.push(format!("enter {}", chain.label()));
+                }
+                if can_browse(&a.kind) && chain != Chain::Browse {
+                    parts.push("v browse".into());
+                }
+                if parts.is_empty() {
+                    base.to_string()
+                } else {
+                    format!("{}  ·  {base}", parts.join("  ·  "))
+                }
+            }
+            None => base.to_string(),
+        }
+    }
+
+    fn browse_focused(&mut self) -> Transition {
+        let Some(a) = self.state.focused() else {
+            return Transition::Stay;
+        };
+        let path = a.path.clone();
+        let result = match &a.kind {
+            ArtifactKind::AnnotatedSet { .. } => VariantScreen::new_for_annotated_set(path),
+            ArtifactKind::ParquetFile => VariantScreen::new_for_parquet(path),
+            _ => {
+                self.notice = Some(format!("cannot browse {}", a.kind.title()));
+                return Transition::Stay;
+            }
+        };
+        match result {
+            Ok(screen) => {
+                self.notice = None;
+                Transition::Push(Box::new(screen))
+            }
+            Err(e) => {
+                self.notice = Some(format!("cannot open: {e}"));
+                Transition::Stay
+            }
+        }
+    }
+
     fn sync_focus(&mut self) {
         self.list_state.select(if self.state.artifacts.is_empty() {
             None
@@ -55,6 +102,43 @@ impl WorkspaceScreen {
             Some(self.state.focus)
         });
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Chain {
+    Ingest,
+    Annotate,
+    Browse,
+    None,
+}
+
+impl Chain {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ingest => "ingest",
+            Self::Annotate => "annotate",
+            Self::Browse => "browse",
+            Self::None => "—",
+        }
+    }
+}
+
+fn next_chain(kind: &ArtifactKind) -> Chain {
+    match kind {
+        ArtifactKind::RawVcf => Chain::Ingest,
+        ArtifactKind::IngestedSet => Chain::Annotate,
+        ArtifactKind::AnnotatedSet { .. } => Chain::Browse,
+        ArtifactKind::ParquetFile => Chain::Browse,
+        ArtifactKind::StaarResults => Chain::Browse,
+        _ => Chain::None,
+    }
+}
+
+fn can_browse(kind: &ArtifactKind) -> bool {
+    matches!(
+        kind,
+        ArtifactKind::AnnotatedSet { .. } | ArtifactKind::ParquetFile
+    )
 }
 
 fn actions_for(kind: &ArtifactKind) -> &'static [&'static str] {
@@ -222,9 +306,10 @@ impl Screen for WorkspaceScreen {
 
         log.draw(frame, v[1], "Log");
 
+        let hint = self.hint_line();
         let status_keys = match &self.notice {
             Some(msg) => msg.as_str(),
-            None => "q quit  j/k move  enter transform  r rescan  s setup  ? help",
+            None => hint.as_str(),
         };
         StatusBar {
             title: &self.title,
@@ -248,6 +333,7 @@ impl Screen for WorkspaceScreen {
             .bind(KeyCode::Char('k'), none, Action::WorkspaceUp)
             .bind(KeyCode::Char('r'), none, Action::WorkspaceRescan)
             .bind(KeyCode::Enter, none, Action::WorkspaceOpenFocused)
+            .bind(KeyCode::Char('v'), none, Action::WorkspaceBrowseFocused)
             .bind(KeyCode::Char('s'), none, Action::WorkspaceOpenSetup)
     }
 
@@ -271,47 +357,31 @@ impl Screen for WorkspaceScreen {
                 Transition::Stay
             }
             Action::WorkspaceOpenSetup => Transition::Push(Box::new(SetupScreen::new())),
-            Action::WorkspaceOpenFocused => match self.state.focused() {
-                Some(a) => match &a.kind {
-                    ArtifactKind::RawVcf => {
+            Action::WorkspaceOpenFocused => {
+                let chain = match self.state.focused() {
+                    Some(a) => next_chain(&a.kind),
+                    None => return Transition::Stay,
+                };
+                match chain {
+                    Chain::Ingest => {
+                        let a = self.state.focused().unwrap();
                         self.notice = None;
                         Transition::Push(Box::new(TransformScreen::new_ingest(Some(a))))
                     }
-                    ArtifactKind::IngestedSet => {
+                    Chain::Annotate => {
+                        let a = self.state.focused().unwrap();
                         self.notice = None;
                         Transition::Push(Box::new(TransformScreen::new_annotate(a)))
                     }
-                    ArtifactKind::AnnotatedSet { .. } => {
-                        match VariantScreen::new_for_annotated_set(a.path.clone()) {
-                            Ok(screen) => {
-                                self.notice = None;
-                                Transition::Push(Box::new(screen))
-                            }
-                            Err(e) => {
-                                self.notice = Some(format!("cannot open: {e}"));
-                                Transition::Stay
-                            }
-                        }
-                    }
-                    ArtifactKind::ParquetFile => {
-                        match VariantScreen::new_for_parquet(a.path.clone()) {
-                            Ok(screen) => {
-                                self.notice = None;
-                                Transition::Push(Box::new(screen))
-                            }
-                            Err(e) => {
-                                self.notice = Some(format!("cannot open: {e}"));
-                                Transition::Stay
-                            }
-                        }
-                    }
-                    other => {
-                        self.notice = Some(format!("no transform for {}", other.title()));
+                    Chain::Browse => self.browse_focused(),
+                    Chain::None => {
+                        let title = self.state.focused().unwrap().kind.title().to_string();
+                        self.notice = Some(format!("no next stage for {title}"));
                         Transition::Stay
                     }
-                },
-                None => Transition::Stay,
-            },
+                }
+            }
+            Action::WorkspaceBrowseFocused => self.browse_focused(),
             _ => Transition::Stay,
         }
     }

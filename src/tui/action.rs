@@ -56,6 +56,7 @@ pub enum Action {
     WorkspaceRescan,
     WorkspaceOpenSetup,
     WorkspaceOpenFocused,
+    WorkspaceBrowseFocused,
 
     TransformNextField,
     TransformPrevField,
@@ -115,6 +116,7 @@ const ACTIONS_ALL: &[Action] = &[
     Action::WorkspaceRescan,
     Action::WorkspaceOpenSetup,
     Action::WorkspaceOpenFocused,
+    Action::WorkspaceBrowseFocused,
     Action::SetupPrev,
     Action::SetupNext,
     Action::SetupConfirm,
@@ -168,7 +170,8 @@ impl Action {
             | Self::WorkspaceDown
             | Self::WorkspaceRescan
             | Self::WorkspaceOpenSetup
-            | Self::WorkspaceOpenFocused => ActionScope::Workspace,
+            | Self::WorkspaceOpenFocused
+            | Self::WorkspaceBrowseFocused => ActionScope::Workspace,
 
             Self::SetupCancel
             | Self::SetupConfirm
@@ -228,6 +231,7 @@ impl Action {
             Self::WorkspaceRescan => "Rescan workspace",
             Self::WorkspaceOpenSetup => "Open setup",
             Self::WorkspaceOpenFocused => "Open focused artifact",
+            Self::WorkspaceBrowseFocused => "Browse focused artifact",
 
             Self::TransformNextField => "Next field",
             Self::TransformPrevField => "Previous field",
@@ -288,6 +292,7 @@ impl Action {
             Self::WorkspaceRescan => "rescan roots for artifacts",
             Self::WorkspaceOpenSetup => "configure tier, root, packs, environment",
             Self::WorkspaceOpenFocused => "open a transform for the focused artifact",
+            Self::WorkspaceBrowseFocused => "browse the focused artifact in the variant browser",
 
             Self::TransformNextField => "move to the next form field",
             Self::TransformPrevField => "move to the previous form field",
@@ -353,6 +358,7 @@ impl Action {
             Self::WorkspaceRescan => Some((KeyCode::Char('r'), none)),
             Self::WorkspaceOpenSetup => Some((KeyCode::Char('s'), none)),
             Self::WorkspaceOpenFocused => Some((KeyCode::Enter, none)),
+            Self::WorkspaceBrowseFocused => Some((KeyCode::Char('v'), none)),
 
             Self::TransformNextField => Some((KeyCode::Tab, none)),
             Self::TransformPrevField => Some((KeyCode::BackTab, KeyModifiers::SHIFT)),
