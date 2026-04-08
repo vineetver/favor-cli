@@ -7,6 +7,9 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::tui::action::{format_binding, KeyBinding};
 use crate::tui::theme;
 
+pub mod graph_strip;
+pub use graph_strip::GraphStripState;
+
 #[derive(Clone, Debug)]
 pub struct ErrorMessage {
     pub text: String,
@@ -36,6 +39,7 @@ pub struct ScreenChrome<'a> {
     pub status: Option<&'a str>,
     pub error: Option<&'a ErrorMessage>,
     pub hint: &'a [Binding],
+    pub graph: Option<GraphStripState>,
 }
 
 pub struct Shell<'a, F: FnOnce(Rect, &mut Buffer)> {
@@ -60,20 +64,31 @@ impl<'a, F: FnOnce(Rect, &mut Buffer)> Widget for Shell<'a, F> {
             return;
         }
 
+        let has_graph = self.chrome.graph.is_some();
+        let mut constraints: Vec<Constraint> = Vec::new();
+        if has_graph {
+            constraints.push(Constraint::Length(1));
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Length(1));
+        constraints.push(Constraint::Length(1));
+        constraints.push(Constraint::Min(1));
+        constraints.push(Constraint::Length(1));
+
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
+            .constraints(constraints)
             .split(area);
 
-        render_chrome_row(rows[0], buf, self.chrome.title, self.chrome.status);
-        render_error_slot(rows[1], buf, self.chrome.error);
-        (self.body)(rows[2], buf);
-        render_hint_bar(rows[3], buf, self.chrome.hint);
+        let mut idx = 0;
+        if let Some(state) = &self.chrome.graph {
+            graph_strip::render(state, rows[idx], rows[idx + 1], buf);
+            idx += 2;
+        }
+        render_chrome_row(rows[idx], buf, self.chrome.title, self.chrome.status);
+        render_error_slot(rows[idx + 1], buf, self.chrome.error);
+        (self.body)(rows[idx + 2], buf);
+        render_hint_bar(rows[idx + 3], buf, self.chrome.hint);
     }
 }
 

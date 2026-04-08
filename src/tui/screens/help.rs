@@ -91,6 +91,7 @@ impl Screen for HelpScreen {
             status: None,
             error: self.error.as_ref(),
             hint: &hint,
+            graph: None,
         };
         let body = |inner: Rect, buf: &mut ratatui::buffer::Buffer| {
             let mut lines: Vec<Line> = Vec::new();

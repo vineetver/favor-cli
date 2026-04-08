@@ -10,27 +10,16 @@ use ratatui::Frame;
 
 use crate::config::{Config, Environment, ResourceConfig, Tier};
 use crate::data::Pack;
-use crate::resource::Resources;
 use crate::tui::action::{Action, ActionScope, KeyMap};
 use crate::tui::event::AppEvent;
 use crate::tui::screen::{Screen, Transition};
+use crate::tui::stages::types::{FormField, FormSchema, PathKind};
 use crate::tui::theme::{self, Tone, FOCUS_GLYPH};
 use crate::tui::widgets::file_picker::{self, tab_complete, DirBrowserState};
+use crate::tui::widgets::form::{Form, FormOutcome};
 use crate::tui::widgets::log_tail::LogTail;
 
-const TIERS: [(Tier, &str); 2] = [
-    (Tier::Base, "curated annotations for most analyses"),
-    (Tier::Full, "complete FAVOR database, all annotations"),
-];
-
-const MEMORY_PRESETS: &[(&str, u64)] = &[
-    ("8GB", 8 * 1024 * 1024 * 1024),
-    ("16GB", 16 * 1024 * 1024 * 1024),
-    ("32GB", 32 * 1024 * 1024 * 1024),
-    ("64GB", 64 * 1024 * 1024 * 1024),
-    ("128GB", 128 * 1024 * 1024 * 1024),
-    ("256GB", 256 * 1024 * 1024 * 1024),
-];
+const MEMORY_PRESETS: &[&str] = &["auto", "8GB", "16GB", "32GB", "64GB", "128GB", "256GB"];
 
 #[derive(Debug, Clone)]
 pub struct SetupOutcome {
@@ -43,17 +32,6 @@ pub struct SetupOutcome {
 
 pub type OutcomeSink = Arc<Mutex<Option<SetupOutcome>>>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Field {
-    Tier,
-    Root,
-    Advanced,
-    Env,
-    Memory,
-    Packs,
-    Save,
-}
-
 enum Mode {
     Form,
     BrowseRoot(DirBrowserState),
@@ -63,16 +41,55 @@ enum Mode {
 
 pub struct SetupScreen {
     mode: Mode,
-    focus: Field,
-    advanced_open: bool,
-    tier: Tier,
-    root: PathBuf,
-    packs: Vec<String>,
-    environment: Option<Environment>,
-    memory_budget: Option<String>,
-    resources: Resources,
+    form: Form,
     sink: Option<OutcomeSink>,
     error: Option<String>,
+}
+
+fn build_schema(cfg: &Config) -> FormSchema {
+    FormSchema {
+        fields: vec![
+            FormField::Choice {
+                id: "tier",
+                label: "tier",
+                options: &["base", "full"],
+                default: Some(match cfg.data.tier {
+                    Tier::Base => "base",
+                    Tier::Full => "full",
+                }),
+            },
+            FormField::Path {
+                id: "root",
+                label: "data root",
+                kind: PathKind::Dir,
+                default: None,
+            },
+        ],
+        advanced: vec![
+            FormField::Choice {
+                id: "env",
+                label: "env",
+                options: &["auto", "hpc", "workstation"],
+                default: Some(match cfg.resources.environment {
+                    None => "auto",
+                    Some(Environment::Hpc) => "hpc",
+                    Some(Environment::Workstation) => "workstation",
+                }),
+            },
+            FormField::Choice {
+                id: "memory",
+                label: "memory",
+                options: MEMORY_PRESETS,
+                default: Some("auto"),
+            },
+            FormField::MultiSelect {
+                id: "packs",
+                label: "packs",
+                options: &[],
+                default: &[],
+            },
+        ],
+    }
 }
 
 impl SetupScreen {
@@ -83,16 +100,17 @@ impl SetupScreen {
         } else {
             PathBuf::from(&cfg.data.root_dir)
         };
+        let schema = build_schema(&cfg);
+        let mut form = Form::new(schema, "Save");
+        form.set_path("root", Some(root));
+        if let Some(mem) = cfg.resources.memory_budget.as_deref() {
+            if MEMORY_PRESETS.contains(&mem) {
+                form.set_text("memory", mem.to_string());
+            }
+        }
         Self {
             mode: Mode::Form,
-            focus: Field::Tier,
-            advanced_open: false,
-            tier: cfg.data.tier,
-            root,
-            packs: Vec::new(),
-            environment: cfg.resources.environment,
-            memory_budget: cfg.resources.memory_budget.clone(),
-            resources: Resources::detect(),
+            form,
             sink: None,
             error: None,
         }
@@ -104,67 +122,80 @@ impl SetupScreen {
         sink: OutcomeSink,
     ) -> Self {
         let mut s = Self::new();
-        if env.is_some() {
-            s.environment = env;
+        if let Some(e) = env {
+            let opt = match e {
+                Environment::Hpc => "hpc",
+                Environment::Workstation => "workstation",
+            };
+            s.form.set_text("env", opt.to_string());
         }
-        if memory_budget.is_some() {
-            s.memory_budget = memory_budget;
+        if let Some(mb) = memory_budget {
+            s.form.set_text("memory", mb);
         }
         s.sink = Some(sink);
         s
     }
 
-    fn visible_fields(&self) -> Vec<Field> {
-        let mut v = vec![Field::Tier, Field::Root, Field::Advanced];
-        if self.advanced_open {
-            v.push(Field::Env);
-            v.push(Field::Memory);
-            v.push(Field::Packs);
+    fn current_tier(&self) -> Tier {
+        match self.form.values().choice("tier") {
+            Some("full") => Tier::Full,
+            _ => Tier::Base,
         }
-        v.push(Field::Save);
-        v
     }
 
-    fn focus_index(&self) -> usize {
-        self.visible_fields()
-            .iter()
-            .position(|f| *f == self.focus)
-            .unwrap_or(0)
+    fn current_root(&self) -> PathBuf {
+        self.form
+            .values()
+            .path("root")
+            .cloned()
+            .unwrap_or_else(Config::default_root_dir)
     }
 
-    fn focus_next(&mut self) {
-        let v = self.visible_fields();
-        let i = (self.focus_index() + 1) % v.len();
-        self.focus = v[i];
+    fn current_env(&self) -> Option<Environment> {
+        match self.form.values().choice("env") {
+            Some("hpc") => Some(Environment::Hpc),
+            Some("workstation") => Some(Environment::Workstation),
+            _ => None,
+        }
     }
 
-    fn focus_prev(&mut self) {
-        let v = self.visible_fields();
-        let n = v.len();
-        let i = (self.focus_index() + n - 1) % n;
-        self.focus = v[i];
+    fn current_memory(&self) -> Option<String> {
+        match self.form.values().choice("memory") {
+            Some(v) if v != "auto" && !v.is_empty() => Some(v.to_string()),
+            _ => None,
+        }
+    }
+
+    fn current_packs(&self) -> Vec<String> {
+        self.form
+            .values()
+            .multi("packs")
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn save(&mut self) -> Transition {
-        if !self.root.is_dir() {
-            self.error = Some(format!("data root not a directory: {}", self.root.display()));
+        let root = self.current_root();
+        if !root.is_dir() {
+            self.error = Some(format!("data root not a directory: {}", root.display()));
             return Transition::Stay;
         }
         if let Some(sink) = self.sink.as_ref() {
             *sink.lock().unwrap() = Some(SetupOutcome {
-                tier: self.tier,
-                root: self.root.clone(),
-                packs: self.packs.clone(),
-                environment: self.environment,
-                memory_budget: self.memory_budget.clone(),
+                tier: self.current_tier(),
+                root,
+                packs: self.current_packs(),
+                environment: self.current_env(),
+                memory_budget: self.current_memory(),
             });
         }
         Transition::Pop
     }
 
     fn open_browse(&mut self) {
-        let start = if self.root.is_dir() {
-            self.root.clone()
+        let root = self.current_root();
+        let start = if root.is_dir() {
+            root
         } else {
             std::env::current_dir().unwrap_or_else(|_| Config::default_root_dir())
         };
@@ -173,86 +204,35 @@ impl SetupScreen {
 
     fn open_edit_packs(&mut self) {
         let optional = Pack::optional();
+        let current = self.current_packs();
         let checked: Vec<bool> = optional
             .iter()
-            .map(|p| self.packs.iter().any(|id| id == p.id))
+            .map(|p| current.iter().any(|id| id == p.id))
             .collect();
         self.mode = Mode::EditPacks(0, checked);
     }
 
     fn open_edit_memory(&mut self) {
-        let buf = self.memory_budget.clone().unwrap_or_default();
+        let buf = self.current_memory().unwrap_or_default();
         self.mode = Mode::EditMemory(buf);
-    }
-
-    fn cycle_tier(&mut self) {
-        self.tier = match self.tier {
-            Tier::Base => Tier::Full,
-            Tier::Full => Tier::Base,
-        };
-    }
-
-    fn cycle_env(&mut self) {
-        self.environment = match self.environment {
-            None => Some(Environment::Hpc),
-            Some(Environment::Hpc) => Some(Environment::Workstation),
-            Some(Environment::Workstation) => None,
-        };
-    }
-
-    fn cycle_memory(&mut self) {
-        let cur = self.memory_budget.as_deref();
-        let idx = MEMORY_PRESETS.iter().position(|(v, _)| Some(*v) == cur);
-        let next = match idx {
-            None => 0,
-            Some(i) if i + 1 < MEMORY_PRESETS.len() => i + 1,
-            Some(_) => {
-                self.memory_budget = None;
-                return;
-            }
-        };
-        self.memory_budget = Some(MEMORY_PRESETS[next].0.to_string());
     }
 
     fn handle_form(&mut self, code: KeyCode) -> Transition {
         self.error = None;
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => return Transition::Pop,
-            KeyCode::Up | KeyCode::Char('k') => self.focus_prev(),
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => self.focus_next(),
-            KeyCode::Left | KeyCode::Char('h') => match self.focus {
-                Field::Tier => self.cycle_tier(),
-                Field::Env => self.cycle_env(),
-                Field::Memory => self.cycle_memory(),
-                _ => {}
-            },
-            KeyCode::Right | KeyCode::Char('l') => match self.focus {
-                Field::Tier => self.cycle_tier(),
-                Field::Env => self.cycle_env(),
-                Field::Memory => self.cycle_memory(),
-                _ => {}
-            },
-            KeyCode::Char(' ') => match self.focus {
-                Field::Tier => self.cycle_tier(),
-                Field::Env => self.cycle_env(),
-                Field::Memory => self.cycle_memory(),
-                Field::Advanced => self.advanced_open = !self.advanced_open,
-                Field::Root => self.open_browse(),
-                Field::Packs => self.open_edit_packs(),
-                Field::Save => return self.save(),
-            },
-            KeyCode::Enter => match self.focus {
-                Field::Tier => self.cycle_tier(),
-                Field::Root => self.open_browse(),
-                Field::Advanced => self.advanced_open = !self.advanced_open,
-                Field::Env => self.cycle_env(),
-                Field::Memory => self.open_edit_memory(),
-                Field::Packs => self.open_edit_packs(),
-                Field::Save => return self.save(),
-            },
-            _ => {}
+        match self.form.handle(code) {
+            FormOutcome::Continue | FormOutcome::OpenAdvanced => Transition::Stay,
+            FormOutcome::Cancel => Transition::Pop,
+            FormOutcome::Submit => self.save(),
+            FormOutcome::RequestEdit(id) => {
+                match id {
+                    "root" => self.open_browse(),
+                    "memory" => self.open_edit_memory(),
+                    "packs" => self.open_edit_packs(),
+                    _ => {}
+                }
+                Transition::Stay
+            }
         }
-        Transition::Stay
     }
 
     fn handle_browse(&mut self, code: KeyCode) -> Transition {
@@ -294,18 +274,20 @@ impl SetupScreen {
             KeyCode::Down | KeyCode::Char('j') => state.select_down(),
             KeyCode::Right => {
                 if let Some(sel) = state.enter_selected() {
-                    self.root = sel;
+                    self.form.set_path("root", Some(sel));
                     self.mode = Mode::Form;
                 }
             }
             KeyCode::Left | KeyCode::Backspace => state.go_parent(),
             KeyCode::Enter | KeyCode::Char(' ') => {
-                self.root = state.current_dir.clone();
+                let dir = state.current_dir.clone();
+                self.form.set_path("root", Some(dir));
                 self.mode = Mode::Form;
             }
             KeyCode::Char('c') => {
                 let _ = std::fs::create_dir_all(&state.current_dir);
-                self.root = state.current_dir.clone();
+                let dir = state.current_dir.clone();
+                self.form.set_path("root", Some(dir));
                 self.mode = Mode::Form;
             }
             KeyCode::Char('/') | KeyCode::Char('g') => {
@@ -325,10 +307,10 @@ impl SetupScreen {
         match code {
             KeyCode::Enter => {
                 if buf.is_empty() {
-                    self.memory_budget = None;
+                    self.form.set_text("memory", "auto".to_string());
                     self.mode = Mode::Form;
                 } else if ResourceConfig::parse_memory_bytes(buf).is_some() {
-                    self.memory_budget = Some(buf.clone());
+                    self.form.set_text("memory", buf.clone());
                     self.mode = Mode::Form;
                 } else {
                     self.error = Some(format!("invalid memory: {buf} (e.g. 48GB, 12288MB)"));
@@ -366,12 +348,13 @@ impl SetupScreen {
                 }
             }
             KeyCode::Enter => {
-                self.packs = Pack::optional()
+                let packs: Vec<String> = Pack::optional()
                     .into_iter()
                     .zip(checked.iter())
                     .filter(|(_, &on)| on)
                     .map(|(p, _)| p.id.to_string())
                     .collect();
+                self.form.set_multi("packs", packs);
                 self.mode = Mode::Form;
             }
             KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Form,
@@ -380,92 +363,12 @@ impl SetupScreen {
         Transition::Stay
     }
 
-    fn glyph(&self, f: Field) -> &'static str {
-        if self.focus == f {
-            FOCUS_GLYPH
-        } else {
-            " "
-        }
-    }
-
-    fn field_line(&self, f: Field) -> Line<'static> {
-        let g = self.glyph(f);
-        let label_tone = if self.focus == f { Tone::Focus } else { Tone::Normal };
-        match f {
-            Field::Tier => {
-                let (_, summary) = TIERS.iter().find(|(t, _)| *t == self.tier).unwrap();
-                Line::from(vec![
-                    Span::styled(format!(" {g} "), label_tone.style()),
-                    Span::styled("tier      ", label_tone.style()),
-                    Span::styled(
-                        format!("{} {}", self.tier.as_str(), self.tier.size_human()),
-                        Tone::Warn.style(),
-                    ),
-                    Span::styled(format!("  {summary}"), Tone::Muted.style()),
-                ])
-            }
-            Field::Root => {
-                let exists = self.root.is_dir();
-                let path_tone = if exists { Tone::Normal } else { Tone::Bad };
-                Line::from(vec![
-                    Span::styled(format!(" {g} "), label_tone.style()),
-                    Span::styled("data root ", label_tone.style()),
-                    Span::styled(self.root.display().to_string(), path_tone.style()),
-                ])
-            }
-            Field::Advanced => {
-                let mark = if self.advanced_open { "[-]" } else { "[+]" };
-                Line::from(vec![
-                    Span::styled(format!(" {g} "), label_tone.style()),
-                    Span::styled(format!("{mark} advanced"), label_tone.style()),
-                ])
-            }
-            Field::Env => {
-                let val = match self.environment {
-                    None => "auto".to_string(),
-                    Some(Environment::Hpc) => "hpc".to_string(),
-                    Some(Environment::Workstation) => "workstation".to_string(),
-                };
-                Line::from(vec![
-                    Span::styled(format!("   {g} "), label_tone.style()),
-                    Span::styled("env       ", label_tone.style()),
-                    Span::styled(val, Tone::Warn.style()),
-                ])
-            }
-            Field::Memory => {
-                let val = self
-                    .memory_budget
-                    .clone()
-                    .unwrap_or_else(|| format!("auto ({})", self.resources.memory_human()));
-                Line::from(vec![
-                    Span::styled(format!("   {g} "), label_tone.style()),
-                    Span::styled("memory    ", label_tone.style()),
-                    Span::styled(val, Tone::Warn.style()),
-                ])
-            }
-            Field::Packs => {
-                let val = if self.packs.is_empty() {
-                    "none".to_string()
-                } else {
-                    self.packs.join(", ")
-                };
-                Line::from(vec![
-                    Span::styled(format!("   {g} "), label_tone.style()),
-                    Span::styled("packs     ", label_tone.style()),
-                    Span::styled(val, Tone::Warn.style()),
-                ])
-            }
-            Field::Save => Line::from(""),
-        }
-    }
-
     fn draw_form(&self, frame: &mut Frame, area: Rect) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2),
                 Constraint::Min(6),
-                Constraint::Length(3),
                 Constraint::Length(1),
                 Constraint::Length(1),
             ])
@@ -477,54 +380,22 @@ impl SetupScreen {
         )));
         frame.render_widget(title, layout[0]);
 
-        let lines: Vec<Line> = self
-            .visible_fields()
-            .into_iter()
-            .filter(|f| *f != Field::Save)
-            .map(|f| self.field_line(f))
-            .collect();
-        frame.render_widget(Paragraph::new(lines), layout[1]);
-
-        let save_focused = self.focus == Field::Save;
-        let save_label = if save_focused {
-            format!(" {FOCUS_GLYPH} Save ")
-        } else {
-            "   Save ".to_string()
-        };
-        let save_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if save_focused { theme::ACCENT } else { theme::MUTED }));
-        let save = Paragraph::new(Line::from(Span::styled(
-            save_label,
-            if save_focused {
-                Tone::Focus.style()
-            } else {
-                Tone::Normal.style()
-            },
-        )))
-        .block(save_block);
-        let save_area = Rect {
-            x: layout[2].x + 2,
-            y: layout[2].y,
-            width: 12,
-            height: 3,
-        };
-        frame.render_widget(save, save_area);
+        let body = layout[1];
+        self.form.render(body, frame.buffer_mut());
 
         let err_text = self.error.clone().unwrap_or_default();
         let err = Paragraph::new(format!("  {err_text}")).style(theme::error_slot_style());
-        frame.render_widget(err, layout[3]);
+        frame.render_widget(err, layout[2]);
 
-        let hint = match self.focus {
-            Field::Tier => "  ←/→ cycle tier   ↑/↓ move   enter activate   esc cancel",
-            Field::Root => "  enter browse   ↑/↓ move   esc cancel",
-            Field::Advanced => "  enter toggle   ↑/↓ move   esc cancel",
-            Field::Env => "  ←/→ cycle env   ↑/↓ move   esc cancel",
-            Field::Memory => "  ←/→ cycle preset   enter type custom   esc cancel",
-            Field::Packs => "  enter edit packs   ↑/↓ move   esc cancel",
-            Field::Save => "  enter save and exit   esc cancel",
+        let hint = match self.form.focused_field_id() {
+            Some("tier") => "  ←/→ cycle tier   ↑/↓ move   enter activate   esc cancel",
+            Some("root") => "  enter browse   ↑/↓ move   esc cancel",
+            Some("env") => "  ←/→ cycle env   ↑/↓ move   esc cancel",
+            Some("memory") => "  ←/→ cycle preset   enter type custom   esc cancel",
+            Some("packs") => "  enter edit packs   ↑/↓ move   esc cancel",
+            _ => "  enter save and exit   esc cancel",
         };
-        frame.render_widget(Paragraph::new(hint).style(theme::hint_bar_style()), layout[4]);
+        frame.render_widget(Paragraph::new(hint).style(theme::hint_bar_style()), layout[3]);
     }
 
     fn draw_memory_edit(&self, frame: &mut Frame, area: Rect, buf: &str) {
