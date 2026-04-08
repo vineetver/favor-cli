@@ -363,7 +363,12 @@ fn dispatch(req: RunRequest, out: &dyn Output) -> Result<(), CohortError> {
     match req {
         RunRequest::Ingest(cfg) => commands::ingest::run_ingest(&cfg, out),
         RunRequest::Annotate(cfg) => commands::annotate::run_annotate(&cfg, out),
-        RunRequest::Staar(cfg) => StaarPipeline::new(*cfg, out)?.run(),
+        RunRequest::Staar(cfg) => {
+            let store = crate::store::Store::open(
+                crate::store::config::StoreConfig::resolve(None)?,
+            )?;
+            StaarPipeline::new(*cfg, store, out)?.run()
+        }
         RunRequest::MetaStaar(cfg) => commands::meta_staar::run_meta_staar(&cfg, out),
         RunRequest::Setup(cfg) => apply_setup(cfg, out),
     }

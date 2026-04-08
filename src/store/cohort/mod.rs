@@ -17,10 +17,18 @@
 
 pub mod builder;
 pub mod encoding;
+pub mod handle;
 pub mod membership;
 pub mod sparse_g;
+pub mod types;
 pub mod validate;
 pub mod variants;
+
+pub use handle::{ChromosomeView, CohortHandle};
+#[allow(unused_imports)]
+pub use types::{CarrierBatch, SampleIdx, SortedVcfs, VariantMetadata, VariantRow, VariantVcf};
+
+pub use crate::store::ids::CohortId;
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -432,6 +440,10 @@ pub fn build_or_load_store_with_probe(
 }
 
 fn read_sample_names(store_dir: &Path) -> Result<Vec<String>, CohortError> {
+    read_sample_names_at(store_dir)
+}
+
+pub(crate) fn read_sample_names_at(store_dir: &Path) -> Result<Vec<String>, CohortError> {
     let path = store_dir.join("samples.txt");
     let content = std::fs::read_to_string(&path)
         .map_err(|e| CohortError::Resource(format!("Read {}: {e}", path.display())))?;

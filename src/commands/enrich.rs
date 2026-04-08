@@ -4,13 +4,32 @@ use serde_json::json;
 
 use crate::column::Col;
 use crate::commands::{self, EnrichConfig};
-use crate::config::Config;
+use crate::config::{Config, DataConfig, Tier};
 use crate::store::annotation::TissueDb;
+use crate::store::config::StoreConfig;
 use crate::store::list::{parquet_row_count, AnnotatedSet};
+use crate::store::Store;
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::output::Output;
 use crate::resource::Resources;
+
+/// Build a `Config` from a tissue dir so the `AnnotationRegistry`
+/// `favor-tissue` default points at the right place. The tissue dir is
+/// `<root>/tissue/`, so the registry's root is the parent.
+fn config_with_tissue(tissue_dir: &std::path::Path) -> Config {
+    let root = tissue_dir
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| tissue_dir.to_path_buf());
+    let mut c = Config::default();
+    c.data = DataConfig {
+        root_dir: root.to_string_lossy().into_owned(),
+        tier: Tier::Base,
+        packs: Vec::new(),
+    };
+    c
+}
 
 /// Entry point from CLI dispatch. Validates raw args, builds typed config, delegates to `run_enrich`.
 pub fn handle(
@@ -93,7 +112,10 @@ fn emit_dry_run(config: &EnrichConfig, out: &dyn Output) -> Result<(), CohortErr
 pub fn run_enrich(config: &EnrichConfig, out: &dyn Output) -> Result<(), CohortError> {
     let annotated = AnnotatedSet::open(&config.input)?;
     annotated.supports(&[Col::Vid])?;
-    let tissue_db = TissueDb::open(&config.tissue_dir)?;
+    let store = Store::open(StoreConfig::resolve(None)?)?;
+    let cfg_view = config_with_tissue(&config.tissue_dir);
+    let registry = store.annotations(&cfg_view)?;
+    let tissue_db = registry.open_tissue("favor-tissue")?;
     let resources = Resources::detect_configured();
     let engine = DfEngine::new(&resources)?;
 

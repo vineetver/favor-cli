@@ -32,7 +32,8 @@ fn main() {
     }
 
     let dry_run = cli.dry_run;
-    let result = run(cli.command, &*out, &mode, dry_run);
+    let store_path = cli.store_path.clone();
+    let result = run(cli.command, store_path, &*out, &mode, dry_run);
 
     if let Err(e) = result {
         out.error(&e);
@@ -42,6 +43,7 @@ fn main() {
 
 fn run(
     command: Option<Command>,
+    store_path: Option<std::path::PathBuf>,
     out: &dyn output::Output,
     mode: &OutputMode,
     dry_run: bool,
@@ -102,6 +104,7 @@ fn run(
             known_loci,
             emit_sumstats,
             rebuild_store,
+            cohort_id,
             no_store: _no_store,
             adaptive: _adaptive,
             column_map,
@@ -131,6 +134,8 @@ fn run(
                 rebuild_store,
                 column_map,
                 output_path,
+                store_path,
+                cohort_id,
             },
             out,
             dry_run,

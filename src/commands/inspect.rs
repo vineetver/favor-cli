@@ -3,7 +3,9 @@ use serde_json::json;
 use parquet::file::reader::FileReader;
 
 use crate::config::{Config, DirProbe, Tier};
-use crate::store::annotation::AnnotationDb;
+use crate::store::annotation::refs::favor_alias_for;
+use crate::store::config::StoreConfig;
+use crate::store::Store;
 use crate::error::CohortError;
 use crate::output::Output;
 
@@ -70,7 +72,9 @@ fn list_tables(config: &Config, out: &dyn Output) -> Result<(), CohortError> {
 }
 
 fn describe_tier(config: &Config, tier: Tier, out: &dyn Output) -> Result<(), CohortError> {
-    let ann_db = AnnotationDb::open_tier(tier, &config.root_dir())?;
+    let store = Store::open(StoreConfig::resolve(None)?)?;
+    let registry = store.annotations(config)?;
+    let ann_db = registry.open_db(favor_alias_for(tier))?;
     let sample = match ann_db.chrom_parquet("1") {
         Some(p) => p,
         None => {

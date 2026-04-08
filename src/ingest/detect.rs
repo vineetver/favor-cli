@@ -4,11 +4,20 @@ use std::path::Path;
 
 use super::{Analysis, BuildGuess, CoordBase, Delimiter};
 use crate::config::Config;
+use crate::store::annotation::refs::favor_alias_for;
 use crate::store::annotation::AnnotationDb;
+use crate::store::config::StoreConfig;
+use crate::store::Store;
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 
 const PROBE_CHROMS: &[&str] = &["1", "2", "22", "10", "X"];
+
+fn open_annotation_via_registry(config: &Config) -> Result<AnnotationDb, CohortError> {
+    let store = Store::open(StoreConfig::resolve(None)?)?;
+    let registry = store.annotations(config)?;
+    registry.open_db(favor_alias_for(config.data.tier))
+}
 
 /// Run build and coordinate detection on an analysis.
 /// Mutates analysis.build_guess and analysis.coord_base in place.
@@ -27,7 +36,7 @@ pub fn detect_build_and_coords(
         None => return Ok(()),
     };
 
-    let ann_db = match AnnotationDb::open(config) {
+    let ann_db = match open_annotation_via_registry(config) {
         Ok(db) => db,
         Err(_) => return Ok(()),
     };

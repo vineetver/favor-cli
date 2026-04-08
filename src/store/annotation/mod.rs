@@ -3,6 +3,10 @@
 //! tissue add-on reader (one directory per table). Both point at data
 //! living outside the store root — the store does not own the bytes.
 
+pub mod refs;
+
+pub use refs::{open_favor_tier, AnnotationKind, AnnotationRef, AnnotationRegistry};
+
 use std::path::{Path, PathBuf};
 
 use crate::config::{Config, Tier};

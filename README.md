@@ -1,12 +1,12 @@
 <p align="center">
   <h1 align="center">COHORT CLI</h1>
   <p align="center">
-    From raw variants to biological mechanisms in one tool.
+    Raw variants in. Rare-variant results out.
     <br />
     <strong>Annotate. Enrich. Analyze. Interpret.</strong>
     <br />
     <br />
-    <a href="#install">Install</a> &middot; <a href="#quick-start">Quick Start</a> &middot; <a href="docs/storage.md">Storage Format</a> &middot; <a href="docs/validation.md">Validation</a> &middot; <a href="AGENTS.md">Agent Reference</a> &middot; <a href="#roadmap">Roadmap</a>
+    <a href="#install">Install</a> &middot; <a href="#quick-start">Quick Start</a> &middot; <a href="#commands">Commands</a> &middot; <a href="#roadmap">Roadmap</a> &middot; <a href="#citation">Citation</a>
   </p>
 </p>
 
@@ -26,89 +26,46 @@
 curl -fsSL https://raw.githubusercontent.com/vineetver/cohort-cli/master/install.sh | sh
 ```
 
-## Quick start
+## Quick Start
 
 ```bash
 cohort setup
+cohort data pull
 cohort ingest input.vcf.gz
-cohort annotate input.ingested.parquet
-cohort enrich input.annotated.parquet --tissue brain
+cohort annotate input.ingested
 cohort staar --genotypes cohort.vcf.gz --phenotype pheno.tsv \
-  --trait-name LDL --covariates age,sex,PC1,PC2 --annotations annotated.parquet
+  --trait-name LDL --covariates age,sex,PC1,PC2 \
+  --annotations input.annotated
 ```
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `cohort setup` | Configure tier, data paths, HPC environment, memory budget |
-| `cohort ingest` | Ingest any variant format: WGS VCF, variant lists, credible sets, TSV/CSV/parquet |
-| `cohort annotate` | Annotate with FAVOR functional annotations (200–508 GB, 24 chromosomes) |
-| `cohort enrich` | Tissue-specific overlay: eQTL, sQTL, ChromBPNet, enhancer-gene links |
-| `cohort staar` | STAAR rare-variant association testing (single-study) |
-| `cohort meta-staar` | MetaSTAAR cross-biobank rare-variant meta-analysis (summary-stat based) |
-| `cohort schema` | Inspect annotation table schemas |
+| Command | Purpose |
+|---------|---------|
+| `cohort ingest` | Normalize variant inputs into a canonical variant set |
+| `cohort annotate` | Join variants against FAVOR base or full annotations |
+| `cohort enrich` | Join tissue-specific tables onto annotated variants |
+| `cohort staar` | Run single-study rare-variant association tests |
+| `cohort meta-staar` | Run cross-study meta-analysis from summary-stat outputs |
+| `cohort data` | Pull, inspect, and verify annotation packs |
+| `cohort schema` | Inspect installed table schemas |
+| `cohort manifest` | Show installed data and command availability |
+| `cohort setup` | Configure paths, tier, and environment defaults |
 
-All commands support `--format json` and `--dry-run`. See [AGENTS.md](AGENTS.md) for the machine interface.
+Machine mode: use `--format json`. For heavy runs, use `--dry-run` first.
 
-## Why it scales
-
-COHORT is built for biobank-scale rare-variant work, where the main bottlenecks are not the same as small-cohort pipelines.
-
-Current shape:
-
-- sparse carrier storage instead of dense sample-by-variant matrices
-- one aligned variant index, `variant_vcf`, across metadata, masks, and score cache
-- score-cache reuse so mask changes do not trigger genotype I/O again
-
-High-ROI work in flight:
-
-| Area | Why it matters at biobank scale | Milestone |
-|---|---|---|
-| unified compute and memory control | stops thread-pool oversubscription and untracked scratch growth | [v0.5.0](https://github.com/vineetver/cohort-cli/milestone/5) |
-| sample-side index | fixes the weakest query pattern today: sample, trio, and family lookups | [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6) |
-| fragment-backed store | removes full rebuilds when the store changes | [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6) |
-| interval-aware region queries | fixes long indel / SV overlap correctness | [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6) |
-| object-store reads | opens the path to shared and cloud-backed cohorts | [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6) |
-
-## STAAR architecture
-
-Genotypes are stored as a canonical sparse matrix **G** over `(sample_id, variant_vcf)`. All queries — region, gene, MAF, annotation — resolve to aligned vectors over `variant_vcf`. Scoring is carrier-indexed at **O(total_MAC)**, not O(n_samples x n_variants).
-
-| Layer | What | Cache key |
-|-------|------|-----------|
-| **Build** | VCF x annotations -> `sparse_g.bin` + `variants.parquet` + `membership.parquet` | SHA-256(VCF content, annotation content) |
-| **Score cache** | Null model -> U, K per gene | (store key, trait, covariates) |
-| **Test** | Slice cached U/K per mask -> Burden, SKAT, ACAT-V -> omnibus | (mask predicate, MAF cutoff) |
-
-Interactive results: Plotly.js summary with Manhattan, QQ, and volcano plots.
-
-See [docs/storage.md](docs/storage.md) for the store layout and current query behavior, [docs/performance.md](docs/performance.md) for hot paths and active work, and [docs/validation.md](docs/validation.md) for validation against the R STAARpipeline.
-
-## Data packs
-
-| Pack | Size | Description |
-|------|------|-------------|
-| **favor-base** | 200 GB | 40 curated annotation columns including pathogenicity, frequency, clinical, conservation, regulatory, aPC STAAR channels |
-| **favor-full** | 508 GB | All 54 annotation columns including dbnsfp, ENCODE, MaveDB, COSMIC |
-| eqtl | 3 GB | GTEx v10 eQTL/sQTL/apaQTL, 50 tissues, SuSiE fine-mapped |
-| sc-eqtl | 48 GB | Single-cell eQTL: OneK1K, DICE, PsychENCODE |
-| regulatory | 18 GB | cCRE tissue signals, chromatin states, accessibility |
-| enhancer-gene | 12 GB | ABC, EPIraction, rE2G, EpiMap, CRISPRi |
-| tissue-scores | 5 GB | ChromBPNet, allelic imbalance |
+Docs: [Storage](docs/storage.md), [Validation](docs/validation.md), [Performance](docs/performance.md), [Agent reference](AGENTS.md).
 
 ## Roadmap
 
-Tracked in [GitHub Issues](https://github.com/vineetver/cohort-cli/issues) with milestones:
-
 | Milestone | Focus |
 |-----------|-------|
-| [v0.5.0](https://github.com/vineetver/cohort-cli/milestone/5) | memory and thread pool overhaul: one compute handle, bounded scratch, better machine-visible memory |
-| [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6) | storage and query engine: sample index, fragments, interval-aware regions, object-store reads, query commands |
-| [v0.2.0](https://github.com/vineetver/cohort-cli/milestone/1) | STAAR hardening: GRM, multi-VCF, AI-STAAR, MultiSTAAR |
-| [v0.3.0](https://github.com/vineetver/cohort-cli/milestone/2) | MetaSTAAR: cross-biobank meta-analysis |
-| [v0.4.0](https://github.com/vineetver/cohort-cli/milestone/3) | Variant interpretation: scoring, fine-mapping, colocalization, V2G |
-| [v1.0.0](https://github.com/vineetver/cohort-cli/milestone/4) | Nextflow orchestration, provenance, QC |
+| [v0.2.0 - STAAR hardening](https://github.com/vineetver/cohort-cli/milestone/1) | GRM, score validation, multi-VCF input, performance profiling |
+| [v0.3.0 - MetaSTAAR](https://github.com/vineetver/cohort-cli/milestone/2) | cross-biobank meta-analysis, allele flip, conditional, effect sizes |
+| [v0.4.0 - Interpret](https://github.com/vineetver/cohort-cli/milestone/3) | variant interpretation, fine-mapping, colocalization, V2G, tiers |
+| [v0.5.0 - memory and thread pool overhaul](https://github.com/vineetver/cohort-cli/milestone/5) | one compute handle, bounded scratch, machine-visible resource control |
+| [v0.6.0 - storage and query engine](https://github.com/vineetver/cohort-cli/milestone/6) | store format, query paths, incremental ingest, cloud I/O, agent-friendly queries |
+| [v1.0.0 - Production](https://github.com/vineetver/cohort-cli/milestone/4) | orchestration, provenance, QC, full test suite |
 
 ## Citation
 

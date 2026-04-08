@@ -15,8 +15,10 @@ use crate::staar::masks::ScangParams;
 #[cfg(test)]
 use crate::staar::MaskCategory;
 use crate::staar::pipeline::{StaarConfig, StaarPipeline};
-use crate::store::cohort;
+use crate::store::cohort::CohortId;
+use crate::store::config::StoreConfig;
 use crate::store::list::VariantSet;
+use crate::store::Store;
 
 const GB: u64 = 1024 * 1024 * 1024;
 
@@ -49,16 +51,20 @@ pub struct StaarArgs {
     pub rebuild_store: bool,
     pub column_map: Vec<String>,
     pub output_path: Option<PathBuf>,
+    pub store_path: Option<PathBuf>,
+    pub cohort_id: Option<String>,
 }
 
 pub fn run(args: StaarArgs, out: &dyn Output, dry_run: bool) -> Result<(), CohortError> {
+    let store_path = args.store_path.clone();
     let config = build_config(args)?;
 
     if dry_run {
-        return emit_dry_run(&config, out);
+        return emit_dry_run(&config, store_path, out);
     }
 
-    let pipeline = StaarPipeline::new(config, out)?;
+    let store = Store::open(StoreConfig::resolve(store_path)?)?;
+    let pipeline = StaarPipeline::new(config, store, out)?;
     pipeline.run()
 }
 
@@ -129,7 +135,9 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
 
     let column_map = parse_column_map(&args.column_map)?;
     let output_dir = args.output_path.unwrap_or_else(|| default_output_dir(&args.genotypes));
-    let store_dir = output_dir.join("store");
+    let cohort_id = CohortId::new(
+        blank_to_none(args.cohort_id).unwrap_or_else(|| derive_cohort_id(&args.genotypes)),
+    );
 
     Ok(StaarConfig {
         genotypes: args.genotypes,
@@ -157,8 +165,44 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
         rebuild_store: args.rebuild_store,
         column_map,
         output_dir,
-        store_dir,
+        cohort_id,
     })
+}
+
+/// Default cohort id derived from the input VCF stem when `--cohort-id`
+/// is not given. Strips `.vcf`/`.vcf.gz` extensions and replaces every
+/// run of non-alphanumeric chars with `_` so the result is a safe
+/// directory name.
+fn derive_cohort_id(genotypes: &std::path::Path) -> String {
+    let stem = genotypes
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("cohort");
+    let stem = stem
+        .strip_suffix(".vcf.gz")
+        .or_else(|| stem.strip_suffix(".vcf.bgz"))
+        .or_else(|| stem.strip_suffix(".vcf"))
+        .or_else(|| stem.strip_suffix(".bcf"))
+        .unwrap_or(stem);
+    let mut out = String::with_capacity(stem.len());
+    let mut last_underscore = false;
+    for ch in stem.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_underscore = false;
+        } else if !last_underscore && !out.is_empty() {
+            out.push('_');
+            last_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "cohort".into()
+    } else {
+        out
+    }
 }
 
 fn parse_column_map(entries: &[String]) -> Result<std::collections::HashMap<String, String>, CohortError> {
@@ -188,7 +232,11 @@ fn blank_to_none(s: Option<String>) -> Option<String> {
     })
 }
 
-fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), CohortError> {
+fn emit_dry_run(
+    config: &StaarConfig,
+    store_path: Option<PathBuf>,
+    out: &dyn Output,
+) -> Result<(), CohortError> {
     let sample_names = staar::genotype::read_sample_names(&config.genotypes)?;
     let n_samples = sample_names.len();
 
@@ -205,12 +253,15 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), CohortErro
     let overhead = 4 * GB;
     let recommended = chr1_geno + overhead;
 
-    let probe_result = cohort::probe(&config.store_dir, &config.genotypes, &config.annotations);
+    let store = Store::open(StoreConfig::resolve(store_path)?)?;
+    let cohort = store.cohort(&config.cohort_id);
+    let probe_result = cohort.probe(&config.genotypes, &config.annotations);
 
     let (cache_status, store_info, recommended_bytes) = match &probe_result.manifest {
         Some(m) => (
             "hit",
             json!({
+                "cohort_id": config.cohort_id.as_str(),
                 "store_path": probe_result.store_dir.to_string_lossy(),
                 "store_variants": m.n_variants,
                 "store_samples": m.n_samples,
@@ -307,5 +358,22 @@ mod tests {
         // file_stem only strips the last extension, so .vcf.gz → .vcf → .vcf.staar.
         let p = default_output_dir(std::path::Path::new("/data/cohort.vcf.gz"));
         assert_eq!(p, PathBuf::from("/data/cohort.vcf.staar"));
+    }
+
+    #[test]
+    fn derive_cohort_id_strips_vcf_extensions_and_sanitizes() {
+        assert_eq!(
+            derive_cohort_id(std::path::Path::new("/data/ukb_chr22.vcf.gz")),
+            "ukb_chr22"
+        );
+        assert_eq!(
+            derive_cohort_id(std::path::Path::new("/data/run-2026-04.vcf")),
+            "run_2026_04"
+        );
+        assert_eq!(
+            derive_cohort_id(std::path::Path::new("/data/sample.bcf")),
+            "sample"
+        );
+        assert_eq!(derive_cohort_id(std::path::Path::new("/")), "cohort");
     }
 }

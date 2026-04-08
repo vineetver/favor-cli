@@ -6,7 +6,7 @@
 //!
 //! Layout per chromosome:
 //! 1. Resolve mask predicates from the requested mask categories
-//! 2. Open `SparseG`, `VariantIndex`, and the cached `ChromScoreCache`
+//! 2. Open a ChromosomeView and the cached ChromScoreCache via that view
 //! 3. Score every gene in parallel via `score_one_gene`
 //! 4. Score sliding/SCANG windows via `score_one_window`
 
@@ -24,9 +24,9 @@ use crate::staar::pipeline::{ScoringContext, StaarConfig};
 use crate::staar::score;
 use crate::staar::{self, GeneResult, MaskCategory, MaskType, ScoringMode};
 use crate::store::cache::score_cache::{self, ChromScoreCache, GeneKBlock};
-use crate::store::cohort::sparse_g::SparseG;
-use crate::store::cohort::variants::{CarrierList, VariantIndex, VariantIndexEntry};
-use crate::store::cohort::CohortManifest;
+use crate::store::cohort::variants::{CarrierList, VariantIndexEntry};
+use crate::store::cohort::{ChromosomeView, CohortHandle, CohortManifest};
+use crate::store::Store;
 use crate::types::{AnnotatedVariant, Chromosome};
 
 /// Function-pointer mask predicate over an `AnnotatedVariant`.
@@ -105,31 +105,28 @@ impl MaskPlan {
     }
 }
 
-/// Per-chromosome handles loaded once and shared across all genes.
-struct ChromCtx<'a> {
-    name: &'a str,
+/// Per-chromosome handles loaded once and shared across all genes. Holds
+/// a `ChromosomeView` (which lazily mmap's `sparse_g.bin` and parses
+/// `variants.parquet`) plus the per-phenotype score cache.
+struct ChromCtx<'v> {
+    name: String,
     chrom: Chromosome,
-    sparse_g: SparseG,
-    variant_index: VariantIndex,
+    view: ChromosomeView<'v>,
     cache: ChromScoreCache,
 }
 
-impl<'a> ChromCtx<'a> {
+impl<'v> ChromCtx<'v> {
     fn open(
-        store_dir: &Path,
-        name: &'a str,
+        cohort: &'v CohortHandle<'v>,
+        chrom: Chromosome,
         cache_dir: &Path,
     ) -> Result<Self, CohortError> {
-        let chrom_dir = store_dir.join(format!("chromosome={name}"));
-        let sparse_g = SparseG::open(&chrom_dir)?;
-        let variant_index = VariantIndex::load(&chrom_dir)?;
-        let cache = score_cache::load_chromosome(cache_dir, name, &variant_index)?;
-        let chrom: Chromosome = name.parse().unwrap_or(Chromosome::Autosome(1));
+        let view = cohort.chromosome(&chrom)?;
+        let cache = score_cache::load_chromosome(cache_dir, &view)?;
         Ok(Self {
-            name,
+            name: chrom.label(),
             chrom,
-            sparse_g,
-            variant_index,
+            view,
             cache,
         })
     }
@@ -138,7 +135,8 @@ impl<'a> ChromCtx<'a> {
 /// Public entry point: score every chromosome in `manifest` and return
 /// per-mask gene/window result vectors plus individual p-values.
 pub fn run_score_tests(
-    store_dir: &Path,
+    store: &Store,
+    cohort_id: &crate::store::cohort::CohortId,
     manifest: &CohortManifest,
     config: &StaarConfig,
     analysis: &AnalysisVectors,
@@ -158,13 +156,19 @@ pub fn run_score_tests(
         );
     }
 
+    let cohort = store.cohort(cohort_id);
+
     for ci in &manifest.chromosomes {
-        let chrom_ctx = ChromCtx::open(store_dir, &ci.name, &ctx.cache_dir)?;
+        let chrom: Chromosome = ci
+            .name
+            .parse()
+            .map_err(|e: String| CohortError::Input(e))?;
+        let chrom_ctx = ChromCtx::open(&cohort, chrom, &ctx.cache_dir)?;
+        let n_variants = chrom_ctx.view.index()?.len();
+        let n_genes = chrom_ctx.view.index()?.n_genes();
         out.status(&format!(
             "  chr{}: {} variants, {} genes",
-            chrom_ctx.name,
-            chrom_ctx.variant_index.len(),
-            chrom_ctx.variant_index.n_genes(),
+            chrom_ctx.name, n_variants, n_genes,
         ));
 
         if plan.has_gene_masks() {
@@ -282,7 +286,8 @@ fn compile_gene_inputs(
     if block.m() < 2 {
         return Ok(None);
     }
-    let all_entries = chrom_ctx.variant_index.all_entries();
+    let variant_index = chrom_ctx.view.index()?;
+    let all_entries = variant_index.all_entries();
 
     let maf_pass: Vec<usize> = (0..block.m())
         .filter(|&local| {
@@ -307,7 +312,12 @@ fn compile_gene_inputs(
     let end = *positions.iter().max().unwrap();
 
     let needs_carriers = !block.has_k() || mode != ScoringMode::Standard;
-    let carriers = needs_carriers.then(|| chrom_ctx.sparse_g.load_variants(&gene_vcfs));
+    let carriers = if needs_carriers {
+        let vcfs = crate::store::cohort::types::from_u32_slice(&gene_vcfs);
+        Some(chrom_ctx.view.carriers_batch(vcfs)?.entries)
+    } else {
+        None
+    };
 
     if let Some(c) = &carriers {
         if c.len() < 2 {
@@ -349,7 +359,7 @@ fn score_gene_masks(
     analysis: &AnalysisVectors,
     ctx: &ScoringContext,
 ) -> Result<Option<Vec<(usize, GeneResult)>>, CohortError> {
-    let all_entries = chrom_ctx.variant_index.all_entries();
+    let all_entries = chrom_ctx.view.index()?.all_entries();
     let n_vcf = analysis.n_vcf_total;
 
     let mut results = Vec::new();
@@ -464,8 +474,14 @@ fn score_chrom_windows(
 ) {
     let maf_cutoff = config.maf_cutoff;
 
-    let (chrom_variants, global_indices): (Vec<AnnotatedVariant>, Vec<usize>) = chrom_ctx
-        .variant_index
+    let variant_index = match chrom_ctx.view.index() {
+        Ok(i) => i,
+        Err(e) => {
+            out.warn(&format!("    skipping windows on chr{}: {e}", chrom_ctx.name));
+            return;
+        }
+    };
+    let (chrom_variants, global_indices): (Vec<AnnotatedVariant>, Vec<usize>) = variant_index
         .all_entries()
         .iter()
         .enumerate()
@@ -553,8 +569,14 @@ fn score_one_window(
                 .ancestry
                 .as_ref()
                 .expect("AiStaar requires ancestry info");
-            let win_vcfs: Vec<u32> = win_globals.iter().map(|&i| i as u32).collect();
-            let carriers = chrom_ctx.sparse_g.load_variants(&win_vcfs);
+            let win_vcfs: Vec<crate::store::cohort::types::VariantVcf> = win_globals
+                .iter()
+                .map(|&i| crate::store::cohort::types::VariantVcf(i as u32))
+                .collect();
+            let carriers = match chrom_ctx.view.carriers_batch(&win_vcfs) {
+                Ok(b) => b.entries,
+                Err(_) => return None,
+            };
             staar::ancestry::run_ai_staar_gene(&carriers, analysis, ai, &ann_matrix, false)
         }
         // SPA on windows is not currently wired (windows always go through

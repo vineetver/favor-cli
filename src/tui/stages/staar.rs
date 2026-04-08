@@ -110,10 +110,9 @@ impl Stage for StaarStage {
                     kind: PathKind::Dir,
                     default: None,
                 },
-                FormField::Path {
-                    id: "store_dir",
-                    label: "store dir",
-                    kind: PathKind::Dir,
+                FormField::Text {
+                    id: "cohort_id",
+                    label: "cohort id (defaults to vcf stem)",
                     default: None,
                 },
             ],
@@ -165,10 +164,18 @@ impl Stage for StaarStage {
             .path("output_dir")
             .cloned()
             .unwrap_or_else(|| PathBuf::from("staar_out"));
-        let store_dir = values
-            .path("store_dir")
-            .cloned()
-            .unwrap_or_else(|| output_dir.join("store"));
+        let cohort_id = values
+            .text("cohort_id")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                genotypes
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.trim_end_matches(".vcf").to_string())
+                    .unwrap_or_else(|| "cohort".to_string())
+            });
+        let cohort_id = crate::store::cohort::CohortId::new(cohort_id);
 
         Ok(RunRequest::Staar(Box::new(StaarConfig {
             genotypes,
@@ -192,7 +199,7 @@ impl Stage for StaarStage {
             rebuild_store,
             column_map: HashMap::new(),
             output_dir,
-            store_dir,
+            cohort_id,
         })))
     }
 }

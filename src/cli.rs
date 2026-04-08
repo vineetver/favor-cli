@@ -224,6 +224,10 @@ pub enum Command {
         #[arg(long)]
         rebuild_store: bool,
 
+        /// Cohort id under the store root. Defaults to the genotype VCF stem.
+        #[arg(long)]
+        cohort_id: Option<String>,
+
         /// Skip the genotype store (no-op; reserved for the streaming path).
         #[arg(long)]
         no_store: bool,

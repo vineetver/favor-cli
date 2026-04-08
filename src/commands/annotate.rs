@@ -3,16 +3,31 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use crate::commands::{self, AnnotateConfig};
-use crate::config::{Config, Tier};
+use crate::config::{Config, DataConfig, Tier};
 use crate::store::annotation::AnnotationDb;
+use crate::store::config::StoreConfig;
 use crate::store::list::{
     parquet_column_names, parquet_row_count, VariantSet, VariantSetKind, VariantSetWriter,
 };
+use crate::store::Store;
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement, JoinKey};
 use crate::output::{bail_if_cancelled, Output};
 use crate::resource::Resources;
+
+/// Build a `Config`-shaped view from a bare data root so the
+/// `AnnotationRegistry` defaults seed correctly without re-reading the
+/// user's persisted config.
+fn config_with_root(root: &std::path::Path) -> Config {
+    let mut c = Config::default();
+    c.data = DataConfig {
+        root_dir: root.to_string_lossy().into_owned(),
+        tier: Tier::Base,
+        packs: Vec::new(),
+    };
+    c
+}
 
 const ANNOTATE_JOIN_COLUMNS: &[ColumnRequirement] = &[
     ColumnRequirement {
@@ -119,7 +134,10 @@ fn emit_dry_run(config: &AnnotateConfig, out: &dyn Output) -> Result<(), CohortE
 pub fn run_annotate(config: &AnnotateConfig, out: &dyn Output) -> Result<(), CohortError> {
     let input = VariantSet::open(&config.input)?;
     validate_input(&input)?;
-    let db = AnnotationDb::open_tier(config.tier, &config.data_root)?;
+    let store = Store::open(StoreConfig::resolve(None)?)?;
+    let cfg_view = config_with_root(&config.data_root);
+    let registry = store.annotations(&cfg_view)?;
+    let db = registry.open_db(crate::store::annotation::refs::favor_alias_for(config.tier))?;
     let resources = Resources::detect_configured();
     let engine = DfEngine::new(&resources)?;
 

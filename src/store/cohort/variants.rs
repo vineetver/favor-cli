@@ -57,9 +57,16 @@ pub struct WeightVector {
 }
 
 /// One variant's metadata as loaded from variants.parquet.
+///
+/// `end_position` is the inclusive 1-based last base covered by the
+/// variant's reference allele: `position + max(ref.len(), 1) - 1`.
+/// Derived at load time, not stored, so old cohorts continue to work
+/// without a schema bump. SVs with explicit END annotations will need
+/// a schema column when they land.
 #[derive(Clone, Debug)]
 pub struct VariantIndexEntry {
     pub position: u32,
+    pub end_position: u32,
     pub ref_allele: Box<str>,
     pub alt_allele: Box<str>,
     pub vid: Box<str>,
@@ -346,9 +353,13 @@ fn load_variant_entries(chrom_dir: &Path) -> Result<Vec<VariantIndexEntry>, Coho
                 weights[ch] = if w.is_finite() { w } else { 0.0 };
             }
 
+            let position = pos_arr.value(i) as u32;
+            let ref_str = ref_arr.value(i);
+            let end_position = position + ref_str.len().max(1) as u32 - 1;
             entries.push(VariantIndexEntry {
-                position: pos_arr.value(i) as u32,
-                ref_allele: ref_arr.value(i).into(),
+                position,
+                end_position,
+                ref_allele: ref_str.into(),
                 alt_allele: alt_arr.value(i).into(),
                 vid: vid_arr.value(i).into(),
                 maf: maf_arr.value(i),
@@ -380,6 +391,7 @@ mod tests {
         let entries = vec![
             VariantIndexEntry {
                 position: 100,
+                end_position: 100,
                 ref_allele: "A".into(),
                 alt_allele: "T".into(),
                 vid: "22-100-A-T".into(),
@@ -393,6 +405,7 @@ mod tests {
             },
             VariantIndexEntry {
                 position: 200,
+                end_position: 200,
                 ref_allele: "C".into(),
                 alt_allele: "G".into(),
                 vid: "22-200-C-G".into(),
@@ -406,6 +419,7 @@ mod tests {
             },
             VariantIndexEntry {
                 position: 300,
+                end_position: 300,
                 ref_allele: "G".into(),
                 alt_allele: "A".into(),
                 vid: "22-300-G-A".into(),

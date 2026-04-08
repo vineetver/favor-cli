@@ -1,39 +1,37 @@
-#[allow(dead_code)]
-pub mod backend;
 pub mod annotation;
+pub mod backend;
 pub mod cache;
 pub mod cohort;
-#[allow(dead_code)]
 pub mod config;
-#[allow(dead_code)]
 pub mod ids;
-#[allow(dead_code)]
 pub mod layout;
 pub mod list;
+pub mod lookups;
 pub mod manifest;
-#[allow(dead_code)]
+pub mod query;
 pub mod scratch;
 
 use std::fs;
 
+use crate::config::Config;
 use crate::error::CohortError;
 
+use annotation::AnnotationRegistry;
 use backend::{Backend, LocalFs};
+use cache::CacheStore;
+use cohort::{CohortHandle, CohortId};
 use config::StoreConfig;
 use layout::Layout;
 use scratch::ScratchPool;
 
-#[allow(dead_code)]
 const DEFAULT_SCRATCH_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
-#[allow(dead_code)]
 pub struct Store {
     layout: Layout,
     backend: Box<dyn Backend>,
     scratch: ScratchPool,
 }
 
-#[allow(dead_code)]
 impl Store {
     pub fn open(config: StoreConfig) -> Result<Self, CohortError> {
         let layout = Layout::new(config.root);
@@ -66,6 +64,46 @@ impl Store {
     #[allow(dead_code)]
     pub fn scratch(&self) -> &ScratchPool {
         &self.scratch
+    }
+
+    /// Open a cohort handle by id. Lazy: does not read the manifest until
+    /// a method on the returned handle is called.
+    pub fn cohort(&self, id: &CohortId) -> CohortHandle<'_> {
+        let dir = self.layout.cohort_dir(id);
+        CohortHandle::new(self, id.clone(), dir)
+    }
+
+    /// Build the annotation registry from `<store_root>/annotations/refs.toml`
+    /// merged over the defaults derived from `config`. Reads from disk
+    /// every call — registries are cheap and the on-disk file may have
+    /// changed between commands.
+    pub fn annotations(&self, config: &Config) -> Result<AnnotationRegistry, CohortError> {
+        let refs_path = self.layout.annotations_refs();
+        if let Some(parent) = refs_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                CohortError::Resource(format!("create {}: {e}", parent.display()))
+            })?;
+        }
+        AnnotationRegistry::load(refs_path, config)
+    }
+
+    /// Cache subsystem — score caches and (Phase 7) lookup indexes
+    /// keyed by cohort id.
+    pub fn cache(&self) -> CacheStore<'_> {
+        CacheStore::new(&self.layout)
+    }
+
+    /// Resolve a registered lookup against a cohort. Builds the
+    /// on-disk index lazily on the first call; subsequent calls reuse
+    /// the cached file.
+    pub fn lookup<L: lookups::Lookup>(
+        &self,
+        lookup: &L,
+        cohort: &CohortHandle<'_>,
+        key: &L::Key,
+    ) -> Result<L::Value, CohortError> {
+        let dir = lookups::ensure_built(lookup, cohort)?;
+        lookup.query(cohort, &dir, key)
     }
 }
 

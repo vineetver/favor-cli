@@ -28,9 +28,9 @@ use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement};
 use crate::output::Output;
-use crate::store::cohort::sparse_g::SparseG;
-use crate::store::cohort::variants::VariantIndex;
+use crate::store::cohort::{ChromosomeView, CohortId};
 use crate::store::list::parquet_column_names;
+use crate::store::Store;
 use crate::types::{
     AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation,
     MetaVariant, RegionType, RegulatoryFlags,
@@ -707,7 +707,8 @@ pub struct StudyMeta {
 /// Computes U and K per segment directly from carrier lists in O(total_MAC)
 /// instead of building dense genotype matrices.
 pub fn emit_sumstats(
-    store_dir: &Path,
+    store: &Store,
+    cohort_id: &CohortId,
     analysis: &AnalysisVectors,
     variants: &[AnnotatedVariant],
     output_dir: &Path,
@@ -716,6 +717,7 @@ pub fn emit_sumstats(
 ) -> Result<(), CohortError> {
     out.status("MetaSTAAR: computing summary statistics (carrier-indexed)...");
 
+    let cohort = store.cohort(cohort_id);
     let chrom_set: Vec<String> = variants
         .iter()
         .map(|v| v.chromosome.label())
@@ -723,34 +725,26 @@ pub fn emit_sumstats(
         .into_iter()
         .collect();
 
-    for chrom in &chrom_set {
+    for chrom_label in &chrom_set {
         let indices: Vec<usize> = variants
             .iter()
             .enumerate()
-            .filter(|(_, v)| v.chromosome.label() == *chrom)
+            .filter(|(_, v)| v.chromosome.label() == *chrom_label)
             .map(|(i, _)| i)
             .collect();
         if indices.is_empty() {
             continue;
         }
 
-        let dir = output_dir.join(format!("chromosome={chrom}"));
+        let dir = output_dir.join(format!("chromosome={chrom_label}"));
         std::fs::create_dir_all(&dir)
             .map_err(|e| CohortError::Resource(format!("Cannot create '{}': {e}", dir.display())))?;
 
-        let chrom_dir = store_dir.join(format!("chromosome={chrom}"));
-        let sparse_g = SparseG::open(&chrom_dir)?;
-        let variant_index = VariantIndex::load(&chrom_dir)?;
-        emit_chromosome_sparse(
-            &sparse_g,
-            &variant_index,
-            analysis,
-            variants,
-            &indices,
-            chrom,
-            &dir,
-            out,
-        )?;
+        let chrom: Chromosome = chrom_label
+            .parse()
+            .map_err(|e: String| CohortError::Input(e))?;
+        let view = cohort.chromosome(&chrom)?;
+        emit_chromosome_sparse(&view, analysis, variants, &indices, chrom_label, &dir, out)?;
     }
 
     let meta_json = serde_json::to_string_pretty(meta)
@@ -766,8 +760,7 @@ pub fn emit_sumstats(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_chromosome_sparse(
-    sparse_g: &SparseG,
-    variant_index: &VariantIndex,
+    view: &ChromosomeView<'_>,
     analysis: &AnalysisVectors,
     variants: &[AnnotatedVariant],
     chrom_indices: &[usize],
@@ -775,6 +768,8 @@ fn emit_chromosome_sparse(
     dir: &Path,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
+    let variant_index = view.index()?;
+    let sparse_g = view.sparse_g()?;
     let n = analysis.n_pheno;
 
     // Build position-based segments (same binning as v1 for output compat)

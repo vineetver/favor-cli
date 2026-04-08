@@ -6,9 +6,9 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use super::handle::CohortHandle;
 use super::sparse_g::SparseG;
 use super::variants::VariantIndex;
-use super::CohortManifest;
 use crate::error::CohortError;
 
 pub struct CheckResult {
@@ -17,40 +17,38 @@ pub struct CheckResult {
     pub detail: String,
 }
 
-/// Validate all structural invariants for the entire store.
-pub fn validate_store(
-    store_dir: &Path,
-    manifest: &CohortManifest,
-) -> Result<Vec<CheckResult>, CohortError> {
+/// Validate all structural invariants for an entire cohort.
+pub fn validate_cohort(cohort: &CohortHandle<'_>) -> Result<Vec<CheckResult>, CohortError> {
     let mut results = Vec::new();
+    let chroms = cohort.chromosomes()?.to_vec();
 
-    for ci in &manifest.chromosomes {
-        let chrom = &ci.name;
-        let chrom_dir = store_dir.join(format!("chromosome={chrom}"));
-
-        let sparse_g = SparseG::open(&chrom_dir)?;
-        let variant_index = VariantIndex::load(&chrom_dir)?;
+    for chrom in &chroms {
+        let view = cohort.chromosome(chrom)?;
+        let chrom_label = chrom.label();
+        let chrom_dir = view.dir();
+        let sparse_g = view.sparse_g()?;
+        let variant_index = view.index()?;
 
         results.extend(check_variant_vcf_alignment(
-            &chrom_dir,
-            &variant_index,
-            chrom,
+            chrom_dir,
+            variant_index,
+            &chrom_label,
         ));
-        results.extend(check_sparse_g_integrity(&sparse_g, chrom));
-        results.extend(check_no_duplicate_carriers(&sparse_g, chrom));
-        results.extend(check_membership_validity(&variant_index, &sparse_g, chrom));
-        results.extend(check_sortedness(&variant_index, chrom));
+        results.extend(check_sparse_g_integrity(sparse_g, &chrom_label));
+        results.extend(check_no_duplicate_carriers(sparse_g, &chrom_label));
+        results.extend(check_membership_validity(variant_index, sparse_g, &chrom_label));
+        results.extend(check_sortedness(variant_index, &chrom_label));
         results.extend(check_sparse_g_variant_count(
-            &sparse_g,
-            &variant_index,
-            chrom,
+            sparse_g,
+            variant_index,
+            &chrom_label,
         ));
-        results.extend(check_offsets_table(&sparse_g, chrom));
-        results.extend(check_carrier_ordering(&sparse_g, chrom));
+        results.extend(check_offsets_table(sparse_g, &chrom_label));
+        results.extend(check_carrier_ordering(sparse_g, &chrom_label));
         results.extend(check_cross_layer_consistency(
-            &sparse_g,
-            &variant_index,
-            chrom,
+            sparse_g,
+            variant_index,
+            &chrom_label,
         ));
     }
 

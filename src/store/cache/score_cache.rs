@@ -33,6 +33,7 @@ use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::carrier::sparse_score;
 use crate::staar::carrier::AnalysisVectors;
+use crate::store::cohort::handle::ChromosomeView;
 use crate::store::cohort::sparse_g::SparseG;
 use crate::store::cohort::variants::VariantIndex;
 use crate::store::cohort::CohortManifest;
@@ -145,11 +146,6 @@ pub fn cache_key(
     format!("{:x}", hasher.finalize())
 }
 
-/// Directory for score cache files: `{store_dir}/score_cache/{key}/`
-pub fn cache_dir(store_dir: &Path, key: &str) -> PathBuf {
-    store_dir.join("score_cache").join(key)
-}
-
 /// Why a score cache probe missed. Mirrors `store::ProbeReason` so the
 /// pipeline can record a typed cache decision in `run.json` without
 /// hand-formatting reason strings.
@@ -199,13 +195,11 @@ impl ScoreCacheMiss {
 /// Probe the per-key cache directory and return `None` on a clean hit, or
 /// `Some(ScoreCacheMiss)` describing the first chromosome that failed.
 pub fn probe(
-    store_dir: &Path,
+    cache_dir: &Path,
     manifest: &CohortManifest,
-    key: &str,
 ) -> Option<ScoreCacheMiss> {
-    let dir = cache_dir(store_dir, key);
     for ci in &manifest.chromosomes {
-        let path = dir.join(format!("chromosome={}/scores.bin", ci.name));
+        let path = cache_dir.join(format!("chromosome={}/scores.bin", ci.name));
         if let Err(reason) = validate_header(&path) {
             return Some(reason.into_miss(ci.name.clone()));
         }
@@ -505,9 +499,10 @@ fn read_f64(data: &[u8], pos: usize) -> Result<[u8; 8], CohortError> {
 /// Vid strings on disk are resolved to current VariantIndex positions at load time.
 pub fn load_chromosome(
     cache_dir: &Path,
-    chrom: &str,
-    variant_index: &VariantIndex,
+    view: &ChromosomeView<'_>,
 ) -> Result<ChromScoreCache, CohortError> {
+    let chrom = view.chromosome().label();
+    let variant_index = view.index()?;
     let path = cache_dir.join(format!("chromosome={chrom}/scores.bin"));
     let data = std::fs::read(&path)
         .map_err(|e| CohortError::Resource(format!("Read {}: {e}", path.display())))?;
