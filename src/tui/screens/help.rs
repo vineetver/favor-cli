@@ -1,15 +1,13 @@
-use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::tui::action::{format_binding, Action, ActionScope, KeyMap};
+use crate::tui::action::{format_binding, Action, ActionScope};
 use crate::tui::screen::{Screen, Transition};
-use crate::tui::shell::{Binding, ErrorMessage, ScreenChrome, Shell};
+use crate::tui::shell::{ErrorMessage, ScreenChrome, Shell};
 use crate::tui::theme;
-use crate::tui::widgets::log_tail::LogTail;
 
 pub struct HelpScreen {
     scopes: Vec<ActionScope>,
@@ -54,15 +52,6 @@ impl Screen for HelpScreen {
         ActionScope::Help
     }
 
-    fn keys(&self) -> KeyMap {
-        let none = KeyModifiers::NONE;
-        KeyMap::new()
-            .bind(KeyCode::Esc, none, Action::HelpClose)
-            .bind(KeyCode::Char('q'), none, Action::HelpClose)
-            .bind(KeyCode::Char('?'), none, Action::HelpClose)
-            .bind(KeyCode::Tab, none, Action::HelpCycleScope)
-    }
-
     fn on_action(&mut self, action: Action) -> Transition {
         match action {
             Action::HelpClose => Transition::Pop,
@@ -74,23 +63,16 @@ impl Screen for HelpScreen {
         }
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
+    fn draw(&mut self, frame: &mut Frame, area: Rect) {
         let focused_scope = self.scopes.get(self.focused).copied().unwrap_or(ActionScope::Global);
         let title = format!("Help — {}", focused_scope.title());
-        let hint = [
-            Binding::new(
-                (KeyCode::Tab, KeyModifiers::NONE),
-                "cycle scope",
-            ),
-            Binding::new((KeyCode::Esc, KeyModifiers::NONE), "close"),
-        ];
         let scopes = self.scopes.clone();
         let focused = self.focused;
         let chrome = ScreenChrome {
             title: &title,
             status: None,
             error: self.error.as_ref(),
-            hint: &hint,
+            scope: ActionScope::Help,
             graph: None,
         };
         let body = |inner: Rect, buf: &mut ratatui::buffer::Buffer| {

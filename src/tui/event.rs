@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crossterm::event::KeyEvent;
 
 use crate::error::CohortError;
@@ -11,7 +9,5 @@ pub enum AppEvent {
     Tick,
     Log(LogLine),
     ProgressUpdate(ProgressSnapshot),
-    ProgressSweep(u64),
     CommandDone(Result<(), CohortError>),
-    RunFinished(PathBuf),
 }

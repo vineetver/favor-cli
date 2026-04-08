@@ -11,21 +11,22 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
 use crate::tui::output::{LogLevel, LogLine, ProgressSnapshot};
-use crate::tui::screen::RunRequest;
+use crate::tui::stages::types::RunRequest;
 use crate::tui::theme;
 
 const TAIL_LINES: usize = 5;
 
 pub enum RunOutcome {
     Cancelled,
-    Succeeded { artifact: PathBuf },
-    Failed { error: String },
+    Succeeded,
+    Failed,
 }
 
+#[derive(Clone, Copy)]
 enum Phase {
     Running,
     Succeeded,
-    Failed(String),
+    Failed,
 }
 
 pub struct RunOverlay {
@@ -82,43 +83,40 @@ impl RunOverlay {
                 if self.artifact.exists() {
                     Phase::Succeeded
                 } else {
-                    Phase::Failed(format!(
-                        "command reported success but artifact missing: {}",
-                        self.artifact.display()
-                    ))
+                    self.push_log(LogLine {
+                        level: LogLevel::Error,
+                        message: format!(
+                            "command reported success but artifact missing: {}",
+                            self.artifact.display()
+                        ),
+                    });
+                    Phase::Failed
                 }
             }
-            Err(e) => Phase::Failed(e),
+            Err(e) => {
+                self.push_log(LogLine { level: LogLevel::Error, message: e });
+                Phase::Failed
+            }
         };
     }
 
     pub fn handle(&mut self, key: KeyEvent) -> Option<RunOutcome> {
         let none = KeyModifiers::NONE;
-        match (&self.phase, key.code, key.modifiers) {
+        match (self.phase, key.code, key.modifiers) {
             (Phase::Running, KeyCode::Char('c'), m) if m == none => {
                 self.cancel_requested = true;
                 self.cancel.store(true, Ordering::Relaxed);
                 None
             }
-            (Phase::Succeeded, KeyCode::Enter, _) => {
+            (Phase::Succeeded, KeyCode::Enter | KeyCode::Esc, _) => {
                 self.finished = true;
-                Some(RunOutcome::Succeeded {
-                    artifact: self.artifact.clone(),
-                })
+                Some(RunOutcome::Succeeded)
             }
-            (Phase::Succeeded, KeyCode::Esc, _) => {
+            (Phase::Failed, KeyCode::Enter | KeyCode::Esc, _) => {
                 self.finished = true;
-                Some(RunOutcome::Succeeded {
-                    artifact: self.artifact.clone(),
-                })
+                Some(RunOutcome::Failed)
             }
-            (Phase::Failed(msg), KeyCode::Enter, _) | (Phase::Failed(msg), KeyCode::Esc, _) => {
-                self.finished = true;
-                Some(RunOutcome::Failed {
-                    error: msg.clone(),
-                })
-            }
-            (Phase::Failed(_), KeyCode::Char('r'), m) if m == none => {
+            (Phase::Failed, KeyCode::Char('r'), m) if m == none => {
                 self.finished = true;
                 Some(RunOutcome::Cancelled)
             }
@@ -129,10 +127,10 @@ impl RunOverlay {
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         let region = centered_rect(area, 80, 60);
         Clear.render(region, buf);
-        let (status_label, status_color) = match &self.phase {
+        let (status_label, status_color) = match self.phase {
             Phase::Running => ("running", theme::ACCENT),
             Phase::Succeeded => ("done", theme::OK),
-            Phase::Failed(_) => ("failed", theme::BAD),
+            Phase::Failed => ("failed", theme::BAD),
         };
         let block = Block::default()
             .borders(Borders::ALL)
@@ -179,11 +177,11 @@ impl RunOverlay {
             )
             .render(v[3], buf);
 
-        let action = match (&self.phase, self.cancel_requested) {
+        let action = match (self.phase, self.cancel_requested) {
             (Phase::Running, false) => "[c] cancel",
             (Phase::Running, true) => "cancelling at next stage boundary...",
             (Phase::Succeeded, _) => "[enter] view results",
-            (Phase::Failed(_), _) => "[r] retry   [enter] dismiss",
+            (Phase::Failed, _) => "[r] retry   [enter] dismiss",
         };
         Paragraph::new(Line::from(Span::styled(
             format!(" {action}"),

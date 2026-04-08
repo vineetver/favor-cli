@@ -164,11 +164,8 @@ const ACTIONS_ALL: &[Action] = &[
 impl Action {
     pub fn scope(&self) -> ActionScope {
         match self {
-            Self::Quit
-            | Self::OpenPalette
-            | Self::OpenHelp
-            | Self::ClosePalette
-            | Self::ClosePaletteAndRun => ActionScope::Global,
+            Self::Quit | Self::OpenPalette | Self::OpenHelp => ActionScope::Global,
+            Self::ClosePalette | Self::ClosePaletteAndRun => ActionScope::Palette,
 
             Self::WorkspaceUp
             | Self::WorkspaceDown
@@ -465,6 +462,19 @@ impl KeyMap {
     pub fn bind(mut self, code: KeyCode, mods: KeyModifiers, action: Action) -> Self {
         self.entries.push((code, mods, action));
         self
+    }
+
+    pub fn for_scope(scope: ActionScope) -> Self {
+        let entries: Vec<_> = ACTIONS_ALL
+            .iter()
+            .filter(|a| a.scope() == scope)
+            .filter_map(|a| a.default_key().map(|(c, m)| (c, m, *a)))
+            .collect();
+        Self { entries }
+    }
+
+    pub fn entries(&self) -> &[(KeyCode, KeyModifiers, Action)] {
+        &self.entries
     }
 
     pub fn lookup(&self, code: KeyCode, mods: KeyModifiers) -> Option<Action> {

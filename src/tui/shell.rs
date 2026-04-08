@@ -4,7 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::tui::action::{format_binding, KeyBinding};
+use crate::tui::action::{format_binding, Action, ActionScope, KeyMap};
 use crate::tui::theme;
 
 pub mod graph_strip;
@@ -15,30 +15,11 @@ pub struct ErrorMessage {
     pub text: String,
 }
 
-impl ErrorMessage {
-    #[allow(dead_code)]
-    pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Binding {
-    pub key: KeyBinding,
-    pub label: &'static str,
-}
-
-impl Binding {
-    pub const fn new(key: KeyBinding, label: &'static str) -> Self {
-        Self { key, label }
-    }
-}
-
 pub struct ScreenChrome<'a> {
     pub title: &'a str,
     pub status: Option<&'a str>,
     pub error: Option<&'a ErrorMessage>,
-    pub hint: &'a [Binding],
+    pub scope: ActionScope,
     pub graph: Option<GraphStripState>,
 }
 
@@ -88,7 +69,7 @@ impl<'a, F: FnOnce(Rect, &mut Buffer)> Widget for Shell<'a, F> {
         render_chrome_row(rows[idx], buf, self.chrome.title, self.chrome.status);
         render_error_slot(rows[idx + 1], buf, self.chrome.error);
         (self.body)(rows[idx + 2], buf);
-        render_hint_bar(rows[idx + 3], buf, self.chrome.hint);
+        render_hint_bar(rows[idx + 3], buf, self.chrome.scope);
     }
 }
 
@@ -129,17 +110,26 @@ fn render_error_slot(area: Rect, buf: &mut Buffer, error: Option<&ErrorMessage>)
     Paragraph::new(line).render(area, buf);
 }
 
-fn render_hint_bar(area: Rect, buf: &mut Buffer, bindings: &[Binding]) {
-    let mut spans: Vec<Span> = Vec::with_capacity(bindings.len() * 3);
-    for (i, b) in bindings.iter().enumerate() {
+fn render_hint_bar(area: Rect, buf: &mut Buffer, scope: ActionScope) {
+    let bindings = KeyMap::for_scope(scope);
+    let entries = bindings.entries();
+    let mut spans: Vec<Span> = Vec::with_capacity(entries.len() * 3);
+    for (i, (code, mods, action)) in entries.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("  ", theme::hint_bar_style()));
         }
         spans.push(Span::styled(
-            format_binding(b.key.0, b.key.1),
+            format_binding(*code, *mods),
             Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(format!(" {}", b.label), theme::hint_bar_style()));
+        spans.push(Span::styled(
+            format!(" {}", action_label(*action)),
+            theme::hint_bar_style(),
+        ));
     }
     Paragraph::new(Line::from(spans)).render(area, buf);
+}
+
+fn action_label(action: Action) -> &'static str {
+    action.title()
 }

@@ -90,6 +90,14 @@ impl Form {
         }
     }
 
+    pub fn field(&self, id: &str) -> Option<&FormField> {
+        self.schema
+            .fields
+            .iter()
+            .chain(self.schema.advanced.iter())
+            .find(|f| f.id() == id)
+    }
+
     pub fn handle(&mut self, code: KeyCode) -> FormOutcome {
         let row_count = self.rows().len();
         if row_count == 0 {

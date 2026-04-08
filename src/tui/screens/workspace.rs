@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Style, Stylize};
@@ -8,21 +7,20 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::config::Config;
-use crate::tui::action::{Action, ActionScope, KeyMap};
+use crate::config::{Config, Tier};
+use crate::tui::action::{Action, ActionScope};
 use crate::tui::screen::{Screen, Transition};
 use crate::tui::screens::setup::SetupScreen;
-use crate::tui::screens::transform::TransformScreen;
+use crate::tui::screens::stage_view::StageView;
 use crate::tui::screens::variant::VariantScreen;
 use crate::tui::shell::graph_strip::compute_graph;
-use crate::tui::shell::{Binding, ErrorMessage, ScreenChrome, Shell};
-use crate::tui::stages::types::ArtifactKind as StageArtifact;
-use crate::tui::stages::{Stage, StageId, STAGES};
+use crate::tui::shell::{ErrorMessage, ScreenChrome, Shell};
+use crate::tui::stages::types::{ArtifactKind as StageArtifact, SessionCtx};
+use crate::tui::stages::{self, Stage};
 use crate::tui::state::artifacts::{Artifact, ArtifactKind};
 use crate::tui::state::workspace::WorkspaceState;
 use crate::tui::state::SessionState;
 use crate::tui::theme;
-use crate::tui::widgets::log_tail::LogTail;
 
 pub struct WorkspaceScreen {
     title: String,
@@ -136,11 +134,7 @@ fn present_kinds(state: &WorkspaceState) -> Vec<StageArtifact> {
 }
 
 fn next_stage_for(kind: &ArtifactKind) -> Option<&'static dyn Stage> {
-    let sk = classify(kind)?;
-    STAGES
-        .iter()
-        .copied()
-        .find(|s| s.inputs().contains(&sk))
+    stages::next_for(classify(kind)?)
 }
 
 fn can_browse(kind: &ArtifactKind) -> bool {
@@ -152,12 +146,16 @@ fn can_browse(kind: &ArtifactKind) -> bool {
     )
 }
 
-fn open_next(stage_id: StageId, art: &Artifact) -> Option<Box<dyn Screen>> {
-    match stage_id.as_str() {
-        "ingest" => Some(Box::new(TransformScreen::new_ingest(Some(art)))),
-        "annotate" => Some(Box::new(TransformScreen::new_annotate(art))),
-        _ => None,
-    }
+fn open_next(stage: &'static dyn Stage, art: &Artifact) -> Box<dyn Screen> {
+    let cfg = Config::load().ok();
+    let tier = cfg.as_ref().map(|c| c.data.tier).unwrap_or(Tier::Base);
+    let data_root = cfg.map(|c| c.root_dir()).unwrap_or_default();
+    let ctx = SessionCtx {
+        data_root: &data_root,
+        tier,
+        focused: Some(art.path.as_path()),
+    };
+    Box::new(StageView::new(stage, ctx))
 }
 
 fn fmt_size(n: u64) -> String {
@@ -186,7 +184,7 @@ impl Screen for WorkspaceScreen {
         self.sync_focus();
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
+    fn draw(&mut self, frame: &mut Frame, area: Rect) {
         if self.state.drain_scan() {
             self.try_apply_pending_focus();
             self.sync_focus();
@@ -289,19 +287,11 @@ impl Screen for WorkspaceScreen {
             }
         };
 
-        let hint = [
-            Binding::new((KeyCode::Enter, KeyModifiers::NONE), "open next"),
-            Binding::new((KeyCode::Char('v'), KeyModifiers::NONE), "browse"),
-            Binding::new((KeyCode::Char('r'), KeyModifiers::NONE), "rescan"),
-            Binding::new((KeyCode::Char('s'), KeyModifiers::NONE), "setup"),
-            Binding::new((KeyCode::Char('q'), KeyModifiers::NONE), "quit"),
-        ];
-
         let chrome = ScreenChrome {
             title: &self.title,
             status: None,
             error: self.error.as_ref(),
-            hint: &hint,
+            scope: ActionScope::Workspace,
             graph: Some(graph),
         };
 
@@ -336,21 +326,6 @@ impl Screen for WorkspaceScreen {
         ActionScope::Workspace
     }
 
-    fn keys(&self) -> KeyMap {
-        let none = KeyModifiers::NONE;
-        KeyMap::new()
-            .bind(KeyCode::Char('q'), none, Action::Quit)
-            .bind(KeyCode::Esc, none, Action::Quit)
-            .bind(KeyCode::Down, none, Action::WorkspaceDown)
-            .bind(KeyCode::Char('j'), none, Action::WorkspaceDown)
-            .bind(KeyCode::Up, none, Action::WorkspaceUp)
-            .bind(KeyCode::Char('k'), none, Action::WorkspaceUp)
-            .bind(KeyCode::Char('r'), none, Action::WorkspaceRescan)
-            .bind(KeyCode::Enter, none, Action::WorkspaceOpenFocused)
-            .bind(KeyCode::Char('v'), none, Action::WorkspaceBrowseFocused)
-            .bind(KeyCode::Char('s'), none, Action::WorkspaceOpenSetup)
-    }
-
     fn on_action(&mut self, action: Action) -> Transition {
         match action {
             Action::Quit => Transition::Quit,
@@ -376,10 +351,8 @@ impl Screen for WorkspaceScreen {
                     return Transition::Stay;
                 };
                 if let Some(stage) = next_stage_for(&a.kind) {
-                    if let Some(screen) = open_next(stage.id(), a) {
-                        self.error = None;
-                        return Transition::Push(screen);
-                    }
+                    self.error = None;
+                    return Transition::Push(open_next(stage, a));
                 }
                 if can_browse(&a.kind) {
                     return self.browse_focused();

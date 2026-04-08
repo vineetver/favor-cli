@@ -1,9 +1,11 @@
+use std::path::{Path, PathBuf};
+
 use crate::commands::AnnotateConfig;
 use crate::config::Tier;
 
 use super::types::{
     ArtifactKind, FormError, FormField, FormSchema, FormValues, PathKind, RunRequest, SessionCtx,
-    StageGroup, StageId,
+    StageId,
 };
 use super::Stage;
 
@@ -19,9 +21,6 @@ impl Stage for AnnotateStage {
     fn label(&self) -> &'static str {
         "Annotate"
     }
-    fn group(&self) -> StageGroup {
-        StageGroup::Annotate
-    }
     fn inputs(&self) -> &'static [ArtifactKind] {
         INPUTS
     }
@@ -30,19 +29,21 @@ impl Stage for AnnotateStage {
     }
 
     fn form_schema(&self, ctx: &SessionCtx) -> FormSchema {
+        let focused_input = ctx.focused.map(|p| p.to_path_buf());
+        let default_output = focused_input.as_deref().map(default_annotate_output);
         FormSchema {
             fields: vec![
                 FormField::Path {
                     id: "input",
                     label: "input",
-                    kind: PathKind::File,
-                    default: None,
+                    kind: PathKind::Dir,
+                    default: focused_input,
                 },
                 FormField::Path {
                     id: "output",
                     label: "output",
-                    kind: PathKind::File,
-                    default: None,
+                    kind: PathKind::Dir,
+                    default: default_output,
                 },
                 FormField::Choice {
                     id: "tier",
@@ -85,4 +86,17 @@ impl Stage for AnnotateStage {
             data_root,
         }))
     }
+}
+
+fn default_annotate_output(input: &Path) -> PathBuf {
+    let name = input
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let stem = name.strip_suffix(".ingested").unwrap_or(&name);
+    input
+        .parent()
+        .unwrap_or(input)
+        .join(format!("{stem}.annotated"))
 }

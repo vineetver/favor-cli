@@ -17,7 +17,6 @@ use crate::tui::stages::types::{FormField, FormSchema, PathKind};
 use crate::tui::theme::{self, Tone, FOCUS_GLYPH};
 use crate::tui::widgets::file_picker::{self, tab_complete, DirBrowserState};
 use crate::tui::widgets::form::{Form, FormOutcome};
-use crate::tui::widgets::log_tail::LogTail;
 
 const MEMORY_PRESETS: &[&str] = &["auto", "8GB", "16GB", "32GB", "64GB", "128GB", "256GB"];
 
@@ -85,7 +84,6 @@ fn build_schema(cfg: &Config) -> FormSchema {
             FormField::MultiSelect {
                 id: "packs",
                 label: "packs",
-                options: &[],
                 default: &[],
             },
         ],
@@ -542,7 +540,7 @@ impl Screen for SetupScreen {
         map
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
+    fn draw(&mut self, frame: &mut Frame, area: Rect) {
         if area.width < 80 || area.height < 24 {
             let msg = Paragraph::new(Line::from(Span::styled(
                 "terminal too small (need 80x24)",

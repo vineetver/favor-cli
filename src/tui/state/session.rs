@@ -5,54 +5,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::cli::GenomeBuild;
-use crate::config::Tier;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BuildTag {
-    Hg38,
-    Hg19,
-}
-
-impl BuildTag {
-    pub fn from_build(b: &GenomeBuild) -> Self {
-        match b {
-            GenomeBuild::Hg38 => BuildTag::Hg38,
-            GenomeBuild::Hg19 => BuildTag::Hg19,
-        }
-    }
-    #[allow(dead_code)]
-    pub fn to_build(self) -> GenomeBuild {
-        match self {
-            BuildTag::Hg38 => GenomeBuild::Hg38,
-            BuildTag::Hg19 => GenomeBuild::Hg19,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionState {
     pub cwd: PathBuf,
     pub last_artifact: Option<PathBuf>,
-    pub transform: Option<TransformSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TransformSnapshot {
-    Ingest {
-        inputs: Vec<PathBuf>,
-        output: Option<PathBuf>,
-        emit_sql: bool,
-        build: Option<BuildTag>,
-    },
-    Annotate {
-        input: PathBuf,
-        output: Option<PathBuf>,
-        tier: Tier,
-        data_root: PathBuf,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -148,21 +104,11 @@ mod tests {
         let state = SessionState {
             cwd: PathBuf::from("/some/cwd"),
             last_artifact: Some(PathBuf::from("/some/cwd/x.parquet")),
-            transform: Some(TransformSnapshot::Ingest {
-                inputs: vec![PathBuf::from("a.vcf.gz")],
-                output: None,
-                emit_sql: true,
-                build: Some(BuildTag::Hg38),
-            }),
         };
         store.save(&id, &state).unwrap();
         let loaded = store.load(&id).unwrap().unwrap();
         assert_eq!(loaded.cwd, state.cwd);
         assert_eq!(loaded.last_artifact, state.last_artifact);
-        match loaded.transform {
-            Some(TransformSnapshot::Ingest { emit_sql, .. }) => assert!(emit_sql),
-            _ => panic!("expected ingest snapshot"),
-        }
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -182,13 +128,11 @@ mod tests {
         let s1 = SessionState {
             cwd: PathBuf::from("/atomic"),
             last_artifact: None,
-            transform: None,
         };
         store.save(&id, &s1).unwrap();
         let s2 = SessionState {
             cwd: PathBuf::from("/atomic"),
             last_artifact: Some(PathBuf::from("/atomic/y")),
-            transform: None,
         };
         store.save(&id, &s2).unwrap();
         let loaded = store.load(&id).unwrap().unwrap();

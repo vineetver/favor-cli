@@ -16,18 +16,17 @@ use crate::output::Output;
 
 use super::action::{Action, KeyMap};
 use super::event::AppEvent;
-use super::output::{BarRegistry, LogLevel, LogLine, ProgressSnapshot, TuiOutput};
-use super::screen::{RunRequest, Screen, Transition};
+use super::output::{BarRegistry, LogLine, ProgressSnapshot, TuiOutput};
+use super::screen::{Screen, Transition};
 use super::screens::help::HelpScreen;
+use super::stages::types::RunRequest;
 use super::state::{SessionId, SessionState, SessionStore};
-use super::widgets::log_tail::LogTail;
 use super::widgets::palette::{Palette, PaletteOutcome};
-use super::widgets::run_overlay::{dim_area, RunOutcome, RunOverlay};
+use super::widgets::run_overlay::{dim_area, RunOverlay};
+use crate::staar::pipeline::StaarPipeline;
 
 struct BarEntry {
-    id: u64,
     arc: Arc<ProgressBar>,
-    finished_once: bool,
 }
 
 pub struct App {
@@ -35,8 +34,6 @@ pub struct App {
     log_rx: Receiver<LogLine>,
     shared_bars: BarRegistry,
     bars: Vec<BarEntry>,
-    next_bar_id: u64,
-    log: LogTail,
     tui_out: Arc<TuiOutput>,
     cmd_tx: Sender<Result<(), CohortError>>,
     cmd_rx: Receiver<Result<(), CohortError>>,
@@ -77,8 +74,6 @@ impl App {
             log_rx,
             shared_bars,
             bars: Vec::new(),
-            next_bar_id: 0,
-            log: LogTail::new(256),
             tui_out,
             cmd_tx,
             cmd_rx,
@@ -114,14 +109,13 @@ impl App {
                 last_title = current_title;
             }
             {
-                let log_ref: &LogTail = &self.log;
                 let palette_ref = self.palette.as_ref();
                 let overlay_ref = self.overlay.as_ref();
                 let screen = &mut self.screens[top_idx];
                 terminal
                     .draw(|f| {
                         let area = f.area();
-                        screen.draw(f, area, log_ref);
+                        screen.draw(f, area);
                         if let Some(o) = overlay_ref {
                             let buf = f.buffer_mut();
                             dim_area(area, buf);
@@ -145,22 +139,9 @@ impl App {
                             return Ok(());
                         }
                         if let Some(overlay) = self.overlay.as_mut() {
-                            if let Some(outcome) = overlay.handle(k) {
+                            if overlay.handle(k).is_some() {
                                 debug_assert!(overlay.is_finished());
                                 self.overlay = None;
-                                match outcome {
-                                    RunOutcome::Succeeded { artifact } => {
-                                        let _ = self.screens[top_idx]
-                                            .handle(&AppEvent::RunFinished(artifact));
-                                    }
-                                    RunOutcome::Failed { error } => {
-                                        self.log.push_log(LogLine {
-                                            level: LogLevel::Error,
-                                            message: error,
-                                        });
-                                    }
-                                    RunOutcome::Cancelled => {}
-                                }
                             }
                             continue;
                         }
@@ -271,11 +252,6 @@ impl App {
                 self.screens.push(s);
                 true
             }
-            Transition::Replace(s) => {
-                self.screens.pop();
-                self.screens.push(s);
-                true
-            }
             Transition::Run(req) => {
                 let cancel = self.tui_out.arm_cancel();
                 self.overlay = Some(RunOverlay::launch(&req, cancel));
@@ -300,17 +276,11 @@ impl App {
                 if let Some(o) = self.overlay.as_mut() {
                     o.push_log(line.clone());
                 }
-                self.log.push_log(line.clone());
             }
             AppEvent::ProgressUpdate(snap) => {
                 if let Some(o) = self.overlay.as_mut() {
                     o.push_progress(snap.clone());
                 }
-                self.log.push_snapshot(snap.clone());
-            }
-            AppEvent::ProgressSweep(id) => self.log.sweep(*id),
-            AppEvent::RunFinished(path) => {
-                let _ = path.as_path();
             }
             AppEvent::CommandDone(res) => {
                 if let Some(o) = self.overlay.as_mut() {
@@ -336,9 +306,7 @@ impl App {
         {
             let mut shared = self.shared_bars.lock().unwrap();
             for arc in shared.drain(..) {
-                let id = self.next_bar_id;
-                self.next_bar_id += 1;
-                self.bars.push(BarEntry { id, arc, finished_once: false });
+                self.bars.push(BarEntry { arc });
             }
         }
         for entry in &self.bars {
@@ -347,26 +315,13 @@ impl App {
             let length = length_opt.unwrap_or(u64::MAX);
             let indeterminate = length_opt.map(|l| l == u64::MAX).unwrap_or(true);
             events.push(AppEvent::ProgressUpdate(ProgressSnapshot {
-                id: entry.id,
                 position: pb.position(),
                 length,
                 message: pb.message().to_string(),
                 indeterminate,
-                finished: pb.is_finished(),
             }));
         }
-        let mut keep = Vec::with_capacity(self.bars.len());
-        for mut entry in self.bars.drain(..) {
-            if entry.arc.is_finished() && entry.finished_once {
-                events.push(AppEvent::ProgressSweep(entry.id));
-            } else {
-                if entry.arc.is_finished() {
-                    entry.finished_once = true;
-                }
-                keep.push(entry);
-            }
-        }
-        self.bars = keep;
+        self.bars.retain(|entry| !entry.arc.is_finished());
         events
     }
 }
@@ -375,6 +330,8 @@ fn dispatch(req: RunRequest, out: &dyn Output) -> Result<(), CohortError> {
     match req {
         RunRequest::Ingest(cfg) => commands::ingest::run_ingest(&cfg, out),
         RunRequest::Annotate(cfg) => commands::annotate::run_annotate(&cfg, out),
+        RunRequest::Staar(cfg) => StaarPipeline::new(*cfg, out)?.run(),
+        RunRequest::MetaStaar(cfg) => commands::meta_staar::run_meta_staar(&cfg, out),
     }
 }
 

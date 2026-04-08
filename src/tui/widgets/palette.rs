@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::action::{format_binding, Action, ActionScope};
+use crate::tui::action::{format_binding, Action, ActionScope, KeyMap};
 use crate::tui::theme;
 
 pub enum PaletteOutcome {
@@ -244,13 +244,29 @@ impl Palette {
         frame.render_widget(Paragraph::new(lines), body_area);
 
         let action_count = self.matches.len();
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("{} match{}    enter run    esc close", action_count, if action_count == 1 { "" } else { "es" }),
-                theme::hint_bar_style(),
+        let mut spans: Vec<Span> = vec![Span::styled(
+            format!(
+                "{} match{}    ",
+                action_count,
+                if action_count == 1 { "" } else { "es" }
             ),
-        ]));
-        frame.render_widget(footer, footer_area);
+            theme::hint_bar_style(),
+        )];
+        for (i, (code, mods, action)) in KeyMap::for_scope(ActionScope::Palette)
+            .entries()
+            .iter()
+            .enumerate()
+        {
+            if i > 0 {
+                spans.push(Span::styled("  ", theme::hint_bar_style()));
+            }
+            spans.push(Span::styled(
+                format_binding(*code, *mods),
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(format!(" {}", action.title()), theme::hint_bar_style()));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), footer_area);
     }
 }
 

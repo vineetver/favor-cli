@@ -23,12 +23,10 @@ pub struct LogLine {
 
 #[derive(Debug, Clone)]
 pub struct ProgressSnapshot {
-    pub id: u64,
     pub position: u64,
     pub length: u64,
     pub message: String,
     pub indeterminate: bool,
-    pub finished: bool,
 }
 
 pub type BarRegistry = Arc<Mutex<Vec<Arc<ProgressBar>>>>;

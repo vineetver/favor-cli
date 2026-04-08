@@ -4,7 +4,7 @@ use crate::commands::{parse_mask_categories, MetaStaarConfig};
 
 use super::types::{
     ArtifactKind, FormError, FormField, FormSchema, FormValues, PathKind, RunRequest, SessionCtx,
-    StageGroup, StageId,
+    StageId,
 };
 use super::Stage;
 
@@ -13,7 +13,6 @@ pub struct MetaStaarStage;
 const INPUTS: &[ArtifactKind] = &[ArtifactKind::SumStats];
 const OUTPUTS: &[ArtifactKind] = &[ArtifactKind::MetaStaarResults];
 
-const MASK_OPTIONS: &[&str] = &["coding", "noncoding", "sliding-window", "scang"];
 const MASK_DEFAULT: &[&str] = &["coding"];
 
 impl Stage for MetaStaarStage {
@@ -23,9 +22,6 @@ impl Stage for MetaStaarStage {
     fn label(&self) -> &'static str {
         "Meta-STAAR"
     }
-    fn group(&self) -> StageGroup {
-        StageGroup::Meta
-    }
     fn inputs(&self) -> &'static [ArtifactKind] {
         INPUTS
     }
@@ -33,19 +29,19 @@ impl Stage for MetaStaarStage {
         OUTPUTS
     }
 
-    fn form_schema(&self, _ctx: &SessionCtx) -> FormSchema {
+    fn form_schema(&self, ctx: &SessionCtx) -> FormSchema {
+        let focused = ctx.focused.map(|p| p.to_path_buf());
         FormSchema {
             fields: vec![
                 FormField::Path {
                     id: "studies",
                     label: "studies",
                     kind: PathKind::Any,
-                    default: None,
+                    default: focused,
                 },
                 FormField::MultiSelect {
                     id: "masks",
                     label: "masks",
-                    options: MASK_OPTIONS,
                     default: MASK_DEFAULT,
                 },
                 FormField::Path {
@@ -72,13 +68,9 @@ impl Stage for MetaStaarStage {
 
     fn build_command(&self, values: &FormValues) -> Result<RunRequest, FormError> {
         let study_dirs: Vec<PathBuf> = values
-            .paths("studies")
-            .cloned()
-            .or_else(|| values.path("studies").map(|p| vec![p.clone()]))
+            .path("studies")
+            .map(|p| vec![p.clone()])
             .ok_or(FormError::Missing("studies"))?;
-        if study_dirs.is_empty() {
-            return Err(FormError::Missing("studies"));
-        }
         let masks_raw: Vec<String> = values
             .multi("masks")
             .cloned()

@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::commands::IngestConfig;
 
 use super::types::{
     ArtifactKind, FormError, FormField, FormSchema, FormValues, PathKind, RunRequest, SessionCtx,
-    StageGroup, StageId,
+    StageId,
 };
 use super::Stage;
 
@@ -20,9 +20,6 @@ impl Stage for IngestStage {
     fn label(&self) -> &'static str {
         "Ingest VCF"
     }
-    fn group(&self) -> StageGroup {
-        StageGroup::Ingest
-    }
     fn inputs(&self) -> &'static [ArtifactKind] {
         INPUTS
     }
@@ -30,20 +27,22 @@ impl Stage for IngestStage {
         OUTPUTS
     }
 
-    fn form_schema(&self, _ctx: &SessionCtx) -> FormSchema {
+    fn form_schema(&self, ctx: &SessionCtx) -> FormSchema {
+        let focused_input = ctx.focused.map(|p| p.to_path_buf());
+        let default_output = focused_input.as_deref().map(default_ingest_output);
         FormSchema {
             fields: vec![
                 FormField::Path {
                     id: "inputs",
                     label: "inputs",
                     kind: PathKind::Any,
-                    default: None,
+                    default: focused_input,
                 },
                 FormField::Path {
                     id: "output",
                     label: "output",
-                    kind: PathKind::File,
-                    default: None,
+                    kind: PathKind::Dir,
+                    default: default_output,
                 },
             ],
             advanced: vec![
@@ -64,13 +63,9 @@ impl Stage for IngestStage {
 
     fn build_command(&self, values: &FormValues) -> Result<RunRequest, FormError> {
         let inputs: Vec<PathBuf> = values
-            .paths("inputs")
-            .cloned()
-            .or_else(|| values.path("inputs").map(|p| vec![p.clone()]))
+            .path("inputs")
+            .map(|p| vec![p.clone()])
             .ok_or(FormError::Missing("inputs"))?;
-        if inputs.is_empty() {
-            return Err(FormError::Missing("inputs"));
-        }
         let output = values
             .path("output")
             .cloned()
@@ -88,4 +83,26 @@ impl Stage for IngestStage {
             build_override,
         }))
     }
+}
+
+fn default_ingest_output(first: &Path) -> PathBuf {
+    let stem = first
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let stem = stem
+        .strip_suffix(".vcf")
+        .or_else(|| stem.strip_suffix(".tsv"))
+        .or_else(|| stem.strip_suffix(".csv"))
+        .unwrap_or(&stem);
+    let stem = stem
+        .split("_b0_")
+        .next()
+        .or_else(|| stem.split("_b0.").next())
+        .unwrap_or(stem);
+    first
+        .parent()
+        .unwrap_or(first)
+        .join(format!("{stem}.ingested"))
 }

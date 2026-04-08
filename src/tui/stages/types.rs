@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::commands::{AnnotateConfig, IngestConfig, MetaStaarConfig};
 use crate::config::Tier;
@@ -7,22 +7,6 @@ use crate::staar::pipeline::StaarConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StageId(pub &'static str);
-
-impl StageId {
-    pub const fn as_str(&self) -> &'static str {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StageGroup {
-    Ingest,
-    Annotate,
-    Test,
-    Meta,
-    #[allow(dead_code)]
-    Report,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactKind {
@@ -74,7 +58,6 @@ pub enum FormField {
     MultiSelect {
         id: &'static str,
         label: &'static str,
-        options: &'static [&'static str],
         default: &'static [&'static str],
     },
 }
@@ -110,15 +93,11 @@ impl<T> FieldValue<T> {
             Self::Inferred(v) | Self::Edited(v) => v,
         }
     }
-    pub fn is_edited(&self) -> bool {
-        matches!(self, Self::Edited(_))
-    }
 }
 
 #[derive(Debug, Clone)]
 pub enum FieldData {
     Path(FieldValue<Option<PathBuf>>),
-    Paths(FieldValue<Vec<PathBuf>>),
     Choice(FieldValue<Option<String>>),
     Toggle(FieldValue<bool>),
     Text(FieldValue<String>),
@@ -132,20 +111,9 @@ pub struct FormValues {
 }
 
 impl FormValues {
-    pub fn get(&self, id: &str) -> Option<&FieldData> {
-        self.values.get(id)
-    }
-
     pub fn path(&self, id: &str) -> Option<&PathBuf> {
         match self.values.get(id)? {
             FieldData::Path(v) => v.get().as_ref(),
-            _ => None,
-        }
-    }
-
-    pub fn paths(&self, id: &str) -> Option<&Vec<PathBuf>> {
-        match self.values.get(id)? {
-            FieldData::Paths(v) => Some(v.get()),
             _ => None,
         }
     }
@@ -193,9 +161,9 @@ pub enum FormError {
 }
 
 pub struct SessionCtx<'a> {
-    pub data_root: &'a std::path::Path,
+    pub data_root: &'a Path,
     pub tier: Tier,
-    pub artifacts: &'a [PathBuf],
+    pub focused: Option<&'a Path>,
 }
 
 pub enum RunRequest {
@@ -203,4 +171,43 @@ pub enum RunRequest {
     Annotate(AnnotateConfig),
     Staar(Box<StaarConfig>),
     MetaStaar(MetaStaarConfig),
+}
+
+impl RunRequest {
+    pub fn description(&self) -> String {
+        match self {
+            RunRequest::Ingest(cfg) => {
+                let first = cfg
+                    .inputs
+                    .first()
+                    .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if cfg.inputs.len() > 1 {
+                    format!("Ingesting {first} (+{} more)", cfg.inputs.len() - 1)
+                } else {
+                    format!("Ingesting {first}")
+                }
+            }
+            RunRequest::Annotate(cfg) => {
+                let name = cfg.input.file_name().unwrap_or_default().to_string_lossy();
+                format!("Annotating {name} ({} tier)", cfg.tier.as_str())
+            }
+            RunRequest::Staar(cfg) => {
+                let trait_name = cfg.trait_names.first().cloned().unwrap_or_default();
+                format!("STAAR {trait_name}")
+            }
+            RunRequest::MetaStaar(cfg) => {
+                format!("Meta-STAAR ({} studies)", cfg.study_dirs.len())
+            }
+        }
+    }
+
+    pub fn expected_artifact(&self) -> PathBuf {
+        match self {
+            RunRequest::Ingest(cfg) => cfg.output.clone(),
+            RunRequest::Annotate(cfg) => cfg.output.clone(),
+            RunRequest::Staar(cfg) => cfg.output_dir.clone(),
+            RunRequest::MetaStaar(cfg) => cfg.output_dir.clone(),
+        }
+    }
 }

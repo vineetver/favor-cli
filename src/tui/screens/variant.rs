@@ -26,7 +26,6 @@ use crate::tui::screen::{Screen, Transition};
 use crate::tui::state::arrow_predicate::CompiledFilter;
 use crate::tui::state::parquet_scroller::{ParquetScroller, RowFilterFactory};
 use crate::tui::theme;
-use crate::tui::widgets::log_tail::LogTail;
 use crate::tui::widgets::status_bar::StatusBar;
 
 pub struct VariantScreen {
@@ -704,7 +703,7 @@ impl Screen for VariantScreen {
         &self.title
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
+    fn draw(&mut self, frame: &mut Frame, area: Rect) {
         let modal_height: u16 = match &self.modal {
             VariantModal::Filter(_) => 2,
             VariantModal::Carrier(_) => 10,
