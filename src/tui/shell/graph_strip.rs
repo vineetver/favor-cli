@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
