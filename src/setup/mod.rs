@@ -1,5 +1,3 @@
-mod tui;
-
 use std::path::PathBuf;
 
 use serde_json::json;
@@ -11,6 +9,7 @@ use crate::error::CohortError;
 use crate::output::Output;
 use crate::output::OutputMode;
 use crate::resource::Resources;
+use crate::tui;
 
 pub fn init(
     path: Option<PathBuf>,
@@ -232,44 +231,31 @@ pub fn setup(
         ));
     }
 
-    // 1. Pick tier — returns Tier directly, no index mapping
-    let tier = match tui::select_tier().map_err(|e| CohortError::Internal(e.into()))? {
-        Some(t) => t,
+    let initial_env = match &cli_environment {
+        Some(s) => Some(s.parse::<Environment>()?),
+        None => None,
+    };
+    if let Some(budget) = &cli_memory_budget {
+        if ResourceConfig::parse_memory_bytes(budget).is_none() {
+            return Err(CohortError::Input(format!(
+                "Cannot parse memory budget '{budget}'. Use format like '16GB', '64G', '8192MB'."
+            )));
+        }
+    }
+
+    let outcome = match tui::run_setup_only(initial_env, cli_memory_budget.clone())? {
+        Some(o) => o,
         None => {
             output.warn("Setup cancelled");
             return Ok(());
         }
     };
 
-    // 2. Pick root directory — browser shows live data probe
-    let cwd = std::env::current_dir().unwrap_or_else(|_| Config::default_root_dir());
-    let root = match tui::select_directory("Select FAVOR data root directory", &cwd)
-        .map_err(|e| CohortError::Internal(e.into()))?
-    {
-        Some(p) => p,
-        None => {
-            output.warn("Setup cancelled");
-            return Ok(());
-        }
-    };
-
-    // 3. Pick add-on packs — detect what's already installed on disk
-    let optional_packs = Pack::optional();
-    let installed_pack_ids: Vec<String> = optional_packs
-        .iter()
-        .filter(|p| p.tables.iter().any(|t| p.local_dir(&root).join(t).is_dir()))
-        .map(|p| p.id.to_string())
-        .collect();
-    let selected_packs = tui::select_packs(&optional_packs, &installed_pack_ids)
-        .map_err(|e| CohortError::Internal(e.into()))?
-        .unwrap_or_default(); // Esc = skip, not cancel
-
-    // 4. Environment selection — HPC or workstation?
-    let environment = if let Some(env_str) = &cli_environment {
-        Some(env_str.parse::<Environment>()?)
-    } else {
-        tui::select_environment().map_err(|e| CohortError::Internal(e.into()))?
-    };
+    let tier = outcome.tier;
+    let root = outcome.root;
+    let selected_packs = outcome.packs;
+    let environment = outcome.environment;
+    let memory_budget = outcome.memory_budget;
 
     if environment == Some(Environment::Hpc) {
         let has_srun = std::process::Command::new("which")
@@ -293,20 +279,7 @@ pub fn setup(
         }
     }
 
-    // 5. Memory budget selection
     let res_detect = Resources::detect();
-    let memory_budget = if let Some(budget) = &cli_memory_budget {
-        if ResourceConfig::parse_memory_bytes(budget).is_none() {
-            return Err(CohortError::Input(format!(
-                "Cannot parse memory budget '{budget}'. Use format like '16GB', '64G', '8192MB'."
-            )));
-        }
-        Some(budget.clone())
-    } else {
-        tui::select_memory_budget(&res_detect).map_err(|e| CohortError::Internal(e.into()))?
-    };
-
-    // 6. Probe the chosen root to show what's already there
     let probe = DirProbe::scan(&root);
 
     output.status("COHORT Configuration");

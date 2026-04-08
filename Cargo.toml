@@ -10,7 +10,7 @@ homepage = "https://github.com/vineetver/cohort-cli"
 readme = "README.md"
 keywords = ["genomics", "staar", "rare-variant", "association-testing", "annotation"]
 categories = ["science", "command-line-utilities"]
-authors = ["Xihong Lin Lab <xlin@hsph.harvard.edu>"]
+authors = ["Vineet Verma <vineetver@hotmail.com>"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -25,6 +25,7 @@ ureq = "3"
 dirs = "6"
 sha2 = "0.10"
 memmap2 = "0.9"
+nucleo-matcher = "0.3"
 faer = "0.22"
 statrs = "0.18"
 rayon = "1.10"

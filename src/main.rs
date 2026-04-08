@@ -14,6 +14,7 @@ mod staar;
 #[cfg(test)]
 mod test_fixtures;
 mod setup;
+mod tui;
 mod types;
 
 use cli::{Cli, Command};
@@ -39,11 +40,20 @@ fn main() {
 }
 
 fn run(
-    command: Command,
+    command: Option<Command>,
     out: &dyn output::Output,
     mode: &OutputMode,
     dry_run: bool,
 ) -> Result<(), CohortError> {
+    let command = match command {
+        Some(c) => c,
+        None => {
+            let cwd = std::env::current_dir().map_err(|e| {
+                CohortError::Resource(format!("Cannot determine current directory: {e}"))
+            })?;
+            return tui::run(cwd, out, mode);
+        }
+    };
     match command {
         Command::Init { path, force } => setup::init(path, force, out, mode),
         Command::Setup { environment, memory_budget } => {
