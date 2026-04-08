@@ -49,6 +49,10 @@ impl OutputMode {
 pub struct Progress(Option<Arc<indicatif::ProgressBar>>);
 
 impl Progress {
+    pub fn from_arc(pb: Arc<indicatif::ProgressBar>) -> Self {
+        Progress(Some(pb))
+    }
+
     #[inline]
     pub fn inc(&self, n: u64) {
         if let Some(p) = &self.0 {

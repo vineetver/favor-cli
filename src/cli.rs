@@ -21,7 +21,7 @@ pub enum GenomeBuild {
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 
     /// Output format: auto (detect tty), json (machine), human (forced)
     #[arg(long, global = true, default_value = "auto")]
