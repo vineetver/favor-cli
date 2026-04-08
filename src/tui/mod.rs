@@ -4,6 +4,7 @@ pub mod event;
 pub mod output;
 pub mod screen;
 pub mod screens;
+pub mod shell;
 mod smoke;
 pub mod state;
 pub mod term;
