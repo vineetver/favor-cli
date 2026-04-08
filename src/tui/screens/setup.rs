@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::config::{Config, Environment, ResourceConfig, Tier};
@@ -14,93 +14,22 @@ use crate::resource::Resources;
 use crate::tui::action::{Action, ActionScope, KeyMap};
 use crate::tui::event::AppEvent;
 use crate::tui::screen::{Screen, Transition};
-use crate::tui::theme;
+use crate::tui::theme::{self, Tone, FOCUS_GLYPH};
 use crate::tui::widgets::file_picker::{self, tab_complete, DirBrowserState};
 use crate::tui::widgets::log_tail::LogTail;
 
-struct TierOption {
-    tier: Tier,
-    summary: &'static str,
-    details: &'static [&'static str],
-}
-
-const TIERS: &[TierOption] = &[
-    TierOption {
-        tier: Tier::Base,
-        summary: "Curated annotations for most analyses",
-        details: &[
-            "Genes        GENCODE consequence, transcripts, hgvsc/hgvsp",
-            "Clinical     ClinVar significance, disease, review status",
-            "Frequency    gnomAD genome+exome (AF only), TOPMed, 1000G 6 pops",
-            "Coding       CADD, REVEL, SpliceAI, AlphaMissense, MaveDB",
-            "Noncoding    LINSIGHT, FATHMM-XF, GPN-MSA, JARVIS, ReMM, ncER",
-            "Conservation PhyloP, PhastCons (3 levels each), GERP, B-statistic",
-            "Constraint   gnomAD constraint score + phred",
-            "Integrative  13 aPC annotation principal component scores",
-            "Regulatory   MACIE, cV2F, cCRE, GeneHancer, CAGE, super enhancers",
-            "dbNSFP       15 of 30 predictors (REVEL, MetaSVM, BayesDel, ...)",
-            "Other        Mutation rate, distance to TSS/TSE",
-            "",
-            "Not in base: UCSC, RefSeq, COSMIC, ChromHMM, ENCODE histone marks,",
-            "  full gnomAD pops, 15 extra dbNSFP, mappability, variant density",
-        ],
-    },
-    TierOption {
-        tier: Tier::Full,
-        summary: "Complete FAVOR database - all annotations",
-        details: &[
-            "Genes        GENCODE + UCSC + RefSeq",
-            "Clinical     ClinVar, COSMIC cancer mutations",
-            "Frequency    gnomAD 9 pops + sex-stratified + FAF, TOPMed, 1000G",
-            "Coding       CADD, REVEL, SpliceAI, AlphaMissense, MaveDB",
-            "Noncoding    LINSIGHT, FATHMM-XF, GPN-MSA, JARVIS, ReMM, ncER,",
-            "             ncBoost, PGBoost, FunSeq, ALoFT",
-            "Conservation PhyloP, PhastCons (3 levels each), GERP, B-statistic",
-            "Constraint   gnomAD constraint score + phred",
-            "Integrative  13 aPC annotation principal component scores",
-            "Regulatory   MACIE, cV2F, cCRE, GeneHancer, CAGE, super enhancers",
-            "Epigenomics  ChromHMM 25 states, ENCODE 13 histone marks (raw+phred)",
-            "dbNSFP       All 30 predictors",
-            "Sequence     Variant density, ReMap, GC/CpG, mappability (4 levels)",
-            "Other        Mutation rate, distance, recombination, nucleotide div",
-        ],
-    },
+const TIERS: [(Tier, &str); 2] = [
+    (Tier::Base, "curated annotations for most analyses"),
+    (Tier::Full, "complete FAVOR database, all annotations"),
 ];
 
-struct EnvOption {
-    env: Environment,
-    label: &'static str,
-    description: &'static str,
-}
-
-const ENV_OPTIONS: &[EnvOption] = &[
-    EnvOption {
-        env: Environment::Hpc,
-        label: "HPC cluster",
-        description: "Shared cluster with SLURM (srun/sbatch). Memory budget is your \
-                       default; srun allocations automatically override it.",
-    },
-    EnvOption {
-        env: Environment::Workstation,
-        label: "Workstation",
-        description: "Personal machine or dedicated server. Memory budget is the \
-                       hard limit for all operations.",
-    },
-];
-
-struct MemoryPreset {
-    label: &'static str,
-    value: &'static str,
-    bytes: u64,
-}
-
-const MEMORY_PRESETS: &[MemoryPreset] = &[
-    MemoryPreset { label: "8 GB", value: "8GB", bytes: 8 * 1024 * 1024 * 1024 },
-    MemoryPreset { label: "16 GB", value: "16GB", bytes: 16 * 1024 * 1024 * 1024 },
-    MemoryPreset { label: "32 GB", value: "32GB", bytes: 32 * 1024 * 1024 * 1024 },
-    MemoryPreset { label: "64 GB", value: "64GB", bytes: 64 * 1024 * 1024 * 1024 },
-    MemoryPreset { label: "128 GB", value: "128GB", bytes: 128 * 1024 * 1024 * 1024 },
-    MemoryPreset { label: "256 GB", value: "256GB", bytes: 256 * 1024 * 1024 * 1024 },
+const MEMORY_PRESETS: &[(&str, u64)] = &[
+    ("8GB", 8 * 1024 * 1024 * 1024),
+    ("16GB", 16 * 1024 * 1024 * 1024),
+    ("32GB", 32 * 1024 * 1024 * 1024),
+    ("64GB", 64 * 1024 * 1024 * 1024),
+    ("128GB", 128 * 1024 * 1024 * 1024),
+    ("256GB", 256 * 1024 * 1024 * 1024),
 ];
 
 #[derive(Debug, Clone)]
@@ -112,50 +41,60 @@ pub struct SetupOutcome {
     pub memory_budget: Option<String>,
 }
 
-enum Stage {
-    Tier {
-        selected: usize,
-    },
-    Dir(DirBrowserState),
-    Packs {
-        cursor: usize,
-        checked: Vec<bool>,
-        installed: Vec<String>,
-    },
-    Env {
-        selected: usize,
-    },
-    Memory {
-        selected: usize,
-        custom_mode: bool,
-        custom_buf: String,
-    },
-}
-
 pub type OutcomeSink = Arc<Mutex<Option<SetupOutcome>>>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Tier,
+    Root,
+    Advanced,
+    Env,
+    Memory,
+    Packs,
+    Save,
+}
+
+enum Mode {
+    Form,
+    BrowseRoot(DirBrowserState),
+    EditMemory(String),
+    EditPacks(usize, Vec<bool>),
+}
+
 pub struct SetupScreen {
-    stage: Stage,
-    tier: Option<Tier>,
-    root: Option<PathBuf>,
-    packs: Option<Vec<String>>,
+    mode: Mode,
+    focus: Field,
+    advanced_open: bool,
+    tier: Tier,
+    root: PathBuf,
+    packs: Vec<String>,
     environment: Option<Environment>,
     memory_budget: Option<String>,
     resources: Resources,
     sink: Option<OutcomeSink>,
+    error: Option<String>,
 }
 
 impl SetupScreen {
     pub fn new() -> Self {
+        let cfg = Config::load().unwrap_or_default();
+        let root = if cfg.data.root_dir.is_empty() {
+            Config::default_root_dir()
+        } else {
+            PathBuf::from(&cfg.data.root_dir)
+        };
         Self {
-            stage: Stage::Tier { selected: 0 },
-            tier: None,
-            root: None,
-            packs: None,
-            environment: None,
-            memory_budget: None,
+            mode: Mode::Form,
+            focus: Field::Tier,
+            advanced_open: false,
+            tier: cfg.data.tier,
+            root,
+            packs: Vec::new(),
+            environment: cfg.resources.environment,
+            memory_budget: cfg.resources.memory_budget.clone(),
             resources: Resources::detect(),
             sink: None,
+            error: None,
         }
     }
 
@@ -165,105 +104,161 @@ impl SetupScreen {
         sink: OutcomeSink,
     ) -> Self {
         let mut s = Self::new();
-        s.environment = env;
-        s.memory_budget = memory_budget;
+        if env.is_some() {
+            s.environment = env;
+        }
+        if memory_budget.is_some() {
+            s.memory_budget = memory_budget;
+        }
         s.sink = Some(sink);
         s
     }
 
-    fn finish(&mut self) {
-        let Some(sink) = self.sink.as_ref() else {
-            return;
-        };
-        if let (Some(tier), Some(root)) = (self.tier, self.root.clone()) {
+    fn visible_fields(&self) -> Vec<Field> {
+        let mut v = vec![Field::Tier, Field::Root, Field::Advanced];
+        if self.advanced_open {
+            v.push(Field::Env);
+            v.push(Field::Memory);
+            v.push(Field::Packs);
+        }
+        v.push(Field::Save);
+        v
+    }
+
+    fn focus_index(&self) -> usize {
+        self.visible_fields()
+            .iter()
+            .position(|f| *f == self.focus)
+            .unwrap_or(0)
+    }
+
+    fn focus_next(&mut self) {
+        let v = self.visible_fields();
+        let i = (self.focus_index() + 1) % v.len();
+        self.focus = v[i];
+    }
+
+    fn focus_prev(&mut self) {
+        let v = self.visible_fields();
+        let n = v.len();
+        let i = (self.focus_index() + n - 1) % n;
+        self.focus = v[i];
+    }
+
+    fn save(&mut self) -> Transition {
+        if !self.root.is_dir() {
+            self.error = Some(format!("data root not a directory: {}", self.root.display()));
+            return Transition::Stay;
+        }
+        if let Some(sink) = self.sink.as_ref() {
             *sink.lock().unwrap() = Some(SetupOutcome {
-                tier,
-                root,
-                packs: self.packs.clone().unwrap_or_default(),
+                tier: self.tier,
+                root: self.root.clone(),
+                packs: self.packs.clone(),
                 environment: self.environment,
                 memory_budget: self.memory_budget.clone(),
             });
         }
+        Transition::Pop
     }
 
-    fn enter_dir_stage(&mut self) {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| Config::default_root_dir());
-        self.stage = Stage::Dir(DirBrowserState::new(
-            "Select FAVOR data root directory",
-            &cwd,
-        ));
+    fn open_browse(&mut self) {
+        let start = if self.root.is_dir() {
+            self.root.clone()
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| Config::default_root_dir())
+        };
+        self.mode = Mode::BrowseRoot(DirBrowserState::new("Select FAVOR data root", &start));
     }
 
-    fn enter_packs_stage(&mut self) {
-        let root = self.root.clone().unwrap_or_else(Config::default_root_dir);
+    fn open_edit_packs(&mut self) {
         let optional = Pack::optional();
-        let installed: Vec<String> = optional
-            .iter()
-            .filter(|p| p.tables.iter().any(|t| p.local_dir(&root).join(t).is_dir()))
-            .map(|p| p.id.to_string())
-            .collect();
         let checked: Vec<bool> = optional
             .iter()
-            .map(|p| installed.iter().any(|id| id == p.id))
+            .map(|p| self.packs.iter().any(|id| id == p.id))
             .collect();
-        self.stage = Stage::Packs { cursor: 0, checked, installed };
+        self.mode = Mode::EditPacks(0, checked);
     }
 
-    fn enter_env_stage(&mut self) {
-        if self.environment.is_some() {
-            self.enter_memory_stage();
-            return;
-        }
-        self.stage = Stage::Env { selected: 0 };
+    fn open_edit_memory(&mut self) {
+        let buf = self.memory_budget.clone().unwrap_or_default();
+        self.mode = Mode::EditMemory(buf);
     }
 
-    fn enter_memory_stage(&mut self) {
-        if self.memory_budget.is_some() {
-            self.finish();
-            return;
-        }
-        let detected = self.resources.memory_bytes;
-        let selected = MEMORY_PRESETS
-            .iter()
-            .rposition(|p| p.bytes <= detected * 100 / 80)
-            .unwrap_or(1);
-        self.stage = Stage::Memory {
-            selected,
-            custom_mode: false,
-            custom_buf: String::new(),
+    fn cycle_tier(&mut self) {
+        self.tier = match self.tier {
+            Tier::Base => Tier::Full,
+            Tier::Full => Tier::Base,
         };
     }
 
-    fn handle_tier(&mut self, code: KeyCode) -> Transition {
-        let Stage::Tier { selected } = &mut self.stage else {
-            return Transition::Stay;
+    fn cycle_env(&mut self) {
+        self.environment = match self.environment {
+            None => Some(Environment::Hpc),
+            Some(Environment::Hpc) => Some(Environment::Workstation),
+            Some(Environment::Workstation) => None,
         };
+    }
+
+    fn cycle_memory(&mut self) {
+        let cur = self.memory_budget.as_deref();
+        let idx = MEMORY_PRESETS.iter().position(|(v, _)| Some(*v) == cur);
+        let next = match idx {
+            None => 0,
+            Some(i) if i + 1 < MEMORY_PRESETS.len() => i + 1,
+            Some(_) => {
+                self.memory_budget = None;
+                return;
+            }
+        };
+        self.memory_budget = Some(MEMORY_PRESETS[next].0.to_string());
+    }
+
+    fn handle_form(&mut self, code: KeyCode) -> Transition {
+        self.error = None;
         match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                *selected = selected.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                if *selected < TIERS.len() - 1 {
-                    *selected += 1;
-                }
-            }
-            KeyCode::Enter => {
-                self.tier = Some(TIERS[*selected].tier);
-                self.enter_dir_stage();
-            }
-            KeyCode::Esc | KeyCode::Char('q') => {
-                return Transition::Pop;
-            }
+            KeyCode::Esc | KeyCode::Char('q') => return Transition::Pop,
+            KeyCode::Up | KeyCode::Char('k') => self.focus_prev(),
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => self.focus_next(),
+            KeyCode::Left | KeyCode::Char('h') => match self.focus {
+                Field::Tier => self.cycle_tier(),
+                Field::Env => self.cycle_env(),
+                Field::Memory => self.cycle_memory(),
+                _ => {}
+            },
+            KeyCode::Right | KeyCode::Char('l') => match self.focus {
+                Field::Tier => self.cycle_tier(),
+                Field::Env => self.cycle_env(),
+                Field::Memory => self.cycle_memory(),
+                _ => {}
+            },
+            KeyCode::Char(' ') => match self.focus {
+                Field::Tier => self.cycle_tier(),
+                Field::Env => self.cycle_env(),
+                Field::Memory => self.cycle_memory(),
+                Field::Advanced => self.advanced_open = !self.advanced_open,
+                Field::Root => self.open_browse(),
+                Field::Packs => self.open_edit_packs(),
+                Field::Save => return self.save(),
+            },
+            KeyCode::Enter => match self.focus {
+                Field::Tier => self.cycle_tier(),
+                Field::Root => self.open_browse(),
+                Field::Advanced => self.advanced_open = !self.advanced_open,
+                Field::Env => self.cycle_env(),
+                Field::Memory => self.open_edit_memory(),
+                Field::Packs => self.open_edit_packs(),
+                Field::Save => return self.save(),
+            },
             _ => {}
         }
         Transition::Stay
     }
 
-    fn handle_dir(&mut self, code: KeyCode) -> Transition {
-        let Stage::Dir(state) = &mut self.stage else {
+    fn handle_browse(&mut self, code: KeyCode) -> Transition {
+        let Mode::BrowseRoot(state) = &mut self.mode else {
             return Transition::Stay;
         };
-
         if state.typing_path {
             match code {
                 KeyCode::Enter => {
@@ -280,12 +275,10 @@ impl SetupScreen {
                 KeyCode::Backspace => {
                     state.input_buf.pop();
                 }
-                KeyCode::Char(c) => {
-                    state.input_buf.push(c);
-                }
+                KeyCode::Char(c) => state.input_buf.push(c),
                 KeyCode::Tab => {
-                    if let Some(completed) = tab_complete(&state.input_buf) {
-                        state.input_buf = completed;
+                    if let Some(c) = tab_complete(&state.input_buf) {
+                        state.input_buf = c;
                     }
                 }
                 _ => {}
@@ -296,49 +289,70 @@ impl SetupScreen {
             }
             return Transition::Stay;
         }
-
         match code {
             KeyCode::Up | KeyCode::Char('k') => state.select_up(),
             KeyCode::Down | KeyCode::Char('j') => state.select_down(),
-            KeyCode::Right | KeyCode::Enter => {
-                if let Some(selected) = state.enter_selected() {
-                    self.root = Some(selected);
-                    self.enter_packs_stage();
+            KeyCode::Right => {
+                if let Some(sel) = state.enter_selected() {
+                    self.root = sel;
+                    self.mode = Mode::Form;
                 }
             }
             KeyCode::Left | KeyCode::Backspace => state.go_parent(),
-            KeyCode::Char(' ') => {
-                self.root = Some(state.current_dir.clone());
-                self.enter_packs_stage();
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.root = state.current_dir.clone();
+                self.mode = Mode::Form;
             }
             KeyCode::Char('c') => {
                 let _ = std::fs::create_dir_all(&state.current_dir);
-                self.root = Some(state.current_dir.clone());
-                self.enter_packs_stage();
+                self.root = state.current_dir.clone();
+                self.mode = Mode::Form;
             }
             KeyCode::Char('/') | KeyCode::Char('g') => {
                 state.typing_path = true;
                 state.input_buf = state.current_dir.to_string_lossy().to_string();
             }
-            KeyCode::Esc | KeyCode::Char('q') => {
-                return Transition::Pop;
-            }
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Form,
             _ => {}
         }
         Transition::Stay
     }
 
-    fn handle_packs(&mut self, code: KeyCode) -> Transition {
-        let Stage::Packs { cursor, checked, .. } = &mut self.stage else {
+    fn handle_memory_edit(&mut self, code: KeyCode) -> Transition {
+        let Mode::EditMemory(buf) = &mut self.mode else {
             return Transition::Stay;
         };
-        let optional_count = Pack::optional().len();
         match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                *cursor = cursor.saturating_sub(1);
+            KeyCode::Enter => {
+                if buf.is_empty() {
+                    self.memory_budget = None;
+                    self.mode = Mode::Form;
+                } else if ResourceConfig::parse_memory_bytes(buf).is_some() {
+                    self.memory_budget = Some(buf.clone());
+                    self.mode = Mode::Form;
+                } else {
+                    self.error = Some(format!("invalid memory: {buf} (e.g. 48GB, 12288MB)"));
+                }
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                if *cursor + 1 < optional_count {
+            KeyCode::Esc => self.mode = Mode::Form,
+            KeyCode::Backspace => {
+                buf.pop();
+            }
+            KeyCode::Char(c) => buf.push(c),
+            _ => {}
+        }
+        Transition::Stay
+    }
+
+    fn handle_packs_edit(&mut self, code: KeyCode) -> Transition {
+        let Mode::EditPacks(cursor, checked) = &mut self.mode else {
+            return Transition::Stay;
+        };
+        let n = Pack::optional().len();
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                if *cursor + 1 < n {
                     *cursor += 1;
                 }
             }
@@ -346,484 +360,252 @@ impl SetupScreen {
                 checked[*cursor] = !checked[*cursor];
             }
             KeyCode::Char('a') => {
-                let all_on = checked.iter().all(|&c| c);
+                let all = checked.iter().all(|&c| c);
                 for c in checked.iter_mut() {
-                    *c = !all_on;
+                    *c = !all;
                 }
             }
             KeyCode::Enter => {
-                let selected: Vec<String> = Pack::optional()
+                self.packs = Pack::optional()
                     .into_iter()
                     .zip(checked.iter())
                     .filter(|(_, &on)| on)
                     .map(|(p, _)| p.id.to_string())
                     .collect();
-                self.packs = Some(selected);
-                self.enter_env_stage();
+                self.mode = Mode::Form;
             }
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.packs = Some(Vec::new());
-                self.enter_env_stage();
-            }
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Form,
             _ => {}
         }
         Transition::Stay
     }
 
-    fn handle_env(&mut self, code: KeyCode) -> Transition {
-        let Stage::Env { selected } = &mut self.stage else {
-            return Transition::Stay;
-        };
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                *selected = selected.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                if *selected < ENV_OPTIONS.len() - 1 {
-                    *selected += 1;
-                }
-            }
-            KeyCode::Enter => {
-                self.environment = Some(ENV_OPTIONS[*selected].env);
-                self.enter_memory_stage();
-            }
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.environment = None;
-                self.enter_memory_stage();
-            }
-            _ => {}
-        }
-        Transition::Stay
-    }
-
-    fn handle_memory(&mut self, code: KeyCode) -> Transition {
-        let Stage::Memory { selected, custom_mode, custom_buf } = &mut self.stage else {
-            return Transition::Stay;
-        };
-        let custom_idx = MEMORY_PRESETS.len();
-
-        if *custom_mode {
-            match code {
-                KeyCode::Enter => {
-                    if ResourceConfig::parse_memory_bytes(custom_buf).is_some() {
-                        self.memory_budget = Some(custom_buf.clone());
-                        self.finish();
-                        return Transition::Pop;
-                    }
-                }
-                KeyCode::Esc => {
-                    *custom_mode = false;
-                    custom_buf.clear();
-                }
-                KeyCode::Backspace => {
-                    custom_buf.pop();
-                }
-                KeyCode::Char(c) => {
-                    custom_buf.push(c);
-                }
-                _ => {}
-            }
-            return Transition::Stay;
-        }
-
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                *selected = selected.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                if *selected < custom_idx {
-                    *selected += 1;
-                }
-            }
-            KeyCode::Enter => {
-                if *selected == custom_idx {
-                    *custom_mode = true;
-                    custom_buf.clear();
-                } else {
-                    self.memory_budget = Some(MEMORY_PRESETS[*selected].value.to_string());
-                    self.finish();
-                    return Transition::Pop;
-                }
-            }
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.memory_budget = None;
-                self.finish();
-                return Transition::Pop;
-            }
-            _ => {}
-        }
-        Transition::Stay
-    }
-
-    fn draw_tier(frame: &mut Frame, area: Rect, selected: usize) {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(5),
-                Constraint::Min(10),
-                Constraint::Length(2),
-            ])
-            .split(area);
-
-        let title = Paragraph::new("  COHORT Setup — Annotation Tier")
-            .style(Style::default().fg(theme::ACCENT).bold())
-            .block(Block::default().padding(Padding::top(1)));
-        frame.render_widget(title, layout[0]);
-
-        let mut selector_lines = Vec::new();
-        for (i, tier_opt) in TIERS.iter().enumerate() {
-            let marker = if i == selected { " > " } else { "   " };
-            let style = if i == selected {
-                Style::default().fg(theme::ACCENT).bold()
-            } else {
-                Style::default().fg(theme::MUTED)
-            };
-            selector_lines.push(Line::from(vec![
-                Span::raw(marker),
-                Span::styled(format!("{:<6}", tier_opt.tier.as_str()), style),
-                Span::styled(
-                    format!("{:<12}", tier_opt.tier.size_human()),
-                    if i == selected {
-                        Style::default().fg(theme::WARN)
-                    } else {
-                        Style::default().fg(theme::MUTED)
-                    },
-                ),
-                Span::styled(
-                    tier_opt.summary,
-                    if i == selected {
-                        Style::default().fg(theme::FG)
-                    } else {
-                        Style::default().fg(theme::MUTED)
-                    },
-                ),
-            ]));
-        }
-        let selector = Paragraph::new(selector_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Select annotation tier ")
-                .border_style(Style::default().fg(theme::ACCENT)),
-        );
-        frame.render_widget(selector, layout[1]);
-
-        let tier_opt = &TIERS[selected];
-        let detail_lines: Vec<Line> = tier_opt
-            .details
-            .iter()
-            .map(|l| {
-                if l.is_empty() {
-                    Line::from("")
-                } else if l.starts_with("Not in") {
-                    Line::from(Span::styled(
-                        format!("  {l}"),
-                        Style::default().fg(theme::MUTED).italic(),
-                    ))
-                } else {
-                    let trimmed = l.trim_start();
-                    if let Some(pos) = trimmed.find("  ") {
-                        let (label, rest) = trimmed.split_at(pos);
-                        Line::from(vec![
-                            Span::styled(
-                                format!("  {:<13}", label),
-                                Style::default().fg(theme::WARN),
-                            ),
-                            Span::styled(rest.trim_start(), Style::default().fg(theme::FG)),
-                        ])
-                    } else {
-                        Line::from(Span::styled(
-                            format!("  {trimmed}"),
-                            Style::default().fg(theme::FG),
-                        ))
-                    }
-                }
-            })
-            .collect();
-
-        let detail_title = format!(
-            " {} - {} ",
-            tier_opt.tier.as_str(),
-            tier_opt.tier.size_human()
-        );
-        let detail = Paragraph::new(detail_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(detail_title)
-                .border_style(Style::default().fg(theme::MUTED)),
-        );
-        frame.render_widget(detail, layout[2]);
-
-        let help = Paragraph::new("  up/down navigate    enter select    esc cancel")
-            .style(Style::default().fg(theme::MUTED));
-        frame.render_widget(help, layout[3]);
-    }
-
-    fn draw_packs(
-        frame: &mut Frame,
-        area: Rect,
-        cursor: usize,
-        checked: &[bool],
-        installed: &[String],
-    ) {
-        let packs: Vec<&Pack> = Pack::optional();
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Min(8),
-                Constraint::Length(1),
-                Constraint::Length(2),
-            ])
-            .split(area);
-
-        let title = Paragraph::new("  COHORT Setup — Add-on Packs")
-            .style(Style::default().fg(theme::ACCENT).bold())
-            .block(Block::default().padding(Padding::top(1)));
-        frame.render_widget(title, layout[0]);
-
-        let always: Vec<String> = Pack::required()
-            .iter()
-            .map(|p| format!("{} ({})", p.name, p.size_human))
-            .collect();
-        let info = Paragraph::new(Line::from(vec![
-            Span::styled("  Always installed: ", Style::default().fg(theme::MUTED)),
-            Span::styled(always.join(", "), Style::default().fg(theme::MUTED)),
-        ]))
-        .block(Block::default().padding(Padding::top(1)));
-        frame.render_widget(info, layout[1]);
-
-        let items: Vec<ListItem> = packs
-            .iter()
-            .enumerate()
-            .map(|(i, pack)| {
-                let is_cursor = i == cursor;
-                let is_installed = installed.iter().any(|id| id == pack.id);
-                let mark = if checked[i] { "[x]" } else { "[ ]" };
-
-                let mark_style = if checked[i] {
-                    Style::default().fg(theme::OK).bold()
-                } else if is_cursor {
-                    Style::default().fg(theme::FG)
-                } else {
-                    Style::default().fg(theme::MUTED)
-                };
-
-                let name_style = if is_cursor {
-                    Style::default().fg(theme::ACCENT).bold()
-                } else if checked[i] {
-                    Style::default().fg(theme::FG)
-                } else {
-                    Style::default().fg(theme::MUTED)
-                };
-
-                let size_style = if is_cursor {
-                    Style::default().fg(theme::WARN)
-                } else {
-                    Style::default().fg(theme::MUTED)
-                };
-
-                let status_tag = if is_installed { " installed " } else { "" };
-                let status_style = Style::default().fg(theme::OK);
-
-                let line = Line::from(vec![
-                    Span::styled(format!("  {mark} "), mark_style),
-                    Span::styled(format!("{:<16}", pack.id), name_style),
-                    Span::styled(format!("{:>6}  ", pack.size_human), size_style),
-                    Span::styled(status_tag, status_style),
-                    Span::styled(pack.description, name_style),
-                ]);
-                ListItem::new(line)
-            })
-            .collect();
-
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Select packs (space toggle) ")
-                .border_style(Style::default().fg(theme::ACCENT)),
-        );
-        frame.render_widget(list, layout[2]);
-
-        let selected_count = checked.iter().filter(|&&c| c).count();
-        let selected_bytes: u64 = packs
-            .iter()
-            .zip(checked)
-            .filter(|(_, &on)| on)
-            .map(|(p, _)| p.size_bytes)
-            .sum();
-        let total_gb = selected_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        let summary_text = if selected_count > 0 {
-            format!("  Selected: {selected_count} packs ({total_gb:.0} GB)")
+    fn glyph(&self, f: Field) -> &'static str {
+        if self.focus == f {
+            FOCUS_GLYPH
         } else {
-            "  No packs selected (you can add them later with `cohort data pull --pack <name>`)"
-                .to_string()
-        };
-        let summary = Paragraph::new(summary_text).style(Style::default().fg(theme::WARN));
-        frame.render_widget(summary, layout[3]);
-
-        let help = Paragraph::new(
-            "  up/down navigate    space toggle    a toggle all    enter done    esc skip",
-        )
-        .style(Style::default().fg(theme::MUTED));
-        frame.render_widget(help, layout[4]);
+            " "
+        }
     }
 
-    fn draw_env(frame: &mut Frame, area: Rect, selected: usize) {
+    fn field_line(&self, f: Field) -> Line<'static> {
+        let g = self.glyph(f);
+        let label_tone = if self.focus == f { Tone::Focus } else { Tone::Normal };
+        match f {
+            Field::Tier => {
+                let (_, summary) = TIERS.iter().find(|(t, _)| *t == self.tier).unwrap();
+                Line::from(vec![
+                    Span::styled(format!(" {g} "), label_tone.style()),
+                    Span::styled("tier      ", label_tone.style()),
+                    Span::styled(
+                        format!("{} {}", self.tier.as_str(), self.tier.size_human()),
+                        Tone::Warn.style(),
+                    ),
+                    Span::styled(format!("  {summary}"), Tone::Muted.style()),
+                ])
+            }
+            Field::Root => {
+                let exists = self.root.is_dir();
+                let path_tone = if exists { Tone::Normal } else { Tone::Bad };
+                Line::from(vec![
+                    Span::styled(format!(" {g} "), label_tone.style()),
+                    Span::styled("data root ", label_tone.style()),
+                    Span::styled(self.root.display().to_string(), path_tone.style()),
+                ])
+            }
+            Field::Advanced => {
+                let mark = if self.advanced_open { "[-]" } else { "[+]" };
+                Line::from(vec![
+                    Span::styled(format!(" {g} "), label_tone.style()),
+                    Span::styled(format!("{mark} advanced"), label_tone.style()),
+                ])
+            }
+            Field::Env => {
+                let val = match self.environment {
+                    None => "auto".to_string(),
+                    Some(Environment::Hpc) => "hpc".to_string(),
+                    Some(Environment::Workstation) => "workstation".to_string(),
+                };
+                Line::from(vec![
+                    Span::styled(format!("   {g} "), label_tone.style()),
+                    Span::styled("env       ", label_tone.style()),
+                    Span::styled(val, Tone::Warn.style()),
+                ])
+            }
+            Field::Memory => {
+                let val = self
+                    .memory_budget
+                    .clone()
+                    .unwrap_or_else(|| format!("auto ({})", self.resources.memory_human()));
+                Line::from(vec![
+                    Span::styled(format!("   {g} "), label_tone.style()),
+                    Span::styled("memory    ", label_tone.style()),
+                    Span::styled(val, Tone::Warn.style()),
+                ])
+            }
+            Field::Packs => {
+                let val = if self.packs.is_empty() {
+                    "none".to_string()
+                } else {
+                    self.packs.join(", ")
+                };
+                Line::from(vec![
+                    Span::styled(format!("   {g} "), label_tone.style()),
+                    Span::styled("packs     ", label_tone.style()),
+                    Span::styled(val, Tone::Warn.style()),
+                ])
+            }
+            Field::Save => Line::from(""),
+        }
+    }
+
+    fn draw_form(&self, frame: &mut Frame, area: Rect) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
-                Constraint::Length(6),
+                Constraint::Length(2),
                 Constraint::Min(6),
-                Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(area);
 
-        let title = Paragraph::new("  COHORT Setup — Environment")
-            .style(Style::default().fg(theme::ACCENT).bold())
-            .block(Block::default().padding(Padding::top(1)));
+        let title = Paragraph::new(Line::from(Span::styled(
+            "  cohort setup",
+            Style::default().fg(theme::ACCENT).bold(),
+        )));
         frame.render_widget(title, layout[0]);
 
-        let mut selector_lines = Vec::new();
-        for (i, opt) in ENV_OPTIONS.iter().enumerate() {
-            let marker = if i == selected { " > " } else { "   " };
-            let style = if i == selected {
-                Style::default().fg(theme::ACCENT).bold()
+        let lines: Vec<Line> = self
+            .visible_fields()
+            .into_iter()
+            .filter(|f| *f != Field::Save)
+            .map(|f| self.field_line(f))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), layout[1]);
+
+        let save_focused = self.focus == Field::Save;
+        let save_label = if save_focused {
+            format!(" {FOCUS_GLYPH} Save ")
+        } else {
+            "   Save ".to_string()
+        };
+        let save_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(if save_focused { theme::ACCENT } else { theme::MUTED }));
+        let save = Paragraph::new(Line::from(Span::styled(
+            save_label,
+            if save_focused {
+                Tone::Focus.style()
             } else {
-                Style::default().fg(theme::MUTED)
-            };
-            selector_lines.push(Line::from(vec![
-                Span::raw(marker),
-                Span::styled(opt.label, style),
-            ]));
-        }
-        let selector = Paragraph::new(selector_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Are you on an HPC cluster or a workstation? ")
-                .border_style(Style::default().fg(theme::ACCENT)),
-        );
-        frame.render_widget(selector, layout[1]);
+                Tone::Normal.style()
+            },
+        )))
+        .block(save_block);
+        let save_area = Rect {
+            x: layout[2].x + 2,
+            y: layout[2].y,
+            width: 12,
+            height: 3,
+        };
+        frame.render_widget(save, save_area);
 
-        let desc = Paragraph::new(format!("  {}", ENV_OPTIONS[selected].description))
-            .wrap(ratatui::widgets::Wrap { trim: true })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" {} ", ENV_OPTIONS[selected].label))
-                    .border_style(Style::default().fg(theme::MUTED)),
-            );
-        frame.render_widget(desc, layout[2]);
+        let err_text = self.error.clone().unwrap_or_default();
+        let err = Paragraph::new(format!("  {err_text}")).style(theme::error_slot_style());
+        frame.render_widget(err, layout[3]);
 
-        let help = Paragraph::new("  up/down navigate    enter select    esc skip")
-            .style(Style::default().fg(theme::MUTED));
-        frame.render_widget(help, layout[3]);
+        let hint = match self.focus {
+            Field::Tier => "  ←/→ cycle tier   ↑/↓ move   enter activate   esc cancel",
+            Field::Root => "  enter browse   ↑/↓ move   esc cancel",
+            Field::Advanced => "  enter toggle   ↑/↓ move   esc cancel",
+            Field::Env => "  ←/→ cycle env   ↑/↓ move   esc cancel",
+            Field::Memory => "  ←/→ cycle preset   enter type custom   esc cancel",
+            Field::Packs => "  enter edit packs   ↑/↓ move   esc cancel",
+            Field::Save => "  enter save and exit   esc cancel",
+        };
+        frame.render_widget(Paragraph::new(hint).style(theme::hint_bar_style()), layout[4]);
     }
 
-    fn draw_memory(
-        frame: &mut Frame,
-        area: Rect,
-        resources: &Resources,
-        selected: usize,
-        custom_mode: bool,
-        custom_buf: &str,
-    ) {
-        let custom_idx = MEMORY_PRESETS.len();
+    fn draw_memory_edit(&self, frame: &mut Frame, area: Rect, buf: &str) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Min(10),
                 Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(area);
-
-        let title = Paragraph::new("  COHORT Setup — Memory Budget")
-            .style(Style::default().fg(theme::ACCENT).bold())
-            .block(Block::default().padding(Padding::top(1)));
+        let title = Paragraph::new(Line::from(Span::styled(
+            "  cohort setup — memory budget",
+            Style::default().fg(theme::ACCENT).bold(),
+        )));
         frame.render_widget(title, layout[0]);
 
-        let detected_text = format!(
-            "  Detected: {}    Environment: {}",
-            resources.memory_human(),
-            resources.environment(),
-        );
-        let info = Paragraph::new(Line::from(vec![Span::styled(
-            &detected_text,
-            Style::default().fg(theme::WARN),
-        )]))
-        .block(Block::default().padding(Padding::top(1)));
-        frame.render_widget(info, layout[1]);
-
-        let mut items: Vec<ListItem> = MEMORY_PRESETS
-            .iter()
-            .enumerate()
-            .map(|(i, preset)| {
-                let is_sel = i == selected && !custom_mode;
-                let marker = if is_sel { " > " } else { "   " };
-                let style = if is_sel {
-                    Style::default().fg(theme::ACCENT).bold()
-                } else {
-                    Style::default().fg(theme::FG)
-                };
-                let note = if preset.bytes <= resources.memory_bytes * 100 / 80 {
-                    Span::styled("  (within detected)", Style::default().fg(theme::OK))
-                } else {
-                    Span::styled("  (exceeds detected)", Style::default().fg(theme::WARN))
-                };
-                ListItem::new(Line::from(vec![
-                    Span::raw(marker),
-                    Span::styled(format!("{:<10}", preset.label), style),
-                    note,
-                ]))
-            })
-            .collect();
-
-        let is_custom_sel = selected == custom_idx && !custom_mode;
-        if custom_mode {
-            let valid = ResourceConfig::parse_memory_bytes(custom_buf).is_some();
-            let color = if valid { theme::OK } else { theme::BAD };
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(" > Custom: ", Style::default().fg(theme::ACCENT).bold()),
-                Span::styled(custom_buf, Style::default().fg(color)),
-                Span::styled("_", Style::default().fg(theme::ACCENT)),
-                if valid {
-                    Span::styled("  (valid)", Style::default().fg(theme::OK))
-                } else {
-                    Span::styled("  (e.g. 48GB, 12288MB)", Style::default().fg(theme::MUTED))
-                },
-            ])));
-        } else {
-            let style = if is_custom_sel {
-                Style::default().fg(theme::ACCENT).bold()
-            } else {
-                Style::default().fg(theme::FG)
-            };
-            let marker = if is_custom_sel { " > " } else { "   " };
-            items.push(ListItem::new(Line::from(vec![
-                Span::raw(marker),
-                Span::styled("Custom...", style),
-            ])));
-        }
-
-        let list = List::new(items).block(
+        let valid = buf.is_empty() || ResourceConfig::parse_memory_bytes(buf).is_some();
+        let color = if valid { theme::FG } else { theme::BAD };
+        let input = Paragraph::new(Line::from(vec![
+            Span::styled("  amount: ", Tone::Muted.style()),
+            Span::styled(buf.to_string(), Style::default().fg(color)),
+            Span::styled("_", Style::default().fg(theme::ACCENT)),
+        ]))
+        .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Default memory budget (srun allocations override this) ")
                 .border_style(Style::default().fg(theme::ACCENT)),
         );
-        frame.render_widget(list, layout[2]);
+        frame.render_widget(input, layout[1]);
 
-        let help_text = if custom_mode {
-            "  type amount (e.g. 48GB)    enter confirm    esc cancel"
-        } else {
-            "  up/down navigate    enter select    esc skip"
-        };
-        let help = Paragraph::new(help_text).style(Style::default().fg(theme::MUTED));
-        frame.render_widget(help, layout[3]);
+        let err = Paragraph::new(format!("  {}", self.error.clone().unwrap_or_default()))
+            .style(theme::error_slot_style());
+        frame.render_widget(err, layout[3]);
+
+        let hint = "  type amount (e.g. 48GB)   enter confirm   esc cancel";
+        frame.render_widget(Paragraph::new(hint).style(theme::hint_bar_style()), layout[4]);
+    }
+
+    fn draw_packs_edit(&self, frame: &mut Frame, area: Rect, cursor: usize, checked: &[bool]) {
+        let packs = Pack::optional();
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(4),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        let title = Paragraph::new(Line::from(Span::styled(
+            "  cohort setup — add-on packs",
+            Style::default().fg(theme::ACCENT).bold(),
+        )));
+        frame.render_widget(title, layout[0]);
+
+        let lines: Vec<Line> = packs
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let g = if i == cursor { FOCUS_GLYPH } else { " " };
+                let mark = if checked[i] { "[x]" } else { "[ ]" };
+                let tone = if i == cursor { Tone::Focus } else { Tone::Normal };
+                Line::from(vec![
+                    Span::styled(format!(" {g} {mark} "), tone.style()),
+                    Span::styled(format!("{:<14}", p.id), tone.style()),
+                    Span::styled(format!("{:>7}  ", p.size_human), Tone::Warn.style()),
+                    Span::styled(p.description.to_string(), Tone::Muted.style()),
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), layout[1]);
+
+        let err = Paragraph::new(format!("  {}", self.error.clone().unwrap_or_default()))
+            .style(theme::error_slot_style());
+        frame.render_widget(err, layout[2]);
+
+        let hint = "  space toggle   a toggle all   enter done   esc cancel";
+        frame.render_widget(Paragraph::new(hint).style(theme::hint_bar_style()), layout[3]);
     }
 }
 
@@ -833,8 +615,8 @@ impl Screen for SetupScreen {
     }
 
     fn scope(&self) -> ActionScope {
-        match &self.stage {
-            Stage::Dir(_) => ActionScope::FilePicker,
+        match &self.mode {
+            Mode::BrowseRoot(_) => ActionScope::FilePicker,
             _ => ActionScope::Setup,
         }
     }
@@ -844,37 +626,31 @@ impl Screen for SetupScreen {
         let mut map = KeyMap::new()
             .bind(KeyCode::Esc, none, Action::SetupCancel)
             .bind(KeyCode::Char('q'), none, Action::SetupCancel);
-        match &self.stage {
-            Stage::Tier { .. } | Stage::Env { .. } => {
+        match &self.mode {
+            Mode::Form => {
                 map = map
                     .bind(KeyCode::Up, none, Action::SetupPrev)
                     .bind(KeyCode::Char('k'), none, Action::SetupPrev)
                     .bind(KeyCode::Down, none, Action::SetupNext)
                     .bind(KeyCode::Char('j'), none, Action::SetupNext)
                     .bind(KeyCode::Tab, none, Action::SetupNext)
-                    .bind(KeyCode::Enter, none, Action::SetupConfirm);
+                    .bind(KeyCode::Enter, none, Action::SetupConfirm)
+                    .bind(KeyCode::Char(' '), none, Action::SetupToggle);
             }
-            Stage::Packs { .. } => {
+            Mode::EditPacks(_, _) => {
                 map = map
                     .bind(KeyCode::Up, none, Action::SetupPrev)
                     .bind(KeyCode::Char('k'), none, Action::SetupPrev)
                     .bind(KeyCode::Down, none, Action::SetupNext)
                     .bind(KeyCode::Char('j'), none, Action::SetupNext)
-                    .bind(KeyCode::Tab, none, Action::SetupNext)
                     .bind(KeyCode::Char(' '), none, Action::SetupToggle)
                     .bind(KeyCode::Char('a'), none, Action::SetupToggleAll)
                     .bind(KeyCode::Enter, none, Action::SetupConfirm);
             }
-            Stage::Memory { .. } => {
-                map = map
-                    .bind(KeyCode::Up, none, Action::SetupPrev)
-                    .bind(KeyCode::Char('k'), none, Action::SetupPrev)
-                    .bind(KeyCode::Down, none, Action::SetupNext)
-                    .bind(KeyCode::Char('j'), none, Action::SetupNext)
-                    .bind(KeyCode::Tab, none, Action::SetupNext)
-                    .bind(KeyCode::Enter, none, Action::SetupConfirm);
+            Mode::EditMemory(_) => {
+                map = map.bind(KeyCode::Enter, none, Action::SetupConfirm);
             }
-            Stage::Dir(_) => {
+            Mode::BrowseRoot(_) => {
                 map = KeyMap::new()
                     .bind(KeyCode::Esc, none, Action::PickerCancel)
                     .bind(KeyCode::Char('q'), none, Action::PickerCancel)
@@ -883,7 +659,7 @@ impl Screen for SetupScreen {
                     .bind(KeyCode::Down, none, Action::PickerDown)
                     .bind(KeyCode::Char('j'), none, Action::PickerDown)
                     .bind(KeyCode::Right, none, Action::PickerInto)
-                    .bind(KeyCode::Enter, none, Action::PickerInto)
+                    .bind(KeyCode::Enter, none, Action::PickerSelect)
                     .bind(KeyCode::Left, none, Action::PickerParent)
                     .bind(KeyCode::Backspace, none, Action::PickerParent)
                     .bind(KeyCode::Char(' '), none, Action::PickerSelect)
@@ -896,39 +672,30 @@ impl Screen for SetupScreen {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
-        match &mut self.stage {
-            Stage::Tier { selected } => Self::draw_tier(frame, area, *selected),
-            Stage::Dir(state) => file_picker::draw(frame, area, state),
-            Stage::Packs { cursor, checked, installed } => {
-                Self::draw_packs(frame, area, *cursor, checked, installed)
+        match &mut self.mode {
+            Mode::Form => self.draw_form(frame, area),
+            Mode::BrowseRoot(state) => file_picker::draw(frame, area, state),
+            Mode::EditMemory(buf) => {
+                let buf = buf.clone();
+                self.draw_memory_edit(frame, area, &buf);
             }
-            Stage::Env { selected } => Self::draw_env(frame, area, *selected),
-            Stage::Memory { selected, custom_mode, custom_buf } => Self::draw_memory(
-                frame,
-                area,
-                &self.resources,
-                *selected,
-                *custom_mode,
-                custom_buf,
-            ),
+            Mode::EditPacks(cursor, checked) => {
+                let cursor = *cursor;
+                let checked = checked.clone();
+                self.draw_packs_edit(frame, area, cursor, &checked);
+            }
         }
     }
 
-    // SetupScreen owns key dispatch directly because the Dir stage's path-typing
-    // mode and the Memory stage's custom-entry mode swallow every character into a
-    // text buffer; routing those through KeyMap would require modeling each
-    // character as an Action. keys() above is informational only — used by help
-    // and the command palette to enumerate the bindings for the active stage.
     fn handle(&mut self, event: &AppEvent) -> Transition {
         let AppEvent::Key(k) = event else {
             return Transition::Stay;
         };
-        match self.stage {
-            Stage::Tier { .. } => self.handle_tier(k.code),
-            Stage::Dir(_) => self.handle_dir(k.code),
-            Stage::Packs { .. } => self.handle_packs(k.code),
-            Stage::Env { .. } => self.handle_env(k.code),
-            Stage::Memory { .. } => self.handle_memory(k.code),
+        match self.mode {
+            Mode::Form => self.handle_form(k.code),
+            Mode::BrowseRoot(_) => self.handle_browse(k.code),
+            Mode::EditMemory(_) => self.handle_memory_edit(k.code),
+            Mode::EditPacks(_, _) => self.handle_packs_edit(k.code),
         }
     }
 }
