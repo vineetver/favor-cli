@@ -91,6 +91,15 @@ impl WorkspaceScreen {
         let result = match &a.kind {
             ArtifactKind::AnnotatedSet { .. } => VariantScreen::new_for_annotated_set(path),
             ArtifactKind::ParquetFile => VariantScreen::new_for_parquet(path),
+            ArtifactKind::StaarResults => {
+                let companion = self
+                    .state
+                    .artifacts
+                    .iter()
+                    .find(|x| matches!(x.kind, ArtifactKind::AnnotatedSet { .. }))
+                    .map(|x| x.path.clone());
+                VariantScreen::new_for_staar_results(path, companion)
+            }
             _ => {
                 self.notice = Some(format!("cannot browse {}", a.kind.title()));
                 return Transition::Stay;
@@ -150,7 +159,9 @@ fn next_chain(kind: &ArtifactKind) -> Chain {
 fn can_browse(kind: &ArtifactKind) -> bool {
     matches!(
         kind,
-        ArtifactKind::AnnotatedSet { .. } | ArtifactKind::ParquetFile
+        ArtifactKind::AnnotatedSet { .. }
+            | ArtifactKind::ParquetFile
+            | ArtifactKind::StaarResults
     )
 }
 
