@@ -122,13 +122,8 @@ impl App {
                             self.state.save_session();
                             return Ok(());
                         }
-                        if let Some(Modal::Run(_)) = &mut self.state.modal {
-                            let close = if let Some(Modal::Run(o)) = &mut self.state.modal {
-                                o.handle(k).is_some()
-                            } else {
-                                false
-                            };
-                            if close {
+                        if let Some(Modal::Run(o)) = &mut self.state.modal {
+                            if o.handle(k).is_some() {
                                 self.state.modal = None;
                             }
                             continue;
@@ -187,6 +182,11 @@ impl App {
                 Outcome::Stay
             }
             AppEvent::Key(k) => {
+                if let View::Variant(v) = &self.state.view {
+                    if !matches!(v.modal, variant::VariantModal::None) {
+                        return variant::handle_modal_key(&mut self.state, k);
+                    }
+                }
                 let scope = self.state.active_scope();
                 let scope_keys = KeyMap::for_scope(scope);
                 if let Some(action) = scope_keys.lookup(k.code, k.modifiers) {
@@ -194,15 +194,6 @@ impl App {
                 }
                 if let Some(global) = self.global_keys.lookup(k.code, k.modifiers) {
                     return self.handle_global_action(global);
-                }
-                if matches!(self.state.view, View::Variant(_)) {
-                    let in_modal = match &self.state.view {
-                        View::Variant(v) => !matches!(v.modal, variant::VariantModal::None),
-                        _ => false,
-                    };
-                    if in_modal {
-                        return variant::handle_modal_key(&mut self.state, k);
-                    }
                 }
                 Outcome::Stay
             }
