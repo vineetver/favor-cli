@@ -1,5 +1,6 @@
 use faer::Mat;
-use statrs::distribution::{Beta, ChiSquared, Continuous, ContinuousCDF};
+use statrs::distribution::{Beta, Continuous};
+use statrs::function::erf::erfc;
 
 use super::model::NullModel;
 use super::stats;
@@ -171,10 +172,12 @@ const MAC_THRESHOLD: f64 = 10.0;
 
 /// ACAT-V with MAC-based grouping of very rare variants.
 ///
-/// `w_acat`: ACAT-V weights (for Cauchy combination weights and per-variant variance).
-/// `w_burden`: corresponding Burden weights (for grouped rare variant score).
-/// Matches R STAAR_O_SMMAT.cpp: Burden weights for grouped score, ACAT weights
-/// for the covariance denominator and Cauchy combination.
+/// `w_acat`: ACAT weights (Cauchy combination weights only).
+/// `w_burden`: Burden weights (used for both numerator and denominator of
+/// the rare-group score statistic so it's χ²(1) under H0).
+/// Matches R STAAR_O.cpp lines 199-216: per-variant common test stat is
+/// `x²/Cov` (no weights in stat); rare-group test stat is `(Σ x·w_B)² /
+/// Σ Covw[w_B]`. `w_A` is only a Cauchy combination weight.
 fn acat_v(
     u: &Mat<f64>,
     k: &Mat<f64>,
@@ -210,13 +213,17 @@ fn acat_v(
         }
     }
 
-    // Group very rare variants: Burden-weighted score, ACAT-weighted covariance
+    // Group very rare variants: Burden-weighted score AND Burden-weighted
+    // covariance — both numerator and denominator must share weights for the
+    // statistic to be χ²(1) under H0. Matches R STAAR_O.cpp lines 199-216:
+    // sum0 = Σ x·w_B, sumx = sum0² / Σ Covw[w_B], pchisq(sumx, 1). w_A enters
+    // only as the Cauchy combination weight `sumw/n0` on the resulting p-value.
     if !rare_indices.is_empty() {
         let wu: f64 = rare_indices.iter().map(|&j| w_burden[j] * u[(j, 0)]).sum();
         let mut wkw = 0.0;
         for &j in &rare_indices {
             for &l in &rare_indices {
-                wkw += w_acat[j] * k[(j, l)] * w_acat[l];
+                wkw += w_burden[j] * k[(j, l)] * w_burden[l];
             }
         }
         let var = sigma2 * wkw;
@@ -234,14 +241,20 @@ fn acat_v(
     stats::cauchy_combine_weighted(&p_values, &cauchy_weights)
 }
 
+/// χ²(1) survival function = `erfc(sqrt(t/2))`.
+///
+/// Direct closed form rather than `1 - ChiSquared::cdf(t)`. statrs's gamma
+/// CDF saturates at 1.0 for t ≳ 1400 (so the survival becomes literal 0.0
+/// for any larger statistic), whereas `erfc` retains precision out to
+/// t ≈ 2700. Past that we floor at the smallest positive double so the
+/// downstream Cauchy combination sees a strictly positive p-value instead
+/// of poisoning the omnibus with an exact zero.
 fn chisq1_pvalue(t: f64) -> f64 {
     if t <= 0.0 || !t.is_finite() {
         return 1.0;
     }
-    match ChiSquared::new(1.0) {
-        Ok(dist) => 1.0 - dist.cdf(t),
-        Err(_) => f64::NAN,
-    }
+    let p = erfc((t * 0.5).sqrt());
+    if p > 0.0 { p } else { stats::P_FLOOR }
 }
 
 fn symmetric_eigenvalues(mat: &Mat<f64>) -> Vec<f64> {

@@ -14,8 +14,9 @@ pub fn cauchy_combine(p_values: &[f64]) -> f64 {
 
 /// Smallest positive f64 (denormal). Floor for combined p-values so the
 /// omnibus never underflows to exactly 0 (which becomes -log10(p) = +inf
-/// in summary reports).
-const P_FLOOR: f64 = f64::MIN_POSITIVE * f64::EPSILON; // 5e-324
+/// in summary reports). Shared with the per-variant chi-squared survival
+/// in `score.rs` so a single underflow doesn't poison Cauchy combination.
+pub(super) const P_FLOOR: f64 = f64::MIN_POSITIVE * f64::EPSILON; // 5e-324
 
 /// Threshold above which `atan(T)/π` saturates at 0.5 in f64. Past this we
 /// switch to the upper-tail asymptotic `1/(π·T)` (STAAR/R/CCT.R).
@@ -169,7 +170,7 @@ pub fn mixture_chisq_pvalue(statistic: f64, eigenvalues: &[f64]) -> f64 {
         // Rescale chisq_val
         let chisq_rescaled = chisq_val * scale;
         return match ChiSquared::new(df_adj) {
-            Ok(dist) => (1.0 - dist.cdf(chisq_rescaled)).max(0.0),
+            Ok(dist) => (1.0 - dist.cdf(chisq_rescaled)).max(P_FLOOR),
             Err(_) => f64::NAN,
         };
     } else {
@@ -177,7 +178,7 @@ pub fn mixture_chisq_pvalue(statistic: f64, eigenvalues: &[f64]) -> f64 {
     };
 
     match ChiSquared::new(effective_df) {
-        Ok(dist) => (1.0 - dist.cdf(chisq_val)).max(0.0),
+        Ok(dist) => (1.0 - dist.cdf(chisq_val)).max(P_FLOOR),
         Err(_) => f64::NAN,
     }
 }

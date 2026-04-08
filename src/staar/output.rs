@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float32Builder, Float64Builder, Int32Builder, StringBuilder, UInt32Builder,
+    ArrayRef, Float64Builder, Int32Builder, StringBuilder, UInt32Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -190,10 +190,13 @@ pub fn write_results(
         let mut b_nvariants = UInt32Builder::with_capacity(nr);
         let mut b_cmac = UInt32Builder::with_capacity(nr);
 
-        // 78 Float32 columns + 2 Float64 columns (ACAT-O, STAAR-O)
-        let n_f32_cols = 6 + 6 * n_channels + 6; // base + annotation + omnibus
-        let mut f32_builders: Vec<Float32Builder> = (0..n_f32_cols)
-            .map(|_| Float32Builder::with_capacity(nr))
+        // All p-value columns are Float64. f32 truncated 5e-324 (the
+        // smallest f64 denormal, which CCT and chisq survival use as a
+        // lower bound) to literal 0.0, masking the very underflows the
+        // floor exists to prevent.
+        let n_p_cols = 6 + 6 * n_channels + 6; // base + annotation + omnibus
+        let mut p_builders: Vec<Float64Builder> = (0..n_p_cols)
+            .map(|_| Float64Builder::with_capacity(nr))
             .collect();
         let mut b_acat_o = Float64Builder::with_capacity(nr);
         let mut b_staar_o = Float64Builder::with_capacity(nr);
@@ -217,17 +220,17 @@ pub fn write_results(
                 s.acat_v_1_25,
                 s.acat_v_1_1,
             ] {
-                f32_builders[pi].append_value(p as f32);
+                p_builders[pi].append_value(p);
                 pi += 1;
             }
             for ann_p in &s.per_annotation {
                 for &v in ann_p {
-                    f32_builders[pi].append_value(v as f32);
+                    p_builders[pi].append_value(v);
                     pi += 1;
                 }
             }
             while pi < 6 + 6 * n_channels {
-                f32_builders[pi].append_value(f32::NAN);
+                p_builders[pi].append_value(f64::NAN);
                 pi += 1;
             }
             for p in [
@@ -238,7 +241,7 @@ pub fn write_results(
                 s.staar_a_1_25,
                 s.staar_a_1_1,
             ] {
-                f32_builders[pi].append_value(p as f32);
+                p_builders[pi].append_value(p);
                 pi += 1;
             }
             b_acat_o.append_value(s.acat_o);
@@ -263,11 +266,11 @@ pub fn write_results(
             Field::new("cMAC", DataType::UInt32, false),
         ];
         for test in &test_names {
-            fields.push(Field::new(*test, DataType::Float32, true));
+            fields.push(Field::new(*test, DataType::Float64, true));
         }
         for ch in &channels {
             for test in &test_names {
-                fields.push(Field::new(format!("{test}-{ch}"), DataType::Float32, true));
+                fields.push(Field::new(format!("{test}-{ch}"), DataType::Float64, true));
             }
         }
         for name in [
@@ -278,7 +281,7 @@ pub fn write_results(
             "STAAR-A(1,25)",
             "STAAR-A(1,1)",
         ] {
-            fields.push(Field::new(name, DataType::Float32, true));
+            fields.push(Field::new(name, DataType::Float64, true));
         }
         fields.push(Field::new("ACAT-O", DataType::Float64, true));
         fields.push(Field::new("STAAR-O", DataType::Float64, true));
@@ -293,7 +296,7 @@ pub fn write_results(
             Arc::new(b_nvariants.finish()),
             Arc::new(b_cmac.finish()),
         ];
-        for b in &mut f32_builders {
+        for b in &mut p_builders {
             columns.push(Arc::new(b.finish()));
         }
         columns.push(Arc::new(b_acat_o.finish()));
@@ -578,10 +581,11 @@ fn collect_plot_genes(results: &[(MaskType, Vec<GeneResult>)]) -> Vec<PlotGene> 
     let mut genes = Vec::new();
     for (mask, gene_results) in results {
         for g in gene_results {
-            let p = g.staar.staar_o;
-            if !p.is_finite() || p <= 0.0 || p > 1.0 {
+            let raw = g.staar.staar_o;
+            if !raw.is_finite() || raw > 1.0 {
                 continue;
             }
+            let p = if raw <= 0.0 { 1e-300 } else { raw };
             let chrom_label = g.chromosome.label();
             let (idx, offset) = match offsets.get(&chrom_label) {
                 Some(v) => *v,
@@ -621,7 +625,8 @@ fn collect_pvalues(results: &[(MaskType, Vec<GeneResult>)]) -> Vec<f64> {
     results
         .iter()
         .flat_map(|(_, genes)| genes.iter().map(|g| g.staar.staar_o))
-        .filter(|p| p.is_finite() && *p > 0.0 && *p <= 1.0)
+        .filter(|p| p.is_finite() && *p <= 1.0)
+        .map(|p| if p <= 0.0 { 1e-300 } else { p })
         .collect()
 }
 
