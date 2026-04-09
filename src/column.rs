@@ -158,9 +158,14 @@ pub static ANNOTATION_EXTRACTS: &[AnnotationExtract] = &[
     // FAVOR adds a native end_position field, swap this expression for a
     // direct column reference — output column name and downstream code
     // do not change.
+    //
+    // Explicit `CAST(... AS INTEGER)` because DataFusion 53 widens
+    // `INTEGER + LENGTH(VARCHAR)` to BIGINT (LENGTH returns BIGINT), and
+    // the cohort store builder reads this column as `Int32Array`. The
+    // cast keeps the on-disk schema and the in-memory downcast aligned.
     AnnotationExtract {
         output: Col::EndPosition,
-        sql: "(a.position + LENGTH(a.ref_vcf) - 1)",
+        sql: "CAST((a.position + LENGTH(a.ref_vcf) - 1) AS INTEGER)",
     },
     AnnotationExtract {
         output: Col::GeneName,
@@ -174,13 +179,19 @@ pub static ANNOTATION_EXTRACTS: &[AnnotationExtract] = &[
         output: Col::Consequence,
         sql: "COALESCE(a.gencode.consequence, '')",
     },
+    // FAVOR stores CADD and REVEL as FLOAT (Float32). The cohort store
+    // builder downcasts these as `Float64Array`, so we wrap the entire
+    // COALESCE in `CAST(... AS DOUBLE)`. A bare `COALESCE(FLOAT, 0.0)`
+    // stays FLOAT because the common type of FLOAT and DOUBLE_LITERAL
+    // narrows to the column's storage type — verified against the
+    // DuckDB / DataFusion type promotion rules.
     AnnotationExtract {
         output: Col::CaddPhred,
-        sql: "COALESCE(a.main.cadd.phred, 0)",
+        sql: "CAST(COALESCE(a.main.cadd.phred, 0.0) AS DOUBLE)",
     },
     AnnotationExtract {
         output: Col::Revel,
-        sql: "COALESCE(a.dbnsfp.revel, 0)",
+        sql: "CAST(COALESCE(a.dbnsfp.revel, 0.0) AS DOUBLE)",
     },
     AnnotationExtract {
         output: Col::IsCagePromoter,
@@ -264,7 +275,10 @@ pub fn annotation_join_sql() -> String {
     select_parts.push(format!("g.position AS {}", Col::Position));
     select_parts.push(format!("g.\"ref\" AS {}", Col::RefAllele));
     select_parts.push(format!("g.alt AS {}", Col::AltAllele));
-    select_parts.push("g.maf".to_string());
+    // The genotype extractor writes `maf` as Float32; the cohort store
+    // builder downcasts the column as `Float64Array`. Explicit cast at
+    // the join boundary keeps both halves of the contract aligned.
+    select_parts.push(format!("CAST(g.maf AS DOUBLE) AS {}", Col::Maf));
 
     for extract in ANNOTATION_EXTRACTS {
         select_parts.push(format!("{} AS {}", extract.sql, extract.output));

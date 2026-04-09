@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, BooleanBuilder, FixedSizeListArray, Float32Array, Float64Array,
-    Float64Builder, Int32Array, Int32Builder, ListArray, StringArray, StringBuilder, UInt32Builder,
+    Float64Builder, Int32Array, Int32Builder, ListArray, StringArray, StringBuilder,
+    StringViewArray, UInt32Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -24,13 +25,64 @@ use crate::output::Output;
 use super::encoding::*;
 use super::variants::col_by_name;
 
-/// Stringify an Arrow cell used as a join key. Fast path for `StringArray`
-/// (ingest + genotype parquet both produce these); falls back to the generic
-/// Arrow display formatter so an upstream schema change still works, just
-/// slower.
+/// Borrowed view over a string-typed Arrow column. DataFusion 53 emits
+/// `Utf8View` (`StringViewArray`) for VARCHAR by default, while the
+/// cohort store's own `variants.parquet` and other writer-controlled
+/// outputs still produce `Utf8` (`StringArray`). The dosage-join hot
+/// loop in `build_chromosome` and the meta-row collection loop in
+/// `write_variants_parquet` both read string columns thousands of times
+/// per batch, so we downcast once at the top of the loop and dispatch
+/// on this enum instead of paying for `array_value_to_string` per row.
+enum StrCol<'a> {
+    Utf8(&'a StringArray),
+    Utf8View(&'a StringViewArray),
+}
+
+impl<'a> StrCol<'a> {
+    fn from_col(col: &'a dyn Array) -> Option<Self> {
+        if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
+            Some(Self::Utf8(a))
+        } else {
+            col.as_any()
+                .downcast_ref::<StringViewArray>()
+                .map(Self::Utf8View)
+        }
+    }
+
+    #[inline]
+    fn value(&self, i: usize) -> &str {
+        match self {
+            Self::Utf8(a) => a.value(i),
+            Self::Utf8View(a) => a.value(i),
+        }
+    }
+}
+
+/// Look up a string column on a SQL-result batch by name and wrap it in
+/// `StrCol`. Mirrors `col_by_name<T>` for the Utf8/Utf8View polymorphic
+/// case. Used by `write_variants_parquet` for ref/alt/region/consequence,
+/// where DataFusion 53 emits Utf8View even though the cohort store's
+/// own writers stay on Utf8.
+fn str_col_by_name<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<StrCol<'a>, CohortError> {
+    let idx = batch.schema().index_of(name).map_err(|_| {
+        CohortError::Resource(format!("_rare_all missing column {name}"))
+    })?;
+    StrCol::from_col(batch.column(idx).as_ref()).ok_or_else(|| {
+        CohortError::Resource(format!(
+            "_rare_all column {name} is not Utf8 or Utf8View"
+        ))
+    })
+}
+
+/// Stringify an Arrow cell used as a join key. Fast path for both
+/// `StringArray` and `StringViewArray`; falls back to the generic Arrow
+/// display formatter so an upstream schema change still works.
 fn str_cell(col: &dyn Array, row: usize) -> String {
-    if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
-        return a.value(row).to_string();
+    if let Some(s) = StrCol::from_col(col) {
+        return s.value(row).to_string();
     }
     arrow::util::display::array_value_to_string(col, row).unwrap_or_default()
 }
@@ -143,16 +195,16 @@ pub fn build_chromosome(
             .as_any()
             .downcast_ref::<Int32Array>()
             .ok_or_else(|| CohortError::Analysis("Genotype parquet missing position".into()))?;
-        let ref_arr = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| CohortError::Analysis("Genotype parquet ref not StringArray".into()))?;
-        let alt_arr = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| CohortError::Analysis("Genotype parquet alt not StringArray".into()))?;
+        let ref_arr = StrCol::from_col(batch.column(1).as_ref()).ok_or_else(|| {
+            CohortError::Analysis(
+                "Genotype parquet ref column is not Utf8 or Utf8View".into(),
+            )
+        })?;
+        let alt_arr = StrCol::from_col(batch.column(2).as_ref()).ok_or_else(|| {
+            CohortError::Analysis(
+                "Genotype parquet alt column is not Utf8 or Utf8View".into(),
+            )
+        })?;
         let dos_col = batch.column(3);
         let dos_fsl = dos_col.as_any().downcast_ref::<FixedSizeListArray>();
         let dos_list = dos_col.as_any().downcast_ref::<ListArray>();
@@ -360,11 +412,11 @@ fn write_variants_parquet(
     for batch in full_batches {
         let pos_arr = col_by_name::<Int32Array>(batch, Col::Position.as_str())?;
         let end_arr = col_by_name::<Int32Array>(batch, Col::EndPosition.as_str())?;
-        let ref_arr = col_by_name::<StringArray>(batch, Col::RefAllele.as_str())?;
-        let alt_arr = col_by_name::<StringArray>(batch, Col::AltAllele.as_str())?;
+        let ref_arr = str_col_by_name(batch, Col::RefAllele.as_str())?;
+        let alt_arr = str_col_by_name(batch, Col::AltAllele.as_str())?;
         let maf_arr = col_by_name::<Float64Array>(batch, Col::Maf.as_str())?;
-        let rt_arr = col_by_name::<StringArray>(batch, Col::RegionType.as_str())?;
-        let csq_arr = col_by_name::<StringArray>(batch, Col::Consequence.as_str())?;
+        let rt_arr = str_col_by_name(batch, Col::RegionType.as_str())?;
+        let csq_arr = str_col_by_name(batch, Col::Consequence.as_str())?;
         let cadd_arr = col_by_name::<Float64Array>(batch, Col::CaddPhred.as_str())?;
         let revel_arr = col_by_name::<Float64Array>(batch, Col::Revel.as_str())?;
         let cps = col_by_name::<BooleanArray>(batch, Col::IsCagePromoter.as_str())?;
