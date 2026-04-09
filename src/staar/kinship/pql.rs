@@ -25,6 +25,7 @@ pub fn fit_pql_glmm(
     kinships: &[KinshipMatrix],
     groups: &GroupPartition,
     out: &dyn Output,
+    budget_bytes: u64,
 ) -> Result<KinshipState, CohortError> {
     use crate::staar::model::fit_logistic;
 
@@ -32,7 +33,7 @@ pub fn fit_pql_glmm(
     // Skip the dense memory check on the sparse path — sparse fit_reml has
     // its own budget logic.
     if kinships.iter().all(|k| !k.is_sparse()) {
-        check_memory_budget(n)?;
+        check_memory_budget(n, budget_bytes)?;
     }
 
     let init = fit_logistic(y, x, 25);
@@ -73,7 +74,7 @@ pub fn fit_pql_glmm(
             y_work[(i, 0)] = eta[(i, 0)] + (y[(i, 0)] - mu_i) / w_i;
         }
 
-        let state = fit_reml(&y_work, x, kinships, groups, Some(&w_irls))?;
+        let state = fit_reml(&y_work, x, kinships, groups, Some(&w_irls), budget_bytes)?;
 
         // BLUP: η_new = Xα + D PY where D = Σ - R, so η_new = Y_w - R PY.
         // R is diagonal with R[i,i] = τ_{g(i)} / W[i].
@@ -162,7 +163,14 @@ mod tests {
         let (y, x) = synthetic_binary(n);
 
         let out = null_output();
-        let state = fit_pql_glmm(&y, &x, std::slice::from_ref(&kin), &groups, out.as_ref())
+        let state = fit_pql_glmm(
+            &y,
+            &x,
+            std::slice::from_ref(&kin),
+            &groups,
+            out.as_ref(),
+            crate::staar::kinship::DEFAULT_KINSHIP_MEM_BYTES,
+        )
             .expect("fit_pql_glmm");
 
         assert_eq!(state.tau.n_kinship(), 1);
@@ -183,7 +191,14 @@ mod tests {
         let groups = GroupPartition::single(n);
         let (y, x) = synthetic_binary(n);
         let out = null_output();
-        match fit_pql_glmm(&y, &x, std::slice::from_ref(&kin), &groups, out.as_ref()) {
+        match fit_pql_glmm(
+            &y,
+            &x,
+            std::slice::from_ref(&kin),
+            &groups,
+            out.as_ref(),
+            crate::staar::kinship::DEFAULT_KINSHIP_MEM_BYTES,
+        ) {
             Err(CohortError::Input(msg)) => assert!(msg.contains("n_samples"), "msg = {msg}"),
             Err(other) => panic!("expected Input, got {other:?}"),
             Ok(_) => panic!("expected Input error, got Ok"),
@@ -198,7 +213,15 @@ mod tests {
         let (y, x) = synthetic_binary(n);
         let groups = GroupPartition::single(n);
         let out = null_output();
-        let state = fit_pql_glmm(&y, &x, &[], &groups, out.as_ref()).expect("fit_pql_glmm");
+        let state = fit_pql_glmm(
+            &y,
+            &x,
+            &[],
+            &groups,
+            out.as_ref(),
+            crate::staar::kinship::DEFAULT_KINSHIP_MEM_BYTES,
+        )
+        .expect("fit_pql_glmm");
         assert_eq!(state.tau.n_kinship(), 0);
         assert_eq!(state.tau.n_group(), 1);
         assert!(state.tau.group(0).is_finite() && state.tau.group(0) >= 0.0);

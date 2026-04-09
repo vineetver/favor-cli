@@ -13,6 +13,10 @@ pub struct Resources {
     pub memory_bytes: u64,
     pub threads: usize,
     pub temp_dir: PathBuf,
+    /// Cap on the dense AI-REML working set (`5·n²·8` bytes). Resolved
+    /// from `COHORT_KINSHIP_MEM_GB` if set, otherwise the default 16 GiB.
+    /// Sourced here so `staar/kinship/budget.rs` does not reach for env.
+    pub kinship_budget_bytes: u64,
     /// Configured environment, if set during setup
     environment: Option<Environment>,
 }
@@ -25,6 +29,7 @@ impl Resources {
             memory_bytes: detect_memory(),
             threads: detect_threads(None),
             temp_dir: detect_temp(None),
+            kinship_budget_bytes: detect_kinship_budget(),
             environment: None,
         }
     }
@@ -47,6 +52,7 @@ impl Resources {
             memory_bytes,
             threads: detect_threads(config.threads),
             temp_dir: detect_temp(Some(config)),
+            kinship_budget_bytes: detect_kinship_budget(),
             environment: config.environment,
         }
     }
@@ -119,6 +125,20 @@ fn detect_memory() -> u64 {
         .or_else(cgroup_memory)
         .or_else(meminfo_memory)
         .unwrap_or(4 * 1024 * 1024 * 1024)
+}
+
+/// Resolve the dense AI-REML budget. `COHORT_KINSHIP_MEM_GB` overrides;
+/// otherwise the default 16 GiB. Sized independently from `memory_bytes`
+/// because the dense kinship working set scales `5·n²·8` and may need a
+/// distinct cap from the overall DataFusion pool.
+fn detect_kinship_budget() -> u64 {
+    const DEFAULT: u64 = 16 * (1u64 << 30);
+    std::env::var("COHORT_KINSHIP_MEM_GB")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|g| *g > 0.0)
+        .map(|g| (g * (1u64 << 30) as f64) as u64)
+        .unwrap_or(DEFAULT)
 }
 
 fn env_usize(name: &str) -> Option<usize> {

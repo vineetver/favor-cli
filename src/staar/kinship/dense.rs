@@ -140,6 +140,7 @@ pub fn fit_reml_dense(
     groups: &GroupPartition,
     weights: &[f64],
     init_tau: VarianceComponents,
+    budget_bytes: u64,
 ) -> Result<KinshipState, CohortError> {
     let n = y.nrows();
     let builder = DenseBuilder {
@@ -148,7 +149,9 @@ pub fn fit_reml_dense(
         groups,
         weights,
     };
-    run_reml(y, x, kinships, groups, weights, init_tau, &builder)
+    let mut state = run_reml(y, x, kinships, groups, weights, init_tau, &builder)?;
+    state.budget_bytes = budget_bytes;
+    Ok(state)
 }
 
 #[cfg(test)]

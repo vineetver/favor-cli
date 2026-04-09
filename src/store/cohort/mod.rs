@@ -24,7 +24,6 @@ use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement};
 use crate::output::Output;
-use crate::resource::Resources;
 use crate::store::list::VariantSet;
 
 #[derive(Serialize, Deserialize)]
@@ -249,7 +248,6 @@ pub struct GenoStoreResult {
     // points at the cohort dir under `.cohort/cohorts/<id>/`.
     pub geno: crate::staar::genotype::GenotypeResult,
     pub manifest: CohortManifest,
-    pub engine: DfEngine,
     pub store_dir: PathBuf,
 }
 
@@ -260,20 +258,27 @@ pub(crate) fn read_sample_names_at(store_dir: &Path) -> Result<Vec<String>, Coho
     Ok(content.lines().map(|s| s.to_string()).collect())
 }
 
+/// Register the annotation + genotype tables on `df` and execute the join,
+/// leaving `_rare_all` registered for downstream queries. Caller owns the
+/// engine — typically `engine.df()` from the composition root. Drops any
+/// pre-existing copies of the temp tables so a second build inside the
+/// same process is idempotent.
 pub fn run_annotation_join(
+    df: &DfEngine,
     annotations: &Path,
     geno: &crate::staar::genotype::GenotypeResult,
-    res: &Resources,
-) -> Result<DfEngine, CohortError> {
-    let engine = DfEngine::new(res)?;
+) -> Result<(), CohortError> {
+    for tbl in ["_rare_all", "_ann_check", "_genotypes", "_annotations"] {
+        let _ = df.execute(&format!("DROP TABLE IF EXISTS {tbl}"));
+    }
 
     let ann_vs = VariantSet::open(annotations)?;
 
     // Check the table schema directly; LIMIT 0 may return no batches in DataFusion.
     let ann_cols: Vec<String> = {
-        engine.register_parquet_dir("_ann_check", ann_vs.root())?;
-        let cols = engine.table_columns("_ann_check")?;
-        let _ = engine.execute("DROP TABLE IF EXISTS _ann_check");
+        df.register_parquet_dir("_ann_check", ann_vs.root())?;
+        let cols = df.table_columns("_ann_check")?;
+        let _ = df.execute("DROP TABLE IF EXISTS _ann_check");
         cols
     };
 
@@ -298,16 +303,16 @@ pub fn run_annotation_join(
     }
 
     let geno_dir = &geno.output_dir;
-    engine.register_parquet_sorted("_genotypes", geno_dir, &["position", "ref", "alt"])?;
-    engine.register_parquet_sorted(
+    df.register_parquet_sorted("_genotypes", geno_dir, &["position", "ref", "alt"])?;
+    df.register_parquet_sorted(
         "_annotations",
         ann_vs.root(),
         &["position", "ref_vcf", "alt_vcf"],
     )?;
 
-    engine.execute(&column::annotation_join_sql())?;
+    df.execute(&column::annotation_join_sql())?;
 
-    Ok(engine)
+    Ok(())
 }
 
 pub fn build(

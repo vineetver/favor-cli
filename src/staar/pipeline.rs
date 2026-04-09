@@ -429,7 +429,7 @@ impl<'a> StaarPipeline<'a> {
                 outcome: CacheOutcome::Hit,
                 reason: "loaded by cohort id".into(),
             });
-            return self.cohort().load(self.engine);
+            return self.cohort().load();
         }
 
         let (genotypes, annotations) = match &self.config.cohort_source {
@@ -512,7 +512,7 @@ impl<'a> StaarPipeline<'a> {
         let primary_trait = &self.config.trait_names[0];
 
         let pheno = load_phenotype(
-            &store.engine,
+            self.engine.df(),
             &self.config.phenotype,
             &self.config.covariates,
             &store.geno,
@@ -526,7 +526,7 @@ impl<'a> StaarPipeline<'a> {
         let mut x = pheno.x;
 
         if let Some(ref loci_path) = self.config.known_loci {
-            let x_cond = load_known_loci(&store.engine, &store.geno, loci_path, pheno.n, self.out)?;
+            let x_cond = load_known_loci(self.engine.df(), &store.geno, loci_path, pheno.n, self.out)?;
             x = augment_covariates(&x, &x_cond);
             self.out.status(&format!(
                 "  Conditional: {} known loci added as covariates",
@@ -590,7 +590,7 @@ impl<'a> StaarPipeline<'a> {
             staar::kinship::load_kinship(&self.config.kinship, &pheno.compact_samples, self.out)?;
         let groups = match self.config.kinship_groups.as_deref() {
             Some(col) => staar::kinship::load_groups(
-                &store.engine,
+                self.engine.df(),
                 &self.config.phenotype,
                 col,
                 &store.geno,
@@ -601,13 +601,14 @@ impl<'a> StaarPipeline<'a> {
             None => staar::kinship::GroupPartition::single(pheno.n),
         };
 
+        let budget = self.engine.resources().kinship_budget_bytes;
         let state = match kind {
             NullModelKind::KinshipReml => {
-                staar::kinship::fit_reml(&pheno.y, &pheno.x, &kinships, &groups, None)?
+                staar::kinship::fit_reml(&pheno.y, &pheno.x, &kinships, &groups, None, budget)?
             }
-            NullModelKind::KinshipPql => {
-                staar::kinship::fit_pql_glmm(&pheno.y, &pheno.x, &kinships, &groups, self.out)?
-            }
+            NullModelKind::KinshipPql => staar::kinship::fit_pql_glmm(
+                &pheno.y, &pheno.x, &kinships, &groups, self.out, budget,
+            )?,
             _ => unreachable!("fit_kinship_null_model called with non-kinship kind"),
         };
         self.out.status(&format!(

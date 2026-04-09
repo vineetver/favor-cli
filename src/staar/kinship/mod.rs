@@ -52,6 +52,8 @@ pub mod sparse;
 pub mod types;
 
 pub use budget::{check_memory_budget, dense_path_fits};
+#[cfg(test)]
+pub use budget::DEFAULT_KINSHIP_MEM_BYTES;
 pub use load::{load_groups, load_kinship};
 pub use pql::fit_pql_glmm;
 pub use types::{
@@ -67,14 +69,16 @@ use crate::error::CohortError;
 /// kernel (small n, bit-identical to GMMAT) and the sparse kernel
 /// (large n + sparse kinships, exact via the Takahashi recursion).
 ///
-/// Returns `CohortError::Resource` if neither path can run within the
-/// configured memory budget.
+/// `budget_bytes` is the dense AI-REML cap, sourced from
+/// `Resources::kinship_budget_bytes`. Returns `CohortError::Resource` if
+/// neither path can run within it.
 pub fn fit_reml(
     y: &Mat<f64>,
     x: &Mat<f64>,
     kinships: &[KinshipMatrix],
     groups: &GroupPartition,
     weights: Option<&[f64]>,
+    budget_bytes: u64,
 ) -> Result<KinshipState, CohortError> {
     let n = y.nrows();
     let l = kinships.len();
@@ -104,12 +108,12 @@ pub fn fit_reml(
 
     let any_sparse = kinships.iter().any(|k| k.is_sparse());
     let all_sparse = !kinships.is_empty() && kinships.iter().all(|k| k.is_sparse());
-    let dense_fits = dense_path_fits(n);
+    let dense_fits = dense_path_fits(n, budget_bytes);
 
     if !dense_fits && !all_sparse {
         // Dense doesn't fit AND we have at least one inherently dense
         // kinship. Bail out clearly.
-        check_memory_budget(n)?;
+        check_memory_budget(n, budget_bytes)?;
         unreachable!("check_memory_budget should have errored above");
     }
 
@@ -148,6 +152,7 @@ pub fn fit_reml(
             init_tau,
             sparse::SparseSolverKind::default(),
             None,
+            budget_bytes,
         );
     }
 
@@ -179,12 +184,12 @@ pub fn fit_reml(
                 None => k.clone(),
             })
             .collect();
-        check_memory_budget(n)?;
-        return dense::fit_reml_dense(y, x, &promoted, groups, &w_vec, init_tau);
+        check_memory_budget(n, budget_bytes)?;
+        return dense::fit_reml_dense(y, x, &promoted, groups, &w_vec, init_tau, budget_bytes);
     }
 
-    check_memory_budget(n)?;
-    dense::fit_reml_dense(y, x, kinships, groups, &w_vec, init_tau)
+    check_memory_budget(n, budget_bytes)?;
+    dense::fit_reml_dense(y, x, kinships, groups, &w_vec, init_tau, budget_bytes)
 }
 
 #[cfg(test)]
@@ -237,7 +242,7 @@ mod tests {
         }
         let glm = fit_glm(&y, &x);
         let groups = GroupPartition::single(n);
-        let state = fit_reml(&y, &x, &[], &groups, None).expect("fit_reml groups-only");
+        let state = fit_reml(&y, &x, &[], &groups, None, DEFAULT_KINSHIP_MEM_BYTES).expect("fit_reml groups-only");
         assert!(state.n_iter < 500);
         let rel_err = (state.tau.group(0) - glm.sigma2).abs() / glm.sigma2;
         assert!(
@@ -264,7 +269,7 @@ mod tests {
         }
         let group_labels: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
         let groups = GroupPartition::from_assignments(&assignments, &group_labels).unwrap();
-        let state = fit_reml(&y, &x, &[], &groups, None).expect("fit_reml 3 groups");
+        let state = fit_reml(&y, &x, &[], &groups, None, DEFAULT_KINSHIP_MEM_BYTES).expect("fit_reml 3 groups");
         assert!(state.n_iter < 500);
         assert!(state.tau.group(0) < state.tau.group(1));
         assert!(state.tau.group(1) < state.tau.group(2));
@@ -284,7 +289,7 @@ mod tests {
         }
         let x = make_x_intercept(n);
         let state =
-            fit_reml(&y, &x, std::slice::from_ref(&kin), &groups, None).expect("fit_reml");
+            fit_reml(&y, &x, std::slice::from_ref(&kin), &groups, None, DEFAULT_KINSHIP_MEM_BYTES).expect("fit_reml");
         assert!(state.n_iter < 500);
         let total: f64 = state.tau.as_slice().iter().sum();
         assert!(total > 0.0 && total.is_finite());
@@ -299,7 +304,7 @@ mod tests {
         let y = Mat::<f64>::zeros(n, 1);
         let x = make_x_intercept(n);
         let groups = GroupPartition::single(n + 5);
-        match fit_reml(&y, &x, &[], &groups, None) {
+        match fit_reml(&y, &x, &[], &groups, None, DEFAULT_KINSHIP_MEM_BYTES) {
             Err(CohortError::Input(msg)) => {
                 assert!(msg.contains("group partition covers"), "msg = {msg}");
             }
@@ -317,7 +322,7 @@ mod tests {
         // Build a kinship over n+5 samples — must be rejected.
         let kin = block_family_kinship(3, 5, "wrong-size");
         assert_ne!(kin.n(), n);
-        match fit_reml(&y, &x, std::slice::from_ref(&kin), &groups, None) {
+        match fit_reml(&y, &x, std::slice::from_ref(&kin), &groups, None, DEFAULT_KINSHIP_MEM_BYTES) {
             Err(CohortError::Input(msg)) => {
                 assert!(msg.contains("n_samples"), "msg = {msg}");
                 assert!(msg.contains("wrong-size"), "msg = {msg}");
@@ -343,7 +348,7 @@ mod tests {
             y[(i, 0)] = if u < p { 1.0 } else { 0.0 };
         }
         let out = null_output();
-        let state = fit_pql_glmm(&y, &x, std::slice::from_ref(&kin), &groups, out.as_ref())
+        let state = fit_pql_glmm(&y, &x, std::slice::from_ref(&kin), &groups, out.as_ref(), DEFAULT_KINSHIP_MEM_BYTES)
             .expect("fit_pql_glmm");
         assert_eq!(state.tau.n_total(), 2);
         assert!(state.tau.as_slice().iter().all(|&t| t.is_finite()));

@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::column;
-use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::output::Output;
 use crate::runtime::Engine;
@@ -83,7 +82,7 @@ impl<'a> CohortHandle<'a> {
     /// manifest. Errors with `DataMissing` if the manifest is absent,
     /// unparseable, on a wrong schema version, or missing chromosome
     /// artifacts.
-    pub fn load(&self, engine: &Engine) -> Result<GenoStoreResult, CohortError> {
+    pub fn load(&self) -> Result<GenoStoreResult, CohortError> {
         let manifest_path = self.dir.join("manifest.json");
         if !manifest_path.exists() {
             return Err(CohortError::DataMissing(format!(
@@ -129,14 +128,12 @@ impl<'a> CohortHandle<'a> {
             }
         }
         let sample_names = read_sample_names_at(&self.dir)?;
-        let df = DfEngine::new(engine.resources())?;
         Ok(GenoStoreResult {
             geno: crate::staar::genotype::GenotypeResult {
                 sample_names,
                 output_dir: self.dir.clone(),
             },
             manifest,
-            engine: df,
             store_dir: self.dir.clone(),
         })
     }
@@ -165,7 +162,6 @@ impl<'a> CohortHandle<'a> {
             ));
 
             let sample_names = read_sample_names_at(&probe_result.store_dir)?;
-            let df = DfEngine::new(res)?;
 
             return Ok(GenoStoreResult {
                 geno: crate::staar::genotype::GenotypeResult {
@@ -173,7 +169,6 @@ impl<'a> CohortHandle<'a> {
                     output_dir: probe_result.store_dir.clone(),
                 },
                 manifest,
-                engine: df,
                 store_dir: probe_result.store_dir,
             });
         }
@@ -196,7 +191,8 @@ impl<'a> CohortHandle<'a> {
         )?;
 
         out.status("  Joining genotypes with annotations...");
-        let df = run_annotation_join(annotations, &geno, res)?;
+        let df = engine.df();
+        run_annotation_join(df, annotations, &geno)?;
 
         let dup_count = df.query_scalar(&column::dedup_count_sql())?;
         if dup_count > 0 {
@@ -224,12 +220,11 @@ impl<'a> CohortHandle<'a> {
             )));
         }
 
-        let manifest = build(&df, &geno, &self.dir, genotypes, annotations, out)?;
+        let manifest = build(df, &geno, &self.dir, genotypes, annotations, out)?;
 
         Ok(GenoStoreResult {
             geno,
             manifest,
-            engine: df,
             store_dir: self.dir.clone(),
         })
     }

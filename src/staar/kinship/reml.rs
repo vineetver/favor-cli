@@ -708,6 +708,10 @@ fn converge<B: SolverBuilder>(
         h2,
         n_iter: iter_used,
         outer_refits: 0,
+        // Caller (`fit_reml_dense` / `fit_reml_sparse`) overwrites this
+        // with the threaded `Resources::kinship_budget_bytes` before
+        // returning to user code.
+        budget_bytes: 0,
     })
 }
 

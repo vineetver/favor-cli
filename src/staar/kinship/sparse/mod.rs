@@ -281,6 +281,7 @@ pub fn fit_reml_sparse(
     init_tau: VarianceComponents,
     kind: SparseSolverKind,
     hutchinson_probes: Option<usize>,
+    budget_bytes: u64,
 ) -> Result<KinshipState, CohortError> {
     let n = y.nrows();
     let w_vec = weights_or_ones(n, weights);
@@ -296,7 +297,7 @@ pub fn fit_reml_sparse(
 
     let assembler = Assembler::new(n, kinships)?;
 
-    match kind {
+    let mut state = match kind {
         SparseSolverKind::Takahashi => {
             let pattern = assembler.pattern_owned_upper();
             let symbolic = takahashi::SymbolicTakahashi::new(pattern.as_ref())?;
@@ -307,7 +308,7 @@ pub fn fit_reml_sparse(
                 assembler: &assembler,
                 symbolic: &symbolic,
             };
-            run_reml(y, x, kinships, groups, &w_vec, init_tau, &builder)
+            run_reml(y, x, kinships, groups, &w_vec, init_tau, &builder)?
         }
         SparseSolverKind::Hutchinson => {
             let builder = HutchinsonBuilder {
@@ -317,9 +318,11 @@ pub fn fit_reml_sparse(
                 assembler: &assembler,
                 n_probes: hutchinson_probes.unwrap_or(DEFAULT_HUTCHINSON_PROBES),
             };
-            run_reml(y, x, kinships, groups, &w_vec, init_tau, &builder)
+            run_reml(y, x, kinships, groups, &w_vec, init_tau, &builder)?
         }
-    }
+    };
+    state.budget_bytes = budget_bytes;
+    Ok(state)
 }
 
 #[cfg(test)]
@@ -457,6 +460,7 @@ mod tests {
         warm_init.set_kinship(0, warm / kin_sparse.mean_diagonal());
         warm_init.set_group(0, warm);
 
+        let budget = crate::staar::kinship::DEFAULT_KINSHIP_MEM_BYTES;
         let dense_state = fit_reml_dense(
             &y,
             &x,
@@ -464,6 +468,7 @@ mod tests {
             &groups,
             &weights,
             warm_init.clone(),
+            budget,
         )
         .expect("dense fit");
 
@@ -476,6 +481,7 @@ mod tests {
             warm_init,
             SparseSolverKind::Hutchinson,
             Some(200),
+            budget,
         )
         .expect("sparse fit");
 
@@ -525,6 +531,7 @@ mod tests {
         warm_init.set_kinship(0, warm / kin_sparse.mean_diagonal());
         warm_init.set_group(0, warm);
 
+        let budget = crate::staar::kinship::DEFAULT_KINSHIP_MEM_BYTES;
         let dense_state = fit_reml_dense(
             &y,
             &x,
@@ -532,6 +539,7 @@ mod tests {
             &groups,
             &weights,
             warm_init.clone(),
+            budget,
         )
         .expect("dense fit");
 
@@ -544,6 +552,7 @@ mod tests {
             warm_init,
             SparseSolverKind::Takahashi,
             None,
+            budget,
         )
         .expect("takahashi fit");
 
@@ -584,6 +593,7 @@ mod tests {
         warm_init.set_kinship(0, 0.5);
         warm_init.set_group(0, 0.5);
 
+        let budget = crate::staar::kinship::DEFAULT_KINSHIP_MEM_BYTES;
         let s1 = fit_reml_sparse(
             &y,
             &x,
@@ -593,6 +603,7 @@ mod tests {
             warm_init.clone(),
             SparseSolverKind::Hutchinson,
             Some(64),
+            budget,
         )
         .expect("first sparse fit");
         let s2 = fit_reml_sparse(
@@ -604,6 +615,7 @@ mod tests {
             warm_init,
             SparseSolverKind::Hutchinson,
             Some(64),
+            budget,
         )
         .expect("second sparse fit");
 

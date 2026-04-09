@@ -357,6 +357,10 @@ pub struct KinshipState {
     pub h2: Vec<f64>,
     pub n_iter: usize,
     pub outer_refits: usize,
+    /// Dense AI-REML budget threaded in from `Resources::kinship_budget_bytes`
+    /// at fit time. Stashed here so the score path can re-validate the
+    /// budget without a separate parameter cascade.
+    pub budget_bytes: u64,
 }
 
 impl KinshipState {

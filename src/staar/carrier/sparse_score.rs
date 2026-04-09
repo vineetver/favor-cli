@@ -150,7 +150,7 @@ impl AnalysisVectors {
         let kinship = match null.kinship.as_ref() {
             Some(state) => {
                 if matches!(state.inverse, KinshipInverse::Dense(_)) {
-                    check_memory_budget(state.n())?;
+                    check_memory_budget(state.n(), state.budget_bytes)?;
                 }
                 Some(state.clone())
             }
