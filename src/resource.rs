@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::config::{Config, Environment, ResourceConfig};
+use crate::config::{Environment, ResourceConfig};
 
 /// Detected system resources for DataFusion and parallel execution.
 ///
@@ -18,14 +18,8 @@ pub struct Resources {
 }
 
 impl Resources {
-    /// Load config and detect resources in one call.
-    /// If config doesn't exist or can't be read, falls back to auto-detect.
-    pub fn detect_configured() -> Self {
-        let config_resources = Config::load().map(|c| c.resources).unwrap_or_default();
-        Self::detect_with_config(&config_resources)
-    }
-
-    /// Auto-detect resources without config. Used during setup (before config exists).
+    /// Auto-detect resources without config. Used during setup (before config exists)
+    /// and by `Engine::open_unconfigured` when no configured config is available.
     pub fn detect() -> Self {
         Self {
             memory_bytes: detect_memory(),

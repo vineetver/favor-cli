@@ -77,9 +77,7 @@ fn fmt_size(n: u64) -> String {
 fn build_stage_view(stage: &'static dyn Stage, focused: Option<&Artifact>) -> StageViewState {
     let cfg = Config::load().ok();
     let tier = cfg.as_ref().map(|c| c.data.tier).unwrap_or(Tier::Base);
-    let data_root = cfg.map(|c| c.root_dir()).unwrap_or_default();
     let ctx = SessionCtx {
-        data_root: &data_root,
         tier,
         focused: focused.map(|a| a.path.as_path()),
     };

@@ -17,6 +17,7 @@ use rayon::prelude::*;
 
 use crate::error::CohortError;
 use crate::output::Output;
+use crate::runtime::Engine;
 use crate::staar::carrier::sparse_score;
 use crate::staar::carrier::AnalysisVectors;
 use crate::staar::masks::{self, MaskGroup};
@@ -26,7 +27,6 @@ use crate::staar::{self, GeneResult, MaskCategory, MaskType, ScoringMode};
 use crate::store::cache::score_cache::{self, ChromScoreCache, GeneKBlock};
 use crate::store::cohort::variants::{CarrierList, VariantIndexEntry};
 use crate::store::cohort::{ChromosomeView, CohortHandle, CohortManifest};
-use crate::store::Store;
 use crate::types::{AnnotatedVariant, Chromosome};
 
 /// Function-pointer mask predicate over an `AnnotatedVariant`.
@@ -135,7 +135,7 @@ impl<'v> ChromCtx<'v> {
 /// Public entry point: score every chromosome in `manifest` and return
 /// per-mask gene/window result vectors plus individual p-values.
 pub fn run_score_tests(
-    store: &Store,
+    engine: &Engine,
     cohort_id: &crate::store::cohort::CohortId,
     manifest: &CohortManifest,
     config: &StaarConfig,
@@ -156,7 +156,7 @@ pub fn run_score_tests(
         );
     }
 
-    let cohort = store.cohort(cohort_id);
+    let cohort = engine.cohort(cohort_id);
 
     for ci in &manifest.chromosomes {
         let chrom: Chromosome = ci

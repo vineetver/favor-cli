@@ -51,12 +51,6 @@ impl Stage for AnnotateStage {
                     options: &["base", "full"],
                     default: Some(ctx.tier.as_str()),
                 },
-                FormField::Path {
-                    id: "data_root",
-                    label: "data root",
-                    kind: PathKind::Dir,
-                    default: Some(ctx.data_root.to_path_buf()),
-                },
             ],
             advanced: vec![],
         }
@@ -75,15 +69,10 @@ impl Stage for AnnotateStage {
             Some("full") => Tier::Full,
             _ => Tier::Base,
         };
-        let data_root = values
-            .path("data_root")
-            .cloned()
-            .ok_or(FormError::Missing("data_root"))?;
         Ok(RunRequest::Annotate(AnnotateConfig {
             input,
             output,
             tier,
-            data_root,
         }))
     }
 }

@@ -6,12 +6,14 @@
 //! are `Send + Sync` so the gene-parallel scoring loop can share a view
 //! across rayon worker threads.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use crate::column;
+use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::output::Output;
-use crate::resource::Resources;
+use crate::runtime::Engine;
 use crate::store::query::materialize::{DenseDosageBatch, DenseDosageScratch};
 use crate::store::query::{intersect_sorted, union_sorted, Region, VariantSelector};
 use crate::store::Store;
@@ -21,9 +23,20 @@ use super::sparse_g::SparseG;
 use super::types::{as_u32_slice, CarrierBatch, SortedVcfs, VariantMetadata, VariantRow, VariantVcf};
 use super::variants::{CarrierList, VariantIndex};
 use super::{
-    build_or_load_store_with_probe, probe as cohort_probe, read_sample_names_at, CohortId,
-    CohortManifest, GenoStoreResult, StoreProbe,
+    build, describe_miss, probe as cohort_probe, read_sample_names_at, run_annotation_join,
+    CohortId, CohortManifest, GenoStoreResult, StoreProbe,
 };
+
+pub struct CohortSources<'a> {
+    pub genotypes: &'a Path,
+    pub annotations: &'a Path,
+}
+
+pub struct BuildOpts<'a> {
+    pub staging_dir: &'a Path,
+    pub rebuild: bool,
+    pub probe: StoreProbe,
+}
 
 pub struct CohortHandle<'a> {
     store: &'a Store,
@@ -124,15 +137,11 @@ impl<'a> CohortHandle<'a> {
         cohort_probe(&self.dir, genotypes, annotations)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn build_or_load(
         &self,
-        genotypes: &std::path::Path,
-        annotations: &std::path::Path,
-        geno_staging_dir: &std::path::Path,
-        rebuild_store: bool,
-        probe_result: StoreProbe,
-        res: &Resources,
+        sources: CohortSources<'_>,
+        opts: BuildOpts<'_>,
+        engine: &Engine,
         out: &dyn Output,
     ) -> Result<GenoStoreResult, CohortError> {
         if let Some(parent) = self.dir.parent() {
@@ -140,16 +149,89 @@ impl<'a> CohortHandle<'a> {
                 CohortError::Resource(format!("create {}: {e}", parent.display()))
             })?;
         }
-        build_or_load_store_with_probe(
+
+        let CohortSources { genotypes, annotations } = sources;
+        let BuildOpts { staging_dir, rebuild, probe: probe_result } = opts;
+        let res = engine.resources();
+
+        // Cohort-build session is intentionally distinct from `engine.df()`.
+        // The annotation join registers temp tables (`_ann`, `_genotypes`)
+        // that would collide with the long-lived pipeline session, and the
+        // fresh session keeps row-order/partitioning identical to legacy.
+        if let Some(manifest) = probe_result.manifest {
+            out.status(&format!(
+                "Using cached genotype store ({} variants x {} samples)",
+                manifest.n_variants, manifest.n_samples,
+            ));
+
+            let sample_names = read_sample_names_at(&probe_result.store_dir)?;
+            let df = DfEngine::new(res)?;
+
+            return Ok(GenoStoreResult {
+                sample_names,
+                store_dir: probe_result.store_dir,
+                manifest,
+                engine: df,
+                geno_output_dir: None,
+            });
+        }
+
+        let why = match (&probe_result.miss_reason, rebuild) {
+            (_, true) => "  Rebuild requested by --rebuild-store".to_string(),
+            (Some(r), _) => format!("  Cache miss: {}", describe_miss(r)),
+            (None, _) => "  Cache miss: probe returned no reason".to_string(),
+        };
+        out.status(&why);
+        out.status("Building genotype store...");
+
+        out.status("  Extracting genotypes from VCF...");
+        let geno = crate::staar::genotype::extract_genotypes(
             genotypes,
-            annotations,
-            &self.dir,
-            geno_staging_dir,
-            rebuild_store,
-            probe_result,
-            res,
+            staging_dir,
+            res.memory_bytes,
+            res.threads,
             out,
-        )
+        )?;
+
+        out.status("  Joining genotypes with annotations...");
+        let df = run_annotation_join(annotations, &geno, res)?;
+
+        // Deduplicate: same (chromosome, position, ref, alt) from multi-allelic splits or overlapping VCFs.
+        let dup_count = df.query_scalar(&column::dedup_count_sql())?;
+        if dup_count > 0 {
+            out.warn(&format!(
+                "  {dup_count} duplicate variants found — keeping first occurrence."
+            ));
+            df.execute(&column::dedup_sql())?;
+            df.execute("DROP TABLE _rare_all")?;
+            df.execute("ALTER TABLE _rare_dedup RENAME TO _rare_all")?;
+        }
+
+        let n_all = df.query_scalar("SELECT COUNT(*) FROM _rare_all")?;
+        let n_genes = df.query_scalar(&column::gene_count_sql())?;
+        out.status(&format!(
+            "  {} annotated variants, {} genes",
+            n_all, n_genes
+        ));
+
+        if n_all == 0 {
+            return Err(CohortError::Analysis(format!(
+                "No variants found after joining genotypes ({}) with annotations ({}). \
+                 Check that both use the same genome build and allele normalization.",
+                genotypes.display(),
+                annotations.display(),
+            )));
+        }
+
+        let manifest = build(&df, &geno, &self.dir, genotypes, annotations, out)?;
+
+        Ok(GenoStoreResult {
+            sample_names: geno.sample_names.clone(),
+            store_dir: self.dir.clone(),
+            manifest,
+            engine: df,
+            geno_output_dir: Some(geno.output_dir),
+        })
     }
 }
 

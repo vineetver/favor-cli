@@ -2,8 +2,10 @@ use std::path::PathBuf;
 
 use crate::error::CohortError;
 use crate::output::Output;
+use crate::runtime::Engine;
 
 pub fn run(
+    _engine: &Engine,
     _input: PathBuf,
     _tissue: Option<String>,
     _disease: Option<String>,

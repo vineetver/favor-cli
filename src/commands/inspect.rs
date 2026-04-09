@@ -3,20 +3,23 @@ use serde_json::json;
 use parquet::file::reader::FileReader;
 
 use crate::config::{Config, DirProbe, Tier};
-use crate::store::annotation::refs::favor_alias_for;
-use crate::store::config::StoreConfig;
-use crate::store::Store;
 use crate::error::CohortError;
 use crate::output::Output;
+use crate::runtime::Engine;
+use crate::store::annotation::refs::favor_alias_for;
 
-pub fn schema(table: Option<String>, out: &dyn Output) -> Result<(), CohortError> {
-    let config = Config::load_configured()?;
+pub fn schema(
+    engine: &Engine,
+    table: Option<String>,
+    out: &dyn Output,
+) -> Result<(), CohortError> {
+    let config = engine.config();
 
     match table.as_deref() {
-        None => list_tables(&config, out),
-        Some("base") => describe_tier(&config, Tier::Base, out),
-        Some("full") => describe_tier(&config, Tier::Full, out),
-        Some(name) => describe_tissue_table(&config, name, out),
+        None => list_tables(config, out),
+        Some("base") => describe_tier(engine, Tier::Base, out),
+        Some("full") => describe_tier(engine, Tier::Full, out),
+        Some(name) => describe_tissue_table(config, name, out),
     }
 }
 
@@ -71,9 +74,8 @@ fn list_tables(config: &Config, out: &dyn Output) -> Result<(), CohortError> {
     Ok(())
 }
 
-fn describe_tier(config: &Config, tier: Tier, out: &dyn Output) -> Result<(), CohortError> {
-    let store = Store::open(StoreConfig::resolve(None)?)?;
-    let registry = store.annotations(config)?;
+fn describe_tier(engine: &Engine, tier: Tier, out: &dyn Output) -> Result<(), CohortError> {
+    let registry = engine.annotation_registry()?;
     let ann_db = registry.open_db(favor_alias_for(tier))?;
     let sample = match ann_db.chrom_parquet("1") {
         Some(p) => p,
@@ -178,8 +180,8 @@ fn find_first_parquet(table_dir: &std::path::Path) -> Result<std::path::PathBuf,
     )))
 }
 
-pub fn manifest(output: &dyn Output) -> Result<(), CohortError> {
-    let config = Config::load_configured()?;
+pub fn manifest(engine: &Engine, output: &dyn Output) -> Result<(), CohortError> {
+    let config = engine.config();
 
     let has_data = config.has_annotations();
     let has_tissue = config.has_tissue();

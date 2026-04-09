@@ -52,9 +52,7 @@ pub fn run_setup_only(
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let cfg = crate::config::Config::load().ok();
     let tier = cfg.as_ref().map(|c| c.data.tier).unwrap_or(Tier::Base);
-    let data_root = cfg.map(|c| c.root_dir()).unwrap_or_default();
     let ctx = SessionCtx {
-        data_root: &data_root,
         tier,
         focused: Some(cwd.as_path()),
     };

@@ -16,21 +16,18 @@ use crate::commands::MetaStaarConfig;
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::output::Output;
-use crate::resource::Resources;
+use crate::runtime::Engine;
 use crate::staar::masks::MaskGroup;
 use crate::staar::{self, GeneResult, MaskCategory, MaskType};
 use crate::types::Chromosome;
 
-/// Entry point from CLI dispatch. Validates raw args, builds typed config, delegates to `run_meta_staar`.
-pub fn handle(
+pub fn build_config(
     studies: Vec<PathBuf>,
     masks: Vec<String>,
     maf_cutoff: f64,
     window_size: u32,
     output_path: Option<PathBuf>,
-    out: &dyn Output,
-    dry_run: bool,
-) -> Result<(), CohortError> {
+) -> Result<MetaStaarConfig, CohortError> {
     if studies.is_empty() {
         return Err(CohortError::Input(
             "--studies is required. Provide comma-separated paths to MetaSTAAR summary stat directories.".into(),
@@ -38,94 +35,31 @@ pub fn handle(
     }
 
     let mask_categories = crate::commands::parse_mask_categories(&masks)?;
-
     let output_dir = output_path.unwrap_or_else(|| PathBuf::from("meta_staar_results"));
 
-    let config = MetaStaarConfig {
+    Ok(MetaStaarConfig {
         study_dirs: studies,
         mask_categories,
         maf_cutoff,
         window_size,
         output_dir,
-    };
-
-    if dry_run {
-        return emit_dry_run(&config, out);
-    }
-
-    run_meta_staar(&config, out)
+    })
 }
 
-/// Backward-compatible entry point -- delegates to `handle`.
-pub fn run(
-    studies: Vec<PathBuf>,
-    masks: Vec<String>,
-    maf_cutoff: f64,
-    window_size: u32,
-    output_path: Option<PathBuf>,
+pub fn run_meta_staar(
+    engine: &Engine,
+    config: &MetaStaarConfig,
     out: &dyn Output,
     dry_run: bool,
 ) -> Result<(), CohortError> {
-    handle(
-        studies,
-        masks,
-        maf_cutoff,
-        window_size,
-        output_path,
-        out,
-        dry_run,
-    )
-}
-
-fn emit_dry_run(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), CohortError> {
-    let study_handles = staar::meta::load_studies(&config.study_dirs)?;
-    let k = study_handles.len();
-    let total_n: usize = study_handles.iter().map(|s| s.meta.n_samples).sum();
-
-    out.result_json(&json!({
-        "command": "meta-staar",
-        "n_studies": k,
-        "total_samples": total_n,
-        "trait_type": study_handles[0].meta.trait_type,
-        "output_path": config.output_dir.to_string_lossy(),
-    }));
-    Ok(())
-}
-
-/// Core meta-STAAR pipeline: load studies → merge → score → write → report.
-pub fn run_meta_staar(config: &MetaStaarConfig, out: &dyn Output) -> Result<(), CohortError> {
     let studies = staar::meta::load_studies(&config.study_dirs)?;
-    let resources = setup_resources(&studies, out)?;
-    let engine = DfEngine::new(&resources)?;
 
-    std::fs::create_dir_all(&config.output_dir).map_err(|e| {
-        CohortError::Resource(format!(
-            "Cannot create '{}': {e}",
-            config.output_dir.display()
-        ))
-    })?;
+    if dry_run {
+        return emit_dry_run(&studies, config, out);
+    }
 
-    let results = run_all_chromosomes(&studies, config, &engine, out)?;
-    write_meta_results(&results, &config.output_dir, out)?;
-    generate_summary(&studies, &results, config, out);
-
-    out.success(&format!(
-        "MetaSTAAR complete -> {}",
-        config.output_dir.display()
-    ));
     let k = studies.len();
     let total_n: usize = studies.iter().map(|s| s.meta.n_samples).sum();
-    out.result_json(&json!({ "command": "meta-staar", "n_studies": k, "total_samples": total_n }));
-    Ok(())
-}
-
-fn setup_resources(
-    studies: &[staar::meta::StudyHandle],
-    out: &dyn Output,
-) -> Result<Resources, CohortError> {
-    let k = studies.len();
-    let total_n: usize = studies.iter().map(|s| s.meta.n_samples).sum();
-
     out.status(&format!("MetaSTAAR: {k} studies, {total_n} total samples"));
     for (i, s) in studies.iter().enumerate() {
         out.status(&format!(
@@ -135,20 +69,50 @@ fn setup_resources(
             s.meta.trait_name
         ));
     }
-
-    let resources = Resources::detect_configured();
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(resources.threads)
-        .build_global()
-        .ok();
-
+    let resources = engine.resources();
     out.status(&format!(
         "MetaSTAAR: {} memory, {} threads",
         resources.memory_human(),
         resources.threads
     ));
 
-    Ok(resources)
+    let df = engine.df();
+
+    std::fs::create_dir_all(&config.output_dir).map_err(|e| {
+        CohortError::Resource(format!(
+            "Cannot create '{}': {e}",
+            config.output_dir.display()
+        ))
+    })?;
+
+    let results = run_all_chromosomes(&studies, config, df, out)?;
+    write_meta_results(&results, &config.output_dir, out)?;
+    generate_summary(&studies, &results, config, out);
+
+    out.success(&format!(
+        "MetaSTAAR complete -> {}",
+        config.output_dir.display()
+    ));
+    out.result_json(&json!({ "command": "meta-staar", "n_studies": k, "total_samples": total_n }));
+    Ok(())
+}
+
+fn emit_dry_run(
+    studies: &[staar::meta::StudyHandle],
+    config: &MetaStaarConfig,
+    out: &dyn Output,
+) -> Result<(), CohortError> {
+    let k = studies.len();
+    let total_n: usize = studies.iter().map(|s| s.meta.n_samples).sum();
+
+    out.result_json(&json!({
+        "command": "meta-staar",
+        "n_studies": k,
+        "total_samples": total_n,
+        "trait_type": studies[0].meta.trait_type,
+        "output_path": config.output_dir.to_string_lossy(),
+    }));
+    Ok(())
 }
 
 fn run_all_chromosomes(

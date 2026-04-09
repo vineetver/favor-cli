@@ -31,12 +31,6 @@ impl StoreConfig {
     }
 }
 
-/// Public free function — same precedence as `StoreConfig::resolve`.
-/// Reads cwd and `FAVOR_STORE` from the process environment.
-pub fn resolve_store_path(cli_arg: Option<PathBuf>) -> Result<PathBuf, CohortError> {
-    StoreConfig::resolve(cli_arg).map(|c| c.root)
-}
-
 /// Pure resolver — takes the cwd and env var explicitly so tests can
 /// drive every arm without mutating process state.
 pub(crate) fn resolve_store_path_with(

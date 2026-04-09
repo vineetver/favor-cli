@@ -41,14 +41,12 @@ pub struct AnnotateConfig {
     pub input: PathBuf,
     pub output: PathBuf,
     pub tier: Tier,
-    pub data_root: PathBuf,
 }
 
 pub struct EnrichConfig {
     pub input: PathBuf,
     pub output: PathBuf,
     pub tissue_name: String,
-    pub tissue_dir: PathBuf,
 }
 
 pub struct MetaStaarConfig {

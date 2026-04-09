@@ -162,7 +162,6 @@ pub enum FormError {
 }
 
 pub struct SessionCtx<'a> {
-    pub data_root: &'a Path,
     pub tier: Tier,
     pub focused: Option<&'a Path>,
 }

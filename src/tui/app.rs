@@ -361,16 +361,23 @@ fn title_for(state: &AppState) -> &str {
 
 fn dispatch(req: RunRequest, out: &dyn Output) -> Result<(), CohortError> {
     match req {
-        RunRequest::Ingest(cfg) => commands::ingest::run_ingest(&cfg, out),
-        RunRequest::Annotate(cfg) => commands::annotate::run_annotate(&cfg, out),
-        RunRequest::Staar(cfg) => {
-            let store = crate::store::Store::open(
-                crate::store::config::StoreConfig::resolve(None)?,
-            )?;
-            StaarPipeline::new(*cfg, store, out)?.run()
-        }
-        RunRequest::MetaStaar(cfg) => commands::meta_staar::run_meta_staar(&cfg, out),
         RunRequest::Setup(cfg) => apply_setup(cfg, out),
+        RunRequest::Ingest(cfg) => {
+            let engine = crate::runtime::Engine::open_unconfigured(None)?;
+            commands::ingest::run_ingest(&engine, &cfg, out, false)
+        }
+        RunRequest::Annotate(cfg) => {
+            let engine = crate::runtime::Engine::open(None)?;
+            commands::annotate::run_annotate(&engine, &cfg, out, false)
+        }
+        RunRequest::Staar(cfg) => {
+            let engine = crate::runtime::Engine::open(None)?;
+            StaarPipeline::new(*cfg, &engine, out)?.run()
+        }
+        RunRequest::MetaStaar(cfg) => {
+            let engine = crate::runtime::Engine::open(None)?;
+            commands::meta_staar::run_meta_staar(&engine, &cfg, out, false)
+        }
     }
 }
 

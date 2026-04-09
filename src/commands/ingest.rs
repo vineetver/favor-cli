@@ -4,16 +4,14 @@ use serde_json::json;
 
 use crate::cli::GenomeBuild;
 use crate::commands::{self, IngestConfig};
-use crate::config::Config;
-use crate::store::list::{VariantSetKind, VariantSetWriter};
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::format::FormatRegistry;
 use crate::ingest::{self, BuildGuess, InputFormat};
 use crate::output::{bail_if_cancelled, Output};
-use crate::resource::Resources;
+use crate::runtime::Engine;
+use crate::store::list::{VariantSetKind, VariantSetWriter};
 
-/// Resolve inputs: expand directories to their VCF/parquet contents, validate all exist.
 fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, CohortError> {
     let mut resolved = Vec::new();
     for p in raw {
@@ -62,15 +60,12 @@ fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, CohortError> {
     Ok(resolved)
 }
 
-/// Entry point from CLI dispatch. Validates raw args, builds typed config, delegates to `run_ingest`.
-pub fn handle(
+pub fn build_config(
     raw_inputs: Vec<PathBuf>,
     output: Option<PathBuf>,
     emit_sql: bool,
     build_override: Option<GenomeBuild>,
-    out: &dyn Output,
-    dry_run: bool,
-) -> Result<(), CohortError> {
+) -> Result<IngestConfig, CohortError> {
     let inputs = resolve_inputs(raw_inputs)?;
 
     let first = &inputs[0];
@@ -92,39 +87,44 @@ pub fn handle(
             .join(format!("{stem}.ingested"))
     });
 
-    let config = IngestConfig {
+    Ok(IngestConfig {
         inputs,
         output: output_path,
         emit_sql,
         build_override,
-    };
-
-    if dry_run {
-        return run_ingest_dry(&config, out);
-    }
-
-    run_ingest(&config, out)
+    })
 }
 
-/// Backward-compatible entry point -- delegates to `handle`.
-pub fn run(
-    raw_inputs: Vec<PathBuf>,
-    output: Option<PathBuf>,
-    emit_sql: bool,
-    build_override: Option<GenomeBuild>,
+pub fn run_ingest(
+    engine: &Engine,
+    config: &IngestConfig,
     out: &dyn Output,
     dry_run: bool,
 ) -> Result<(), CohortError> {
-    handle(raw_inputs, output, emit_sql, build_override, out, dry_run)
-}
-
-fn run_ingest_dry(config: &IngestConfig, out: &dyn Output) -> Result<(), CohortError> {
     let first = &config.inputs[0];
     let mut analysis = ingest::analyze(first)?;
     validate_all_same_format(&config.inputs, &analysis)?;
-    apply_build_override(&mut analysis, config, first)?;
+    apply_build_override(engine, &mut analysis, config, first)?;
     report_analysis(&analysis, &config.inputs, out);
 
+    if dry_run {
+        return run_ingest_dry(config, &analysis, out);
+    }
+
+    if analysis.format == InputFormat::Vcf {
+        return ingest_vcf(engine, config, out);
+    }
+    if config.emit_sql || analysis.needs_intervention() {
+        return emit_sql_script(config, &analysis, out);
+    }
+    ingest_tabular(engine, config, &analysis, out)
+}
+
+fn run_ingest_dry(
+    config: &IngestConfig,
+    analysis: &ingest::Analysis,
+    out: &dyn Output,
+) -> Result<(), CohortError> {
     let file_list: Vec<String> = config
         .inputs
         .iter()
@@ -149,23 +149,6 @@ fn run_ingest_dry(config: &IngestConfig, out: &dyn Output) -> Result<(), CohortE
     Ok(())
 }
 
-/// Core ingest pipeline: detect → validate → ingest → report.
-pub fn run_ingest(config: &IngestConfig, out: &dyn Output) -> Result<(), CohortError> {
-    let first = &config.inputs[0];
-    let mut analysis = ingest::analyze(first)?;
-    validate_all_same_format(&config.inputs, &analysis)?;
-    apply_build_override(&mut analysis, config, first)?;
-    report_analysis(&analysis, &config.inputs, out);
-
-    if analysis.format == InputFormat::Vcf {
-        return ingest_vcf(config, out);
-    }
-    if config.emit_sql || analysis.needs_intervention() {
-        return emit_sql_script(config, &analysis, out);
-    }
-    ingest_tabular(config, &analysis, out)
-}
-
 fn validate_all_same_format(
     inputs: &[PathBuf],
     analysis: &ingest::Analysis,
@@ -187,7 +170,11 @@ fn validate_all_same_format(
     Ok(())
 }
 
-fn ingest_vcf(config: &IngestConfig, out: &dyn Output) -> Result<(), CohortError> {
+fn ingest_vcf(
+    engine: &Engine,
+    config: &IngestConfig,
+    out: &dyn Output,
+) -> Result<(), CohortError> {
     let first = &config.inputs[0];
 
     if config.emit_sql {
@@ -201,7 +188,7 @@ fn ingest_vcf(config: &IngestConfig, out: &dyn Output) -> Result<(), CohortError
         return Ok(());
     }
 
-    let resources = Resources::detect_configured();
+    let resources = engine.resources();
     out.status(&format!(
         "Ingesting {} VCF file(s) ({}, {} threads)",
         config.inputs.len(),
@@ -294,6 +281,7 @@ fn emit_sql_script(
 }
 
 fn ingest_tabular(
+    engine: &Engine,
     config: &IngestConfig,
     analysis: &ingest::Analysis,
     out: &dyn Output,
@@ -301,15 +289,14 @@ fn ingest_tabular(
     let first = &config.inputs[0];
     out.status("Ingesting...");
 
-    let resources = Resources::detect_configured();
-    let engine = DfEngine::new(&resources)?;
+    let df = engine.df();
 
     bail_if_cancelled(out)?;
-    register_tabular_inputs(&engine, &config.inputs, analysis)?;
+    register_tabular_inputs(df, &config.inputs, analysis)?;
 
     let select_sql = ingest::sql::generate_select(analysis);
     let copy_sql = ingest::sql::copy_statement(&select_sql, &config.output);
-    engine.execute(&copy_sql)?;
+    df.execute(&copy_sql)?;
 
     let mut vs_writer = VariantSetWriter::new(
         &config.output,
@@ -378,6 +365,7 @@ fn register_tabular_inputs(
 }
 
 fn apply_build_override(
+    engine: &Engine,
     analysis: &mut ingest::Analysis,
     config: &IngestConfig,
     first: &std::path::Path,
@@ -393,15 +381,10 @@ fn apply_build_override(
             analysis.build_guess = BuildGuess::Hg38;
         }
         None if analysis.format != InputFormat::Vcf => {
-            if let Ok(global) = Config::load() {
-                if !global.data.root_dir.is_empty() {
-                    let resources = Resources::detect_with_config(&global.resources);
-                    if let Ok(engine) = DfEngine::new(&resources) {
-                        let _ = ingest::detect::detect_build_and_coords(
-                            analysis, first, &engine, &global,
-                        );
-                    }
-                }
+            // Pre-setup ingest is a first-class path: skip build detection when
+            // no configured engine is available.
+            if engine.config_opt().is_some() {
+                let _ = ingest::detect::detect_build_and_coords(engine, analysis, first);
             }
         }
         None => {}

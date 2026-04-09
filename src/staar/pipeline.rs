@@ -20,7 +20,7 @@ use crate::column::STAAR_WEIGHTS;
 use crate::error::CohortError;
 use crate::ingest::ColumnContract;
 use crate::output::{bail_if_cancelled, Output};
-use crate::resource::Resources;
+use crate::runtime::Engine;
 use crate::staar::carrier::AnalysisVectors;
 use crate::staar::masks::ScangParams;
 use crate::staar::model::{augment_covariates, load_known_loci, load_phenotype, NullModel};
@@ -38,7 +38,6 @@ use crate::store::cohort::{
     self, CohortHandle, CohortId, CohortManifest, GenoStoreResult, STAAR_ANNOTATION_COLUMNS,
 };
 use crate::store::list::{AnnotatedSet, VariantSet, VariantSetKind};
-use crate::store::Store;
 use crate::types::{AnnotatedVariant, Chromosome};
 
 pub struct StaarConfig {
@@ -191,22 +190,30 @@ struct PhenoStageOut {
 
 pub struct StaarPipeline<'a> {
     config: StaarConfig,
-    store: Store,
+    engine: &'a Engine,
     out: &'a dyn Output,
-    res: Resources,
     manifest: RunManifest,
     resume: ResumeDecision,
 }
 
 impl<'a> StaarPipeline<'a> {
-    pub fn new(config: StaarConfig, store: Store, out: &'a dyn Output) -> Result<Self, CohortError> {
-        let res = cohort::setup_resources(out)?;
+    pub fn new(
+        config: StaarConfig,
+        engine: &'a Engine,
+        out: &'a dyn Output,
+    ) -> Result<Self, CohortError> {
+        let res = engine.resources();
+        out.status(&format!(
+            "STAAR: {} memory, {} threads ({})",
+            res.memory_human(),
+            res.threads,
+            res.environment()
+        ));
         let manifest = config.new_run_manifest();
         Ok(Self {
             config,
-            store,
+            engine,
             out,
-            res,
             manifest,
             resume: ResumeDecision::Fresh,
         })
@@ -297,7 +304,7 @@ impl<'a> StaarPipeline<'a> {
         // load_rare_variants walks every chromosome and reads each VariantIndex
         // through the cohort handle. Hold the result in a local so the
         // WriteResults stage doesn't trigger a second walk.
-        let cohort = self.store.cohort(&self.config.cohort_id);
+        let cohort = self.engine.cohort(&self.config.cohort_id);
         let variants = load_rare_variants(&cohort, &store.manifest, self.config.maf_cutoff)?;
         let n_rare = variants.len() as i64;
 
@@ -396,7 +403,7 @@ impl<'a> StaarPipeline<'a> {
         // One probe — the recorded cache decision and the path actually
         // taken in `build_or_load` are sourced from the same StoreProbe
         // so they cannot drift.
-        let cohort = self.store.cohort(&self.config.cohort_id);
+        let cohort = self.engine.cohort(&self.config.cohort_id);
         let probe = if self.config.rebuild_store {
             self.manifest.outputs.cache_decisions.push(CacheDecision {
                 artifact: ArtifactKind::GenotypeStore,
@@ -406,7 +413,7 @@ impl<'a> StaarPipeline<'a> {
             // Drop any score-cache + lookup index that referenced this
             // cohort under its current id; the rebuild changes the
             // content fingerprint and would orphan them otherwise.
-            if let Err(e) = self.store.cache().prune_cohort(&self.config.cohort_id) {
+            if let Err(e) = self.engine.store().cache().prune_cohort(&self.config.cohort_id) {
                 self.out
                     .warn(&format!("  prune cache before rebuild: {e}"));
             }
@@ -441,12 +448,16 @@ impl<'a> StaarPipeline<'a> {
 
         let geno_staging_dir = self.config.output_dir.join(".geno_staging");
         cohort.build_or_load(
-            &self.config.genotypes,
-            &self.config.annotations,
-            &geno_staging_dir,
-            self.config.rebuild_store,
-            probe,
-            &self.res,
+            crate::store::cohort::CohortSources {
+                genotypes: &self.config.genotypes,
+                annotations: &self.config.annotations,
+            },
+            crate::store::cohort::BuildOpts {
+                staging_dir: &geno_staging_dir,
+                rebuild: self.config.rebuild_store,
+                probe,
+            },
+            self.engine,
             self.out,
         )
     }
@@ -600,7 +611,7 @@ impl<'a> StaarPipeline<'a> {
                 sumstats_dir.display()
             ))
         })?;
-        let cohort = self.store.cohort(&self.config.cohort_id);
+        let cohort = self.engine.cohort(&self.config.cohort_id);
         let variants = load_rare_variants(&cohort, &store.manifest, self.config.maf_cutoff)?;
         let analysis = AnalysisVectors::from_null_model(null_model, &pheno.pheno_mask)?;
         let meta = staar::meta::StudyMeta {
@@ -614,7 +625,7 @@ impl<'a> StaarPipeline<'a> {
             segment_size: 500_000,
         };
         staar::meta::emit_sumstats(
-            &self.store,
+            self.engine,
             &self.config.cohort_id,
             &analysis,
             &variants,
@@ -641,7 +652,8 @@ impl<'a> StaarPipeline<'a> {
         );
         let cache_key = crate::store::ids::CacheKey::new(&key);
         let dir = self
-            .store
+            .engine
+            .store()
             .cache()
             .score_cache_dir(&self.config.cohort_id, &cache_key);
 
@@ -670,7 +682,7 @@ impl<'a> StaarPipeline<'a> {
             CohortError::Resource(format!("Cannot create score cache directory '{}': {e}", dir.display()))
         })?;
 
-        let cohort = self.store.cohort(&self.config.cohort_id);
+        let cohort = self.engine.cohort(&self.config.cohort_id);
         for ci in &store.manifest.chromosomes {
             let chrom: Chromosome = ci.name.parse().map_err(|e: String| CohortError::Input(e))?;
             let view = cohort.chromosome(&chrom)?;
@@ -693,7 +705,7 @@ impl<'a> StaarPipeline<'a> {
         ctx: &ScoringContext,
     ) -> Result<ScoringOutput, CohortError> {
         let (results, individual_pvals) = scoring::run_score_tests(
-            &self.store,
+            self.engine,
             &self.config.cohort_id,
             &store.manifest,
             &self.config,

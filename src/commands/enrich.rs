@@ -4,49 +4,24 @@ use serde_json::json;
 
 use crate::column::Col;
 use crate::commands::{self, EnrichConfig};
-use crate::config::{Config, DataConfig, Tier};
-use crate::store::annotation::TissueDb;
-use crate::store::config::StoreConfig;
-use crate::store::list::{parquet_row_count, AnnotatedSet};
-use crate::store::Store;
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::output::Output;
-use crate::resource::Resources;
+use crate::runtime::Engine;
+use crate::store::annotation::TissueDb;
+use crate::store::list::{parquet_row_count, AnnotatedSet};
 
-/// Build a `Config` from a tissue dir so the `AnnotationRegistry`
-/// `favor-tissue` default points at the right place. The tissue dir is
-/// `<root>/tissue/`, so the registry's root is the parent.
-fn config_with_tissue(tissue_dir: &std::path::Path) -> Config {
-    let root = tissue_dir
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| tissue_dir.to_path_buf());
-    let mut c = Config::default();
-    c.data = DataConfig {
-        root_dir: root.to_string_lossy().into_owned(),
-        tier: Tier::Base,
-        packs: Vec::new(),
-    };
-    c
-}
-
-/// Entry point from CLI dispatch. Validates raw args, builds typed config, delegates to `run_enrich`.
-pub fn handle(
+pub fn build_config(
     input: PathBuf,
     tissue: String,
     output_path: Option<PathBuf>,
-    out: &dyn Output,
-    dry_run: bool,
-) -> Result<(), CohortError> {
+) -> Result<EnrichConfig, CohortError> {
     if !input.exists() {
         return Err(CohortError::Input(format!(
             "Annotated variant set not found: '{}'. Run `cohort annotate` first.",
             input.display()
         )));
     }
-
-    let global_config = Config::load_configured()?;
 
     let output = output_path.unwrap_or_else(|| {
         let name = input.file_name().unwrap_or_default().to_string_lossy();
@@ -60,34 +35,81 @@ pub fn handle(
             .join(format!("{stem}.enriched"))
     });
 
-    let config = EnrichConfig {
+    Ok(EnrichConfig {
         input,
         output,
         tissue_name: tissue,
-        tissue_dir: global_config.tissue_dir(),
-    };
-
-    if dry_run {
-        return emit_dry_run(&config, out);
-    }
-
-    run_enrich(&config, out)
+    })
 }
 
-/// Backward-compatible entry point -- delegates to `handle`.
-pub fn run(
-    input: PathBuf,
-    tissue: String,
-    output_path: Option<PathBuf>,
+pub fn run_enrich(
+    engine: &Engine,
+    config: &EnrichConfig,
     out: &dyn Output,
     dry_run: bool,
 ) -> Result<(), CohortError> {
-    handle(input, tissue, output_path, out, dry_run)
+    if dry_run {
+        return emit_dry_run(engine, config, out);
+    }
+
+    let annotated = AnnotatedSet::open(&config.input)?;
+    annotated.supports(&[Col::Vid])?;
+    let registry = engine.annotation_registry()?;
+    let tissue_db = registry.open_tissue("favor-tissue")?;
+    let tissue_dir = engine.config().tissue_dir();
+    let df = engine.df();
+    let resources = engine.resources();
+
+    out.status(&format!("Input: {} variants", annotated.variant_count()));
+    out.status(&format!(
+        "Resources: {}, {} threads ({})",
+        resources.memory_human(),
+        resources.threads,
+        resources.environment()
+    ));
+
+    let resolved = resolve_tissue(df, &tissue_dir, &config.tissue_name)?;
+    out.status(&format!(
+        "Tissue '{}' -> {} subtissues",
+        config.tissue_name,
+        resolved.len()
+    ));
+
+    std::fs::create_dir_all(&config.output).map_err(|e| {
+        CohortError::Resource(format!("Cannot create '{}': {e}", config.output.display()))
+    })?;
+
+    let tables_written = run_enrichment(
+        &annotated,
+        &tissue_db,
+        &resolved,
+        df,
+        &config.output,
+        out,
+    )?;
+    write_meta(
+        &tables_written,
+        &resolved,
+        config,
+        annotated.variant_count() as i64,
+        out,
+    );
+    report_result(
+        &tables_written,
+        config,
+        annotated.variant_count() as i64,
+        out,
+    );
+    Ok(())
 }
 
-fn emit_dry_run(config: &EnrichConfig, out: &dyn Output) -> Result<(), CohortError> {
+fn emit_dry_run(
+    engine: &Engine,
+    config: &EnrichConfig,
+    out: &dyn Output,
+) -> Result<(), CohortError> {
     let annotated = AnnotatedSet::open(&config.input)?;
-    let tissue_db = TissueDb::open(&config.tissue_dir)?;
+    let tissue_db = TissueDb::open(&engine.config().tissue_dir())?;
     let available_tables: Vec<&str> = tissue_db
         .available_tables()
         .iter()
@@ -105,60 +127,6 @@ fn emit_dry_run(config: &EnrichConfig, out: &dyn Output) -> Result<(), CohortErr
         output_path: config.output.to_string_lossy().into(),
     };
     commands::emit(&plan, out);
-    Ok(())
-}
-
-/// Core enrich pipeline: open → validate → resolve tissue → join tables → report.
-pub fn run_enrich(config: &EnrichConfig, out: &dyn Output) -> Result<(), CohortError> {
-    let annotated = AnnotatedSet::open(&config.input)?;
-    annotated.supports(&[Col::Vid])?;
-    let store = Store::open(StoreConfig::resolve(None)?)?;
-    let cfg_view = config_with_tissue(&config.tissue_dir);
-    let registry = store.annotations(&cfg_view)?;
-    let tissue_db = registry.open_tissue("favor-tissue")?;
-    let resources = Resources::detect_configured();
-    let engine = DfEngine::new(&resources)?;
-
-    out.status(&format!("Input: {} variants", annotated.variant_count()));
-    out.status(&format!(
-        "Resources: {}, {} threads ({})",
-        resources.memory_human(),
-        resources.threads,
-        resources.environment()
-    ));
-
-    let resolved = resolve_tissue(&engine, &config.tissue_dir, &config.tissue_name)?;
-    out.status(&format!(
-        "Tissue '{}' -> {} subtissues",
-        config.tissue_name,
-        resolved.len()
-    ));
-
-    std::fs::create_dir_all(&config.output).map_err(|e| {
-        CohortError::Resource(format!("Cannot create '{}': {e}", config.output.display()))
-    })?;
-
-    let tables_written = run_enrichment(
-        &annotated,
-        &tissue_db,
-        &resolved,
-        &engine,
-        &config.output,
-        out,
-    )?;
-    write_meta(
-        &tables_written,
-        &resolved,
-        config,
-        annotated.variant_count() as i64,
-        out,
-    );
-    report_result(
-        &tables_written,
-        config,
-        annotated.variant_count() as i64,
-        out,
-    );
     Ok(())
 }
 
@@ -306,7 +274,7 @@ fn write_meta(
     if let Ok(json_str) = serde_json::to_string_pretty(&meta) {
         let _ = std::fs::write(&meta_path, json_str);
     }
-    let _ = out; // suppress unused warning — meta is written to disk
+    let _ = out;
 }
 
 fn report_result(

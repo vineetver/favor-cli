@@ -28,9 +28,9 @@ use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement};
 use crate::output::Output;
+use crate::runtime::Engine;
 use crate::store::cohort::{ChromosomeView, CohortId};
 use crate::store::list::parquet_column_names;
-use crate::store::Store;
 use crate::types::{
     AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation,
     MetaVariant, RegionType, RegulatoryFlags,
@@ -707,7 +707,7 @@ pub struct StudyMeta {
 /// Computes U and K per segment directly from carrier lists in O(total_MAC)
 /// instead of building dense genotype matrices.
 pub fn emit_sumstats(
-    store: &Store,
+    engine: &Engine,
     cohort_id: &CohortId,
     analysis: &AnalysisVectors,
     variants: &[AnnotatedVariant],
@@ -717,7 +717,7 @@ pub fn emit_sumstats(
 ) -> Result<(), CohortError> {
     out.status("MetaSTAAR: computing summary statistics (carrier-indexed)...");
 
-    let cohort = store.cohort(cohort_id);
+    let cohort = engine.cohort(cohort_id);
     let chrom_set: Vec<String> = variants
         .iter()
         .map(|v| v.chromosome.label())

@@ -3,31 +3,16 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use crate::commands::{self, AnnotateConfig};
-use crate::config::{Config, DataConfig, Tier};
-use crate::store::annotation::AnnotationDb;
-use crate::store::config::StoreConfig;
-use crate::store::list::{
-    parquet_column_names, parquet_row_count, VariantSet, VariantSetKind, VariantSetWriter,
-};
-use crate::store::Store;
+use crate::config::Tier;
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement, JoinKey};
 use crate::output::{bail_if_cancelled, Output};
-use crate::resource::Resources;
-
-/// Build a `Config`-shaped view from a bare data root so the
-/// `AnnotationRegistry` defaults seed correctly without re-reading the
-/// user's persisted config.
-fn config_with_root(root: &std::path::Path) -> Config {
-    let mut c = Config::default();
-    c.data = DataConfig {
-        root_dir: root.to_string_lossy().into_owned(),
-        tier: Tier::Base,
-        packs: Vec::new(),
-    };
-    c
-}
+use crate::runtime::Engine;
+use crate::store::annotation::AnnotationDb;
+use crate::store::list::{
+    parquet_column_names, parquet_row_count, VariantSet, VariantSetKind, VariantSetWriter,
+};
 
 const ANNOTATE_JOIN_COLUMNS: &[ColumnRequirement] = &[
     ColumnRequirement {
@@ -54,14 +39,12 @@ const ANNOTATE_JOIN_COLUMNS: &[ColumnRequirement] = &[
 
 const JOIN_KEY_COLUMNS: &[&str] = &["chromosome", "position", "ref", "alt"];
 
-/// Entry point from CLI dispatch. Validates raw args, builds typed config, delegates to `run_annotate`.
-pub fn handle(
+pub fn build_config(
+    engine: &Engine,
     input: PathBuf,
     output_path: Option<PathBuf>,
     full: bool,
-    out: &dyn Output,
-    dry_run: bool,
-) -> Result<(), CohortError> {
+) -> Result<AnnotateConfig, CohortError> {
     if !input.exists() {
         return Err(CohortError::Input(format!(
             "Variant set not found: '{}'. Run `cohort ingest <file>` first to produce one.",
@@ -69,11 +52,10 @@ pub fn handle(
         )));
     }
 
-    let global_config = Config::load_configured()?;
     let tier = if full {
         Tier::Full
     } else {
-        global_config.data.tier
+        engine.config().data.tier
     };
 
     let output = output_path.unwrap_or_else(|| {
@@ -88,58 +70,29 @@ pub fn handle(
             .join(format!("{stem}.annotated"))
     });
 
-    let config = AnnotateConfig {
+    Ok(AnnotateConfig {
         input,
         output,
         tier,
-        data_root: global_config.root_dir(),
-    };
-
-    if dry_run {
-        return emit_dry_run(&config, out);
-    }
-
-    run_annotate(&config, out)
+    })
 }
 
-/// Backward-compatible entry point — delegates to `handle`.
-pub fn run(
-    input: PathBuf,
-    output_path: Option<PathBuf>,
-    full: bool,
+pub fn run_annotate(
+    engine: &Engine,
+    config: &AnnotateConfig,
     out: &dyn Output,
     dry_run: bool,
 ) -> Result<(), CohortError> {
-    handle(input, output_path, full, out, dry_run)
-}
+    if dry_run {
+        return emit_dry_run(config, out);
+    }
 
-fn emit_dry_run(config: &AnnotateConfig, out: &dyn Output) -> Result<(), CohortError> {
-    let input_vs = VariantSet::open(&config.input)?;
-    let plan = commands::DryRunPlan {
-        command: "annotate".into(),
-        inputs: json!({
-            "file": config.input.to_string_lossy(),
-            "variant_count": input_vs.count(),
-            "join_key": format!("{:?}", input_vs.join_key()),
-            "tier": config.tier.as_str(),
-        }),
-        memory: commands::MemoryEstimate::default_estimate(),
-        output_path: config.output.to_string_lossy().into(),
-    };
-    commands::emit(&plan, out);
-    Ok(())
-}
-
-/// Core annotate pipeline: open → validate → join → report.
-pub fn run_annotate(config: &AnnotateConfig, out: &dyn Output) -> Result<(), CohortError> {
     let input = VariantSet::open(&config.input)?;
     validate_input(&input)?;
-    let store = Store::open(StoreConfig::resolve(None)?)?;
-    let cfg_view = config_with_root(&config.data_root);
-    let registry = store.annotations(&cfg_view)?;
+    let registry = engine.annotation_registry()?;
     let db = registry.open_db(crate::store::annotation::refs::favor_alias_for(config.tier))?;
-    let resources = Resources::detect_configured();
-    let engine = DfEngine::new(&resources)?;
+    let df = engine.df();
+    let resources = engine.resources();
 
     out.status(&format!(
         "Input: {} variants, join key: {:?}",
@@ -159,8 +112,25 @@ pub fn run_annotate(config: &AnnotateConfig, out: &dyn Output) -> Result<(), Coh
     ));
 
     bail_if_cancelled(out)?;
-    let result = annotate_join(&input, &db, &engine, &config.output, out)?;
-    report_result(&result, config, &engine, &input, &db, out)
+    let result = annotate_join(&input, &db, df, &config.output, out)?;
+    report_result(&result, config, df, &input, &db, out)
+}
+
+fn emit_dry_run(config: &AnnotateConfig, out: &dyn Output) -> Result<(), CohortError> {
+    let input_vs = VariantSet::open(&config.input)?;
+    let plan = commands::DryRunPlan {
+        command: "annotate".into(),
+        inputs: json!({
+            "file": config.input.to_string_lossy(),
+            "variant_count": input_vs.count(),
+            "join_key": format!("{:?}", input_vs.join_key()),
+            "tier": config.tier.as_str(),
+        }),
+        memory: commands::MemoryEstimate::default_estimate(),
+        output_path: config.output.to_string_lossy().into(),
+    };
+    commands::emit(&plan, out);
+    Ok(())
 }
 
 fn validate_input(input: &VariantSet) -> Result<(), CohortError> {

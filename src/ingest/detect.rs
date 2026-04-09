@@ -3,29 +3,20 @@
 use std::path::Path;
 
 use super::{Analysis, BuildGuess, CoordBase, Delimiter};
-use crate::config::Config;
-use crate::store::annotation::refs::favor_alias_for;
-use crate::store::annotation::AnnotationDb;
-use crate::store::config::StoreConfig;
-use crate::store::Store;
 use crate::engine::DfEngine;
 use crate::error::CohortError;
+use crate::runtime::Engine;
+use crate::store::annotation::refs::favor_alias_for;
+use crate::store::annotation::AnnotationDb;
 
 const PROBE_CHROMS: &[&str] = &["1", "2", "22", "10", "X"];
 
-fn open_annotation_via_registry(config: &Config) -> Result<AnnotationDb, CohortError> {
-    let store = Store::open(StoreConfig::resolve(None)?)?;
-    let registry = store.annotations(config)?;
-    registry.open_db(favor_alias_for(config.data.tier))
-}
-
-/// Run build and coordinate detection on an analysis.
-/// Mutates analysis.build_guess and analysis.coord_base in place.
+/// Mutates analysis.build_guess and analysis.coord_base in place using a
+/// small sample join against the configured FAVOR annotation database.
 pub fn detect_build_and_coords(
+    engine: &Engine,
     analysis: &mut Analysis,
     input_path: &Path,
-    engine: &DfEngine,
-    config: &Config,
 ) -> Result<(), CohortError> {
     let chr_col = match &analysis.chr_col {
         Some(c) => c.clone(),
@@ -36,22 +27,28 @@ pub fn detect_build_and_coords(
         None => return Ok(()),
     };
 
-    let ann_db = match open_annotation_via_registry(config) {
+    let registry = match engine.annotation_registry() {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    let tier = engine.config().data.tier;
+    let ann_db = match registry.open_db(favor_alias_for(tier)) {
         Ok(db) => db,
         Err(_) => return Ok(()),
     };
 
+    let df = engine.df();
     let delimiter = match analysis.delimiter {
         Some(Delimiter::Tab) => b'\t',
         Some(Delimiter::Comma) => b',',
         Some(Delimiter::Space) => b' ',
         None => {
-            engine.register_parquet_file("_ingest_input", input_path)?;
-            return probe_all_chroms(engine, &chr_col, &pos_col, &ann_db, analysis);
+            df.register_parquet_file("_ingest_input", input_path)?;
+            return probe_all_chroms(df, &chr_col, &pos_col, &ann_db, analysis);
         }
     };
-    engine.register_csv("_ingest_input", input_path, delimiter)?;
-    probe_all_chroms(engine, &chr_col, &pos_col, &ann_db, analysis)
+    df.register_csv("_ingest_input", input_path, delimiter)?;
+    probe_all_chroms(df, &chr_col, &pos_col, &ann_db, analysis)
 }
 
 fn probe_all_chroms(

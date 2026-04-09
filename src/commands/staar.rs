@@ -10,15 +10,14 @@ use serde_json::json;
 use crate::commands;
 use crate::error::CohortError;
 use crate::output::Output;
+use crate::runtime::Engine;
 use crate::staar;
 use crate::staar::masks::ScangParams;
 #[cfg(test)]
 use crate::staar::MaskCategory;
 use crate::staar::pipeline::{StaarConfig, StaarPipeline};
 use crate::store::cohort::CohortId;
-use crate::store::config::StoreConfig;
 use crate::store::list::VariantSet;
-use crate::store::Store;
 
 const GB: u64 = 1024 * 1024 * 1024;
 
@@ -51,21 +50,20 @@ pub struct StaarArgs {
     pub rebuild_store: bool,
     pub column_map: Vec<String>,
     pub output_path: Option<PathBuf>,
-    pub store_path: Option<PathBuf>,
     pub cohort_id: Option<String>,
 }
 
-pub fn run(args: StaarArgs, out: &dyn Output, dry_run: bool) -> Result<(), CohortError> {
-    let store_path = args.store_path.clone();
+pub fn run(
+    engine: &Engine,
+    args: StaarArgs,
+    out: &dyn Output,
+    dry_run: bool,
+) -> Result<(), CohortError> {
     let config = build_config(args)?;
-
     if dry_run {
-        return emit_dry_run(&config, store_path, out);
+        return emit_dry_run(engine, &config, out);
     }
-
-    let store = Store::open(StoreConfig::resolve(store_path)?)?;
-    let pipeline = StaarPipeline::new(config, store, out)?;
-    pipeline.run()
+    StaarPipeline::new(config, engine, out)?.run()
 }
 
 /// Validate `StaarArgs` and produce a `StaarConfig`. All input checks live
@@ -233,8 +231,8 @@ fn blank_to_none(s: Option<String>) -> Option<String> {
 }
 
 fn emit_dry_run(
+    engine: &Engine,
     config: &StaarConfig,
-    store_path: Option<PathBuf>,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
     let sample_names = staar::genotype::read_sample_names(&config.genotypes)?;
@@ -253,8 +251,7 @@ fn emit_dry_run(
     let overhead = 4 * GB;
     let recommended = chr1_geno + overhead;
 
-    let store = Store::open(StoreConfig::resolve(store_path)?)?;
-    let cohort = store.cohort(&config.cohort_id);
+    let cohort = engine.cohort(&config.cohort_id);
     let probe_result = cohort.probe(&config.genotypes, &config.annotations);
 
     let (cache_status, store_info, recommended_bytes) = match &probe_result.manifest {
