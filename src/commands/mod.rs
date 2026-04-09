@@ -97,6 +97,8 @@ pub struct DryRunPlan {
     pub command: String,
     pub inputs: serde_json::Value,
     pub memory: MemoryEstimate,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeEstimate>,
     pub output_path: String,
 }
 
@@ -119,6 +121,36 @@ impl MemoryEstimate {
     }
 }
 
+/// Coarse wall-clock budget for planning, not a benchmark prediction.
+/// Callers compute `seconds` from a workload-specific formula and hand the
+/// number to `RuntimeEstimate::from_seconds`, which produces the human form.
+#[derive(Serialize)]
+pub struct RuntimeEstimate {
+    pub seconds: u64,
+    pub human: String,
+}
+
+impl RuntimeEstimate {
+    pub fn from_seconds(seconds: u64) -> Self {
+        Self {
+            seconds,
+            human: human_seconds(seconds),
+        }
+    }
+}
+
+fn human_seconds(s: u64) -> String {
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m{:02}s", s / 60, s % 60)
+    } else if s < 86_400 {
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    } else {
+        format!("{}d{:02}h", s / 86_400, (s % 86_400) / 3600)
+    }
+}
+
 pub fn emit(plan: &DryRunPlan, out: &dyn Output) {
     out.result_json(&serde_json::to_value(plan).unwrap_or_default());
 }
@@ -128,3 +160,42 @@ pub fn file_size(path: &Path) -> u64 {
 }
 
 pub use crate::data::transfer::human_size as human_bytes;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_seconds_buckets() {
+        assert_eq!(human_seconds(0), "0s");
+        assert_eq!(human_seconds(45), "45s");
+        assert_eq!(human_seconds(60), "1m00s");
+        assert_eq!(human_seconds(125), "2m05s");
+        assert_eq!(human_seconds(3_600), "1h00m");
+        assert_eq!(human_seconds(7_265), "2h01m");
+        assert_eq!(human_seconds(90_061), "1d01h");
+    }
+
+    #[test]
+    fn runtime_estimate_round_trips_through_serde() {
+        let est = RuntimeEstimate::from_seconds(125);
+        assert_eq!(est.seconds, 125);
+        assert_eq!(est.human, "2m05s");
+        let json = serde_json::to_string(&est).unwrap();
+        assert!(json.contains("\"seconds\":125"));
+        assert!(json.contains("\"human\":\"2m05s\""));
+    }
+
+    #[test]
+    fn dry_run_plan_omits_runtime_when_none() {
+        let plan = DryRunPlan {
+            command: "annotate".into(),
+            inputs: serde_json::json!({}),
+            memory: MemoryEstimate::default_estimate(),
+            runtime: None,
+            output_path: "/tmp/out".into(),
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(!json.contains("runtime"));
+    }
+}

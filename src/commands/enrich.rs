@@ -124,6 +124,7 @@ fn emit_dry_run(
             "available_tables": available_tables,
         }),
         memory: commands::MemoryEstimate::default_estimate(),
+        runtime: None,
         output_path: config.output.to_string_lossy().into(),
     };
     commands::emit(&plan, out);

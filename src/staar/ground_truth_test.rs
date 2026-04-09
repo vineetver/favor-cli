@@ -391,7 +391,9 @@ mod tests {
             ms.trait2_staar_o
         );
 
-        // Our MultiSTAAR = Cauchy combine of per-trait STAAR-O values
+        // Our scaffold combines per-trait STAAR-O via Cauchy. This is NOT
+        // the R MultiSTAAR algorithm (joint score test); see
+        // `src/staar/multi.rs` doc.
         let combined = stats::cauchy_combine(&[ms.trait1_staar_o, ms.trait2_staar_o]);
         assert!(
             combined > 0.0 && combined <= 1.0,

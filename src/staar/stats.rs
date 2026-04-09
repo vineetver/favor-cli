@@ -97,16 +97,14 @@ pub fn mixture_chisq_pvalue(statistic: f64, eigenvalues: &[f64]) -> f64 {
         return f64::NAN;
     }
 
-    // Match SKAT R: Get_Lambda_Org — keep eigenvalues > mean(positive) / 100000
-    let positive: Vec<f64> = eigenvalues.iter().copied().filter(|&l| l >= 0.0).collect();
-    if positive.is_empty() {
-        return 1.0;
-    }
-    let threshold = positive.iter().sum::<f64>() / positive.len() as f64 / 100000.0;
+    // Match upstream STAAR_O.cpp / MetaSTAAR_O_SMMAT.cpp: drop eigenvalues
+    // below 1e-8. SKAT-R's `Get_Lambda_Org` uses mean(positive)/100000, but
+    // we are tracking the STAAR C++ convention so the omnibus matches.
+    const LAMBDA_FLOOR: f64 = 1e-8;
     let lambdas: Vec<f64> = eigenvalues
         .iter()
         .copied()
-        .filter(|&l| l > threshold)
+        .filter(|&l| l > LAMBDA_FLOOR)
         .collect();
     if lambdas.is_empty() {
         return 1.0;

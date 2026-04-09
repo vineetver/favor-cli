@@ -127,6 +127,7 @@ fn emit_dry_run(config: &AnnotateConfig, out: &dyn Output) -> Result<(), CohortE
             "tier": config.tier.as_str(),
         }),
         memory: commands::MemoryEstimate::default_estimate(),
+        runtime: None,
         output_path: config.output.to_string_lossy().into(),
     };
     commands::emit(&plan, out);

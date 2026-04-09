@@ -55,7 +55,7 @@ pub fn run_meta_staar(
     let studies = staar::meta::load_studies(&config.study_dirs)?;
 
     if dry_run {
-        return emit_dry_run(&studies, config, out);
+        return emit_dry_run(engine, &studies, config, out);
     }
 
     let k = studies.len();
@@ -98,21 +98,41 @@ pub fn run_meta_staar(
 }
 
 fn emit_dry_run(
+    engine: &Engine,
     studies: &[staar::meta::StudyHandle],
     config: &MetaStaarConfig,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
     let k = studies.len();
     let total_n: usize = studies.iter().map(|s| s.meta.n_samples).sum();
+    let threads = engine.resources().threads.max(1);
+    let runtime_seconds = meta_staar_runtime_seconds(k, total_n, threads);
 
-    out.result_json(&json!({
-        "command": "meta-staar",
-        "n_studies": k,
-        "total_samples": total_n,
-        "trait_type": studies[0].meta.trait_type,
-        "output_path": config.output_dir.to_string_lossy(),
-    }));
+    let plan = crate::commands::DryRunPlan {
+        command: "meta-staar".into(),
+        inputs: json!({
+            "n_studies": k,
+            "total_samples": total_n,
+            "trait_type": studies[0].meta.trait_type,
+        }),
+        memory: crate::commands::MemoryEstimate::default_estimate(),
+        runtime: Some(crate::commands::RuntimeEstimate::from_seconds(runtime_seconds)),
+        output_path: config.output_dir.to_string_lossy().into(),
+    };
+    crate::commands::emit(&plan, out);
     Ok(())
+}
+
+/// Coarse wall-clock budget for `cohort meta-staar`. Dominated by the
+/// per-chromosome SQL merge plus per-segment covariance accumulation,
+/// both linear in `(n_studies × total_samples)`.
+fn meta_staar_runtime_seconds(n_studies: usize, total_samples: usize, threads: usize) -> u64 {
+    const NS_PER_STUDY_SAMPLE: u64 = 5_000;
+    const SQL_BASE_S: u64 = 20;
+
+    let merge_ns = (n_studies as u64).saturating_mul(total_samples as u64) * NS_PER_STUDY_SAMPLE;
+    let merge_s = merge_ns / 1_000_000_000 / threads as u64;
+    SQL_BASE_S.saturating_add(merge_s).max(30)
 }
 
 fn run_all_chromosomes(
@@ -358,6 +378,8 @@ fn build_result_batch(
     let mut b_end = UInt32Builder::with_capacity(nr);
     let mut b_nvariants = UInt32Builder::with_capacity(nr);
     let mut b_cmac = UInt32Builder::with_capacity(nr);
+    let mut b_burden_beta = Float64Builder::with_capacity(nr);
+    let mut b_burden_se = Float64Builder::with_capacity(nr);
 
     let n_pval_cols = 6 + 6 * n_channels + 6 + 2;
     let mut pval_builders: Vec<Float64Builder> = (0..n_pval_cols)
@@ -373,6 +395,8 @@ fn build_result_batch(
         b_end.append_value(r.end);
         b_nvariants.append_value(r.n_variants);
         b_cmac.append_value(r.cumulative_mac);
+        b_burden_beta.append_value(r.burden_beta);
+        b_burden_se.append_value(r.burden_se);
 
         let mut pi = 0;
         for p in [
@@ -427,6 +451,8 @@ fn build_result_batch(
         Field::new("end", DataType::UInt32, false),
         Field::new("n_variants", DataType::UInt32, false),
         Field::new("cMAC", DataType::UInt32, false),
+        Field::new("burden_beta", DataType::Float64, true),
+        Field::new("burden_se", DataType::Float64, true),
     ];
     for test in &test_names {
         fields.push(Field::new(*test, DataType::Float64, true));
@@ -458,6 +484,8 @@ fn build_result_batch(
         Arc::new(b_end.finish()),
         Arc::new(b_nvariants.finish()),
         Arc::new(b_cmac.finish()),
+        Arc::new(b_burden_beta.finish()),
+        Arc::new(b_burden_se.finish()),
     ];
     for b in &mut pval_builders {
         columns.push(Arc::new(b.finish()));

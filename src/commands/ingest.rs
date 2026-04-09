@@ -266,6 +266,7 @@ fn run_ingest_dry(
             "needs_intervention": analysis.needs_intervention(),
         }),
         memory: commands::MemoryEstimate::default_estimate(),
+        runtime: None,
         output_path: config.output.to_string_lossy().into(),
     };
     commands::emit(&plan, out);

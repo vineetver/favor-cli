@@ -337,7 +337,12 @@ fn emit_dry_run(
             _ => unreachable!("build_config rejects mixed cohort sources"),
         };
 
-    let _ = (n_samples, est_rare); // already folded into inputs_json
+    let runtime_seconds = staar_runtime_seconds(
+        n_samples,
+        est_rare,
+        engine.resources().threads.max(1),
+        config.has_kinship(),
+    );
     let plan = commands::DryRunPlan {
         command: "staar".into(),
         inputs: serde_json::json!({
@@ -351,10 +356,30 @@ fn emit_dry_run(
             minimum_bytes: 4 * GB,
             recommended_bytes,
         },
+        runtime: Some(commands::RuntimeEstimate::from_seconds(runtime_seconds)),
         output_path: config.output_dir.to_string_lossy().into(),
     };
     commands::emit(&plan, out);
     Ok(())
+}
+
+/// Coarse wall-clock budget for `cohort staar`.
+///
+/// Calibrated against profiling on the chr22 fixtures: the score-cache fill
+/// dominates and scales linearly with `n_samples × est_rare / threads`. Null
+/// model fitting adds a fixed overhead that jumps when kinship pulls in REML
+/// or PQL. Output is intentionally a budget, not a benchmark — operators use
+/// it to size SLURM allocations, not to predict the wall clock to the second.
+fn staar_runtime_seconds(n_samples: usize, est_rare: u64, threads: usize, has_kinship: bool) -> u64 {
+    const SCORE_NS_PER_SAMPLE_VARIANT: u64 = 1_000;
+    const NULL_BASE_S: u64 = 30;
+    const NULL_KINSHIP_S: u64 = 270;
+
+    let score_ns = (n_samples as u64).saturating_mul(est_rare) * SCORE_NS_PER_SAMPLE_VARIANT;
+    let score_s = score_ns / 1_000_000_000 / threads as u64;
+    let null_s = if has_kinship { NULL_KINSHIP_S } else { NULL_BASE_S };
+    let total = null_s.saturating_add(score_s);
+    total.max(60)
 }
 
 fn parquet_row_count(path: &std::path::Path) -> Result<i64, String> {
@@ -433,5 +458,27 @@ mod tests {
             "sample"
         );
         assert_eq!(derive_cohort_id(std::path::Path::new("/")), "cohort");
+    }
+
+    #[test]
+    fn staar_runtime_grows_with_workload_and_shrinks_with_threads() {
+        let small = staar_runtime_seconds(1_000, 100_000, 8, false);
+        let big = staar_runtime_seconds(50_000, 1_000_000, 8, false);
+        assert!(big > small);
+        let serial = staar_runtime_seconds(50_000, 1_000_000, 1, false);
+        let parallel = staar_runtime_seconds(50_000, 1_000_000, 16, false);
+        assert!(parallel < serial);
+    }
+
+    #[test]
+    fn staar_runtime_kinship_adds_overhead() {
+        let no_kin = staar_runtime_seconds(10_000, 100_000, 8, false);
+        let with_kin = staar_runtime_seconds(10_000, 100_000, 8, true);
+        assert!(with_kin > no_kin);
+    }
+
+    #[test]
+    fn staar_runtime_minimum_floor() {
+        assert_eq!(staar_runtime_seconds(0, 0, 8, false), 60);
     }
 }
