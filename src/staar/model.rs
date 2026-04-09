@@ -33,7 +33,7 @@ const ID_ALIASES: &[&str] = &[
     "sample", "Sample", "SAMPLE", "ID", "id", "SubjectID", "subject_id",
 ];
 
-fn resolve_column(
+pub(crate) fn resolve_column(
     requested: &str,
     actual_cols: &[String],
     column_map: &HashMap<String, String>,
@@ -116,7 +116,7 @@ pub(crate) fn resolve_id_column(
 }
 
 /// Extract a string from any Arrow column (handles Utf8, Utf8View, etc.).
-fn arrow_str(col: &dyn Array, row: usize) -> String {
+pub(crate) fn arrow_str(col: &dyn Array, row: usize) -> String {
     arrow::util::display::array_value_to_string(col, row).unwrap_or_default()
 }
 
