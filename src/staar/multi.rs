@@ -1,8 +1,7 @@
-// Wired only by `mod tests` until `RunMode::MultiTrait` lands.
 // `needless_range_loop` is silenced because the kernels are matrix
 // arithmetic where index loops read more naturally than enumerate
 // chains over `Mat` rows.
-#![allow(dead_code, clippy::needless_range_loop)]
+#![allow(clippy::needless_range_loop)]
 
 //! Joint multi-trait STAAR (Li et al. 2023, MultiSTAAR) for unrelated
 //! continuous traits with shared covariates.

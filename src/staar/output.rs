@@ -25,8 +25,35 @@ use crate::output::Output;
 use crate::store::manifest::{fsync_parent, tmp_path, write_atomic};
 use crate::types::AnnotatedVariant;
 
-use super::model::NullModel;
+use super::multi::MultiNullContinuous;
 use super::{GeneResult, MaskType, TraitType};
+
+/// Null-model summary fields embedded in `staar.meta.json`. Single-trait
+/// runs carry the residual variance `σ²`; joint multi-trait runs carry
+/// the `k × k` residual covariance `Σ_res` and the phenotype count `k`,
+/// since there is no single `σ²` scalar in that parametrisation.
+pub enum NullMeta<'a> {
+    Single { sigma2: f64 },
+    Multi(&'a MultiNullContinuous),
+}
+
+impl<'a> NullMeta<'a> {
+    fn to_json_fields(&self) -> serde_json::Value {
+        match self {
+            NullMeta::Single { sigma2 } => json!({ "sigma2": sigma2 }),
+            NullMeta::Multi(null) => {
+                let k = null.n_pheno;
+                let sigma_res: Vec<Vec<f64>> = (0..k)
+                    .map(|i| (0..k).map(|j| null.sigma_res[(i, j)]).collect())
+                    .collect();
+                json!({
+                    "n_pheno": k,
+                    "sigma_res": sigma_res,
+                })
+            }
+        }
+    }
+}
 
 /// Run `build` against `out_path.tmp`, then rename onto `out_path` and
 /// fsync the parent. Closure shape so each caller keeps its arrow
@@ -278,7 +305,7 @@ pub fn write_results(
     trait_names: &[String],
     maf_cutoff: f64,
     output_dir: &Path,
-    null_model: &NullModel,
+    null_meta: NullMeta<'_>,
     trait_type: TraitType,
     n: usize,
     n_rare: i64,
@@ -353,12 +380,22 @@ pub fn write_results(
         ));
     }
 
-    let meta = json!({
+    let mut meta = json!({
         "cohort_staar_version": 1,
         "traits": trait_names, "trait_type": format!("{:?}", trait_type),
         "n_samples": n, "n_rare_variants": n_rare, "maf_cutoff": maf_cutoff,
-        "sigma2": null_model.sigma2, "significant_genes": significant_genes,
+        "significant_genes": significant_genes,
     });
+    // Merge null-model summary fields (sigma2 for single-trait, or the
+    // k × k Σ_res for joint multi-trait) into the top-level meta object.
+    if let (Some(obj), Some(extras)) = (
+        meta.as_object_mut(),
+        null_meta.to_json_fields().as_object().cloned(),
+    ) {
+        for (k, v) in extras {
+            obj.insert(k, v);
+        }
+    }
     let meta_bytes = serde_json::to_string_pretty(&meta)
         .map_err(|e| CohortError::Resource(format!("Serialize staar.meta.json: {e}")))?;
     write_atomic(&output_dir.join("staar.meta.json"), meta_bytes.as_bytes())?;

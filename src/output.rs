@@ -46,6 +46,12 @@ impl OutputMode {
 pub struct Progress(Option<Arc<indicatif::ProgressBar>>);
 
 impl Progress {
+    /// A no-op progress handle. Used by machine-mode output and by test
+    /// `Output` impls that have no reason to render progress bars.
+    pub fn noop() -> Self {
+        Self(None)
+    }
+
     #[inline]
     pub fn inc(&self, n: u64) {
         if let Some(p) = &self.0 {
@@ -202,7 +208,7 @@ impl Output for MachineOutput {
     }
 
     fn progress(&self, _total: u64, _label: &str) -> Progress {
-        Progress(None)
+        Progress::noop()
     }
 
     fn table(&self, headers: &[&str], rows: &[Vec<String>]) {

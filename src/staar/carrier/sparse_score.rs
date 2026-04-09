@@ -344,21 +344,35 @@ pub fn slice_sumstats(
     (u_sub, k_sub)
 }
 
-/// Convert carrier lists to a dense faer::Mat for SPA / AI-STAAR paths.
-/// Uses vcf_to_pheno remapping to build n_pheno × m matrix.
-pub(crate) fn carriers_to_dense(carriers: &[CarrierList], analysis: &AnalysisVectors) -> Mat<f64> {
+/// Convert carrier lists to a dense `(n_pheno, m)` faer::Mat, taking the
+/// sparse → compact sample remap as primitive arguments. Used by both the
+/// single-trait kernels (through the `AnalysisVectors` wrapper below) and
+/// the joint multi-trait scoring loop (which does not build an
+/// `AnalysisVectors`).
+pub(crate) fn carriers_to_dense_compact(
+    carriers: &[CarrierList],
+    vcf_to_pheno: &[Option<u32>],
+    n_pheno: usize,
+) -> Mat<f64> {
     let m = carriers.len();
-    let mut g = Mat::zeros(analysis.n_pheno, m);
+    let mut g = Mat::zeros(n_pheno, m);
     for (j, clist) in carriers.iter().enumerate() {
         for &CarrierEntry { sample_idx, dosage } in &clist.entries {
             if dosage != 255 {
-                if let Some(pi) = analysis.vcf_to_pheno[sample_idx as usize] {
+                if let Some(pi) = vcf_to_pheno[sample_idx as usize] {
                     g[(pi as usize, j)] = dosage as f64;
                 }
             }
         }
     }
     g
+}
+
+/// Convert carrier lists to a dense faer::Mat for SPA / AI-STAAR paths.
+/// Thin wrapper over `carriers_to_dense_compact` that extracts the
+/// remap and sample count from an `AnalysisVectors`.
+pub(crate) fn carriers_to_dense(carriers: &[CarrierList], analysis: &AnalysisVectors) -> Mat<f64> {
+    carriers_to_dense_compact(carriers, &analysis.vcf_to_pheno, analysis.n_pheno)
 }
 
 /// Reconstruct a NullModel from AnalysisVectors for the SPA / AI-STAAR paths.
@@ -1134,6 +1148,112 @@ mod tests {
                     "Duplicate K[{i},{j}] should equal K[0,0]: {} vs {}",
                     k_triple[(i, j)], k_triple[(0, 0)]);
             }
+        }
+    }
+
+    /// `carriers_to_dense_compact` must produce a `(n_pheno, m)` matrix
+    /// with dosages at the compact sample indices and zeros elsewhere.
+    /// This is the primitive the multi-trait scoring loop uses to turn
+    /// sparse carriers into the dense G₀ the joint kernel expects.
+    #[test]
+    fn carriers_to_dense_compact_places_dosages_at_compact_indices() {
+        // VCF layout: 6 samples, samples 1 and 4 have no phenotype, so
+        // compact n_pheno == 4 and vcf_to_pheno[1] == vcf_to_pheno[4] == None.
+        let vcf_to_pheno: Vec<Option<u32>> = vec![
+            Some(0),
+            None,
+            Some(1),
+            Some(2),
+            None,
+            Some(3),
+        ];
+        let n_pheno = 4;
+
+        // Two variants.
+        //   v0: sample 0 (dose 1), sample 3 (dose 2), sample 4 (dose 1, dropped by mask).
+        //   v1: sample 2 (dose 1), sample 5 (dose 2), sample 1 (dose 2, dropped by mask).
+        let carriers = vec![
+            CarrierList {
+                entries: vec![
+                    CarrierEntry { sample_idx: 0, dosage: 1 },
+                    CarrierEntry { sample_idx: 3, dosage: 2 },
+                    CarrierEntry { sample_idx: 4, dosage: 1 },
+                ],
+            },
+            CarrierList {
+                entries: vec![
+                    CarrierEntry { sample_idx: 1, dosage: 2 },
+                    CarrierEntry { sample_idx: 2, dosage: 1 },
+                    CarrierEntry { sample_idx: 5, dosage: 2 },
+                ],
+            },
+        ];
+
+        let g = carriers_to_dense_compact(&carriers, &vcf_to_pheno, n_pheno);
+        assert_eq!(g.nrows(), 4);
+        assert_eq!(g.ncols(), 2);
+
+        // v0 column: compact 0 ← vcf 0 (dose 1), compact 2 ← vcf 3 (dose 2).
+        assert_eq!(g[(0, 0)], 1.0);
+        assert_eq!(g[(1, 0)], 0.0);
+        assert_eq!(g[(2, 0)], 2.0);
+        assert_eq!(g[(3, 0)], 0.0);
+        // v1 column: compact 1 ← vcf 2 (dose 1), compact 3 ← vcf 5 (dose 2).
+        assert_eq!(g[(0, 1)], 0.0);
+        assert_eq!(g[(1, 1)], 1.0);
+        assert_eq!(g[(2, 1)], 0.0);
+        assert_eq!(g[(3, 1)], 2.0);
+    }
+
+    /// `carriers_to_dense_compact` must skip the sentinel dosage 255
+    /// (used to mark missing genotypes) the same way the single-trait
+    /// kernels do; the output cell must stay zero.
+    #[test]
+    fn carriers_to_dense_compact_skips_missing_sentinel() {
+        let vcf_to_pheno = vec![Some(0u32), Some(1), Some(2)];
+        let carriers = vec![CarrierList {
+            entries: vec![
+                CarrierEntry { sample_idx: 0, dosage: 2 },
+                CarrierEntry { sample_idx: 1, dosage: 255 }, // missing
+                CarrierEntry { sample_idx: 2, dosage: 1 },
+            ],
+        }];
+        let g = carriers_to_dense_compact(&carriers, &vcf_to_pheno, 3);
+        assert_eq!(g[(0, 0)], 2.0);
+        assert_eq!(g[(1, 0)], 0.0, "missing sentinel must not write");
+        assert_eq!(g[(2, 0)], 1.0);
+    }
+
+    /// `carriers_to_dense` (the AnalysisVectors wrapper) must delegate
+    /// to the same primitive — keeping a regression guard on the
+    /// single source of truth for G₀ materialization.
+    #[test]
+    fn carriers_to_dense_wrapper_matches_compact_primitive() {
+        // Minimal AnalysisVectors shell: only the fields the wrapper reads.
+        let vcf_to_pheno = vec![Some(0u32), Some(1), Some(2), Some(3)];
+        let carriers = vec![CarrierList {
+            entries: vec![
+                CarrierEntry { sample_idx: 0, dosage: 1 },
+                CarrierEntry { sample_idx: 3, dosage: 2 },
+            ],
+        }];
+        let analysis = AnalysisVectors {
+            residuals: vec![0.0; 4],
+            x_row_major: vec![1.0; 4],
+            xtx_inv: vec![1.0],
+            sigma2: 1.0,
+            k: 1,
+            n_pheno: 4,
+            n_vcf_total: 4,
+            working_weights: Vec::new(),
+            fitted_values: Vec::new(),
+            vcf_to_pheno: vcf_to_pheno.clone(),
+            kinship: None,
+        };
+        let g_wrap = carriers_to_dense(&carriers, &analysis);
+        let g_prim = carriers_to_dense_compact(&carriers, &vcf_to_pheno, 4);
+        for i in 0..4 {
+            assert_eq!(g_wrap[(i, 0)], g_prim[(i, 0)]);
         }
     }
 }

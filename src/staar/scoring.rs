@@ -17,12 +17,14 @@ use rayon::prelude::*;
 
 use crate::error::CohortError;
 use crate::output::Output;
-use crate::staar::carrier::sparse_score;
+use crate::staar::carrier::sparse_score::{self, carriers_to_dense_compact};
 use crate::staar::carrier::AnalysisVectors;
 use crate::staar::masks::{self, MaskGroup};
+use crate::staar::multi::{self, MultiNullContinuous};
 use crate::staar::score;
 use crate::staar::{self, GeneResult, MaskCategory, MaskType, ScoringMode};
 use crate::store::cache::score_cache::{self, ChromScoreCache, GeneKBlock};
+use crate::store::cohort::types::{from_u32_slice, VariantVcf};
 use crate::store::cohort::variants::{CarrierList, VariantIndexEntry};
 use crate::store::cohort::{ChromosomeView, CohortHandle, CohortManifest};
 use crate::types::{AnnotatedVariant, Chromosome};
@@ -614,4 +616,385 @@ fn score_one_window(
         burden_beta: f64::NAN,
         burden_se: f64::NAN,
     })
+}
+
+// =====================================================================
+// Joint multi-trait scoring path
+// =====================================================================
+//
+// This section mirrors the single-trait loop above but never builds an
+// `AnalysisVectors` or touches the on-disk score cache. The multi kernel
+// in `staar::multi` wants a dense `(n_pheno × m)` genotype matrix per
+// gene plus the joint null model; there is no per-variant U/K
+// representation to cache on the multi path. Gene iteration, mask plan,
+// annotation matrix construction, and window building are all reused
+// from the single-trait code above.
+
+/// Arguments for the joint multi-trait scoring run. Narrower than
+/// `ScoringRequest` because the multi path has no `ScoringMode` axis —
+/// SPA, AI-STAAR, and kinship-aware scoring are all rejected at config
+/// build time (see `commands::staar::build_config`).
+pub struct MultiScoringRequest<'a> {
+    pub mask_categories: &'a [MaskCategory],
+    pub maf_cutoff: f64,
+    pub window_size: u32,
+    pub scang_params: &'a ScangParams,
+}
+
+/// Public entry point: score every chromosome in `manifest` against the
+/// joint multi-trait null model and return per-mask gene/window result
+/// vectors. Mirrors `run_score_tests` but never touches a score cache.
+pub fn run_multi_score_tests(
+    cohort: &CohortHandle<'_>,
+    manifest: &CohortManifest,
+    request: &MultiScoringRequest<'_>,
+    null: &MultiNullContinuous,
+    pheno_mask: &[bool],
+    out: &dyn Output,
+) -> Result<ResultSet, CohortError> {
+    out.status("Running joint multi-trait score tests...");
+
+    // Compact VCF → phenotype index map. Same compaction rule as
+    // `AnalysisVectors::from_null_model`: samples with phenotype data get
+    // consecutive indices starting at 0; the rest stay None so carriers
+    // touching them are skipped.
+    let vcf_to_pheno: Vec<Option<u32>> = {
+        let mut map = Vec::with_capacity(pheno_mask.len());
+        let mut next: u32 = 0;
+        for &has in pheno_mask {
+            if has {
+                map.push(Some(next));
+                next += 1;
+            } else {
+                map.push(None);
+            }
+        }
+        map
+    };
+    debug_assert_eq!(vcf_to_pheno.iter().filter(|p| p.is_some()).count(), null.n_samples);
+    let n_pheno = null.n_samples;
+
+    let mut plan = MaskPlan::build(request.mask_categories, out);
+
+    for ci in &manifest.chromosomes {
+        let chrom: Chromosome = ci.name.parse().map_err(|e: String| CohortError::Input(e))?;
+        let view = cohort.chromosome(&chrom)?;
+        let n_variants = view.index()?.len();
+        let n_genes = view.index()?.n_genes();
+        out.status(&format!(
+            "  chr{}: {} variants, {} genes",
+            chrom.label(),
+            n_variants,
+            n_genes,
+        ));
+
+        if plan.has_gene_masks() {
+            score_chrom_genes_multi(
+                &view,
+                &vcf_to_pheno,
+                n_pheno,
+                null,
+                &plan.gene_predicates,
+                request.maf_cutoff,
+                chrom,
+                &mut plan.results,
+                out,
+            )?;
+        }
+
+        if plan.has_window_work() {
+            score_chrom_windows_multi(
+                &view,
+                &vcf_to_pheno,
+                n_pheno,
+                null,
+                request,
+                chrom,
+                &mut plan,
+                out,
+            );
+        }
+    }
+
+    Ok(plan.results)
+}
+
+/// Per-chromosome multi-trait gene loop. Walks each gene in the variant
+/// index, maf-filters the gene's variants, loads carriers, materializes
+/// one `(n_pheno × m)` genotype matrix per gene, then evaluates every
+/// mask predicate against a column slice of that matrix.
+#[allow(clippy::too_many_arguments)]
+fn score_chrom_genes_multi(
+    view: &ChromosomeView<'_>,
+    vcf_to_pheno: &[Option<u32>],
+    n_pheno: usize,
+    null: &MultiNullContinuous,
+    mask_predicates: &[(MaskType, MaskPredicate)],
+    maf_cutoff: f64,
+    chrom: Chromosome,
+    results: &mut ResultSet,
+    out: &dyn Output,
+) -> Result<(), CohortError> {
+    let variant_index = view.index()?;
+    let all_entries = variant_index.all_entries();
+    let gene_names: Vec<String> = variant_index.gene_names().map(|s| s.to_string()).collect();
+    let n_vcf = vcf_to_pheno.len();
+
+    let per_gene: Vec<Vec<(usize, GeneResult)>> = gene_names
+        .par_iter()
+        .map(|gene_name| -> Result<Vec<(usize, GeneResult)>, CohortError> {
+            let raw_vcfs: &[u32] = variant_index.gene_variant_vcfs(gene_name);
+            if raw_vcfs.len() < 2 {
+                return Ok(Vec::new());
+            }
+
+            // MAF filter → indices of variants that pass, plus their
+            // global VCF positions and positions on the chromosome.
+            let gene_vcfs: Vec<u32> = raw_vcfs
+                .iter()
+                .copied()
+                .filter(|&v| all_entries[v as usize].maf < maf_cutoff)
+                .collect();
+            if gene_vcfs.len() < 2 {
+                return Ok(Vec::new());
+            }
+
+            let positions: Vec<u32> = gene_vcfs
+                .iter()
+                .map(|&v| all_entries[v as usize].position)
+                .collect();
+            let start = *positions.iter().min().unwrap();
+            let end = *positions.iter().max().unwrap();
+
+            // `gene_variant_vcfs` is sorted by the membership loader, so
+            // the maf filter preserves order and `carriers_batch` sees a
+            // monotonic slice as required.
+            debug_assert!(gene_vcfs.windows(2).all(|w| w[0] <= w[1]));
+            let vcfs: &[VariantVcf] = from_u32_slice(&gene_vcfs);
+            let carriers = view.carriers_batch(vcfs)?.entries;
+            if carriers.len() < 2 {
+                return Ok(Vec::new());
+            }
+            let g0 = carriers_to_dense_compact(&carriers, vcf_to_pheno, n_pheno);
+
+            let mut gene_results = Vec::new();
+            for (mask_idx, (_mt, predicate)) in mask_predicates.iter().enumerate() {
+                let qualifying: Vec<usize> = (0..gene_vcfs.len())
+                    .filter(|&i| {
+                        let v = gene_vcfs[i] as usize;
+                        predicate(
+                            &all_entries[v]
+                                .to_annotated_variant_with_gene(chrom, gene_name),
+                        )
+                    })
+                    .collect();
+                if qualifying.len() < 2 {
+                    continue;
+                }
+
+                let g_mask = slice_g0_columns(&g0, &qualifying);
+                let mafs: Vec<f64> = qualifying
+                    .iter()
+                    .map(|&i| all_entries[gene_vcfs[i] as usize].maf)
+                    .collect();
+                let ann_matrix = build_annotation_matrix(&gene_vcfs, &qualifying, all_entries);
+
+                let staar = multi::run_multi_staar(&g_mask, null, &ann_matrix, &mafs);
+
+                let cmac: u32 = mafs
+                    .iter()
+                    .map(|&maf| (2.0 * maf * n_vcf as f64).round() as u32)
+                    .sum();
+
+                gene_results.push((
+                    mask_idx,
+                    GeneResult {
+                        ensembl_id: gene_name.clone(),
+                        gene_symbol: gene_name.clone(),
+                        chromosome: chrom,
+                        start,
+                        end,
+                        n_variants: qualifying.len() as u32,
+                        cumulative_mac: cmac,
+                        staar,
+                        burden_beta: f64::NAN,
+                        burden_se: f64::NAN,
+                    },
+                ));
+            }
+            Ok(gene_results)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for gene_results in per_gene {
+        for (mask_idx, result) in gene_results {
+            results[mask_idx].1.push(result);
+        }
+    }
+
+    for (idx, (mask_type, _)) in mask_predicates.iter().enumerate() {
+        let n = results[idx].1.len();
+        if n > 0 {
+            out.status(&format!("    {}: {} groups", mask_type.file_stem(), n));
+        }
+    }
+
+    Ok(())
+}
+
+/// Per-chromosome multi-trait window loop. Mirrors `score_chrom_windows`
+/// but builds a dense G₀ from carriers and calls the joint kernel.
+#[allow(clippy::too_many_arguments)]
+fn score_chrom_windows_multi(
+    view: &ChromosomeView<'_>,
+    vcf_to_pheno: &[Option<u32>],
+    n_pheno: usize,
+    null: &MultiNullContinuous,
+    request: &MultiScoringRequest<'_>,
+    chrom: Chromosome,
+    plan: &mut MaskPlan,
+    out: &dyn Output,
+) {
+    let variant_index = match view.index() {
+        Ok(i) => i,
+        Err(e) => {
+            out.warn(&format!("    skipping windows on chr{}: {e}", chrom.label()));
+            return;
+        }
+    };
+    let (chrom_variants, global_indices): (Vec<AnnotatedVariant>, Vec<usize>) = variant_index
+        .all_entries()
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.maf < request.maf_cutoff)
+        .map(|(gi, e)| (e.to_annotated_variant(chrom), gi))
+        .unzip();
+    let chrom_indices: Vec<usize> = (0..chrom_variants.len()).collect();
+    let n_vcf = vcf_to_pheno.len();
+
+    let score_window = |group: &MaskGroup| -> Option<GeneResult> {
+        score_one_window_multi(
+            group,
+            &chrom_variants,
+            &global_indices,
+            view,
+            vcf_to_pheno,
+            n_pheno,
+            null,
+            n_vcf,
+        )
+    };
+
+    if let Some(slot) = plan.window_slot {
+        let groups = masks::build_sliding_windows(
+            &chrom_variants,
+            &chrom_indices,
+            chrom,
+            request.window_size,
+            request.window_size / 2,
+        );
+        if !groups.is_empty() {
+            let r: Vec<GeneResult> = groups.iter().filter_map(score_window).collect();
+            if !r.is_empty() {
+                out.status(&format!("    sliding_window: {} windows", r.len()));
+                plan.results[slot].1.extend(r);
+            }
+        }
+    }
+
+    if let Some(slot) = plan.scang_slot {
+        let scang_all = masks::build_scang_windows(
+            &chrom_variants,
+            &chrom_indices,
+            chrom,
+            request.scang_params,
+        );
+        for (wsize, groups) in &scang_all {
+            let r: Vec<GeneResult> = groups.iter().filter_map(score_window).collect();
+            if !r.is_empty() {
+                out.status(&format!("    scang L={wsize}: {} windows", r.len()));
+                plan.results[slot].1.extend(r);
+            }
+        }
+    }
+}
+
+/// Score one multi-trait window. Returns `None` for windows with fewer
+/// than two carriers after loading, to match the single-trait path's
+/// skip semantics.
+#[allow(clippy::too_many_arguments)]
+fn score_one_window_multi(
+    group: &MaskGroup,
+    chrom_variants: &[AnnotatedVariant],
+    global_indices: &[usize],
+    view: &ChromosomeView<'_>,
+    vcf_to_pheno: &[Option<u32>],
+    n_pheno: usize,
+    null: &MultiNullContinuous,
+    n_vcf: usize,
+) -> Option<GeneResult> {
+    let m = group.variant_indices.len();
+    if m < 2 {
+        return None;
+    }
+
+    let win_globals: Vec<u32> = group
+        .variant_indices
+        .iter()
+        .map(|&ci| global_indices[ci] as u32)
+        .collect();
+    // Windows emit variant_indices in position order, so globals are
+    // monotonic — `carriers_batch`'s sorted-input contract is honoured.
+    debug_assert!(win_globals.windows(2).all(|w| w[0] <= w[1]));
+    let vcfs: &[VariantVcf] = from_u32_slice(&win_globals);
+    let carriers = view.carriers_batch(vcfs).ok()?.entries;
+    if carriers.len() < 2 {
+        return None;
+    }
+    let g = carriers_to_dense_compact(&carriers, vcf_to_pheno, n_pheno);
+
+    let mafs: Vec<f64> = group
+        .variant_indices
+        .iter()
+        .map(|&ci| chrom_variants[ci].maf)
+        .collect();
+    let ann_matrix: Vec<Vec<f64>> = (0..11)
+        .map(|ch| {
+            group
+                .variant_indices
+                .iter()
+                .map(|&ci| chrom_variants[ci].annotation.weights.0[ch])
+                .collect()
+        })
+        .collect();
+
+    let staar = multi::run_multi_staar(&g, null, &ann_matrix, &mafs);
+
+    let cmac: u32 = mafs
+        .iter()
+        .map(|&maf| (2.0 * maf * n_vcf as f64).round() as u32)
+        .sum();
+
+    Some(GeneResult {
+        ensembl_id: group.name.clone(),
+        gene_symbol: group.name.clone(),
+        chromosome: group.chromosome,
+        start: group.start,
+        end: group.end,
+        n_variants: m as u32,
+        cumulative_mac: cmac,
+        staar,
+        burden_beta: f64::NAN,
+        burden_se: f64::NAN,
+    })
+}
+
+/// Slice a subset of columns out of a dense `(n_pheno, m)` genotype
+/// matrix. The multi path builds one G₀ per gene and evaluates every
+/// mask predicate against a column subset of that matrix, so this
+/// small helper lives next to the loop that calls it.
+fn slice_g0_columns(g: &Mat<f64>, columns: &[usize]) -> Mat<f64> {
+    let n = g.nrows();
+    let k = columns.len();
+    Mat::from_fn(n, k, |i, j| g[(i, columns[j])])
 }

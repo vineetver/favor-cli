@@ -13,12 +13,13 @@ use crate::runtime::Engine;
 use crate::staar::carrier::AnalysisVectors;
 use crate::staar::masks::ScangParams;
 use crate::staar::model::{augment_covariates, load_known_loci, load_phenotype, NullModel};
-use crate::staar::output::{write_individual_results, write_results};
+use crate::staar::multi::MultiNullContinuous;
+use crate::staar::output::{write_individual_results, write_results, NullMeta};
 use crate::staar::run_manifest::{
     self, ArtifactKind, CacheDecision, CacheOutcome, ConfigHashInputs, ResumeDecision,
     ResumeSummary, RunManifest, Stage,
 };
-use crate::staar::scoring::{self, ResultSet, ScoringRequest};
+use crate::staar::scoring::{self, MultiScoringRequest, ResultSet, ScoringRequest};
 use crate::staar::{
     self, ancestry::AncestryInfo, MaskCategory, NullModelKind, RunMode, ScoringMode, TraitType,
 };
@@ -78,8 +79,20 @@ impl StaarConfig {
 }
 
 impl StaarConfig {
+    /// Directory where the per-mask parquet results and `staar.meta.json`
+    /// land. Single-trait runs shelve results under the trait name so
+    /// parallel trait runs in the same output dir do not stomp each
+    /// other; multi-trait runs use the literal label `"multi"` because
+    /// the trait list is already embedded in the metadata and any
+    /// `t1+t2+...` join scheme produces filesystem-illegal or
+    /// unreadably long paths.
     pub fn results_dir(&self) -> PathBuf {
-        self.output_dir.join("results").join(&self.trait_names[0])
+        let label = if self.trait_names.len() > 1 {
+            "multi".to_string()
+        } else {
+            self.trait_names[0].clone()
+        };
+        self.output_dir.join("results").join(label)
     }
 
     pub fn sumstats_dir(&self) -> PathBuf {
@@ -144,9 +157,17 @@ impl StaarConfig {
     }
 
     pub fn new_run_manifest(&self, existing_cohort_manifest: Option<&Path>) -> RunManifest {
+        // Joint multi-trait runs encode every trait in the manifest label
+        // so `run.json` on disk records the exact trait list, while the
+        // results directory gets the short `"multi"` alias.
+        let label = if self.trait_names.len() > 1 {
+            format!("multi:{}", self.trait_names.join("+"))
+        } else {
+            self.trait_names[0].clone()
+        };
         RunManifest::new(
             self.run_mode,
-            self.trait_names[0].clone(),
+            label,
             self.config_hash(existing_cohort_manifest),
         )
     }
@@ -248,29 +269,33 @@ impl<'a> StaarPipeline<'a> {
 
         let pheno = self.stage(Stage::LoadPhenotype, |p| p.stage_load_phenotype(&store))?;
 
-        // Multi-trait path diverges before the single-trait null fit: the
-        // score cache, AnalysisVectors, and the per-gene scoring kernels
-        // are all single-trait shaped. Route it to its own branch so the
-        // single-trait stages below never see a (n × k) Y.
+        // Validate / EnsureStore / LoadPhenotype are shared between the
+        // single-trait and joint multi-trait paths. After phenotype load
+        // the two paths diverge: single-trait threads an `AnalysisVectors`
+        // through the score cache and the cached-U/K kernels; multi-trait
+        // fits a joint null and walks genes directly against the sparse
+        // genotype store with no cache. Branching at the type level here
+        // keeps the single-trait stages below from ever seeing a
+        // `(n × k)` Y.
         match self.config.run_mode {
-            RunMode::Analyze | RunMode::EmitSumstats => {}
-            RunMode::MultiTrait => {
-                return Err(CohortError::Analysis(
-                    "multi-trait joint STAAR is not yet wired through the pipeline; \
-                     run one trait at a time for now"
-                        .into(),
-                ));
-            }
+            RunMode::Analyze | RunMode::EmitSumstats => self.run_single_trait(&store, &pheno),
+            RunMode::MultiTrait => self.run_multi_trait(&store, &pheno),
         }
+    }
 
+    fn run_single_trait(
+        &mut self,
+        store: &GenoStoreResult,
+        pheno: &PhenoStageOut,
+    ) -> Result<(), CohortError> {
         let null_model = self.stage(Stage::FitNullModel, |p| {
-            p.stage_fit_null_model(&pheno, &store)
+            p.stage_fit_null_model(pheno, store)
         })?;
 
         // Sumstats early-exit run mode.
         if self.config.run_mode == RunMode::EmitSumstats {
             self.stage(Stage::EmitSumstats, |p| {
-                p.stage_emit_sumstats(&store, &null_model, &pheno)
+                p.stage_emit_sumstats(store, &null_model, pheno)
             })?;
             self.manifest.write(&self.config.output_dir)?;
             return Ok(());
@@ -279,7 +304,7 @@ impl<'a> StaarPipeline<'a> {
         let analysis = AnalysisVectors::from_null_model(&null_model, &pheno.pheno_mask)?;
 
         let cache_dir = self.stage(Stage::EnsureScoreCache, |p| {
-            p.stage_ensure_score_cache(&store, &analysis)
+            p.stage_ensure_score_cache(store, &analysis)
         })?;
         self.manifest.outputs.score_cache_dir = Some(cache_dir.clone());
         self.manifest.write(&self.config.output_dir)?;
@@ -289,7 +314,7 @@ impl<'a> StaarPipeline<'a> {
 
         let scoring = self.stage(Stage::RunScoring, |p| {
             p.stage_run_scoring(
-                &store,
+                store,
                 &analysis,
                 scoring_mode,
                 &cache_dir,
@@ -314,6 +339,35 @@ impl<'a> StaarPipeline<'a> {
                 pheno.n,
                 n_rare,
             )
+        })?;
+        self.manifest.outputs.results_dir = Some(self.config.results_dir());
+        self.manifest.write(&self.config.output_dir)?;
+
+        Ok(())
+    }
+
+    fn run_multi_trait(
+        &mut self,
+        store: &GenoStoreResult,
+        pheno: &PhenoStageOut,
+    ) -> Result<(), CohortError> {
+        // Multi-trait joint STAAR is unrelated continuous only; the
+        // binary reject fires inside `load_phenotype` via the trait-type
+        // detection, so by the time we reach this method `pheno.y` is an
+        // `(n, k)` continuous matrix with `k >= 2`. Fit the joint null
+        // directly from the multi module.
+        let null = self.stage(Stage::FitNullModel, |p| p.stage_fit_multi_null(pheno))?;
+
+        let scoring = self.stage(Stage::RunScoring, |p| {
+            p.stage_run_multi_scoring(store, &null, pheno)
+        })?;
+
+        let cohort = self.cohort();
+        let variants = load_rare_variants(&cohort, &store.manifest, self.config.maf_cutoff)?;
+        let n_rare = variants.len() as i64;
+
+        self.stage(Stage::WriteResults, |p| {
+            p.stage_write_multi_results(&scoring, &variants, &null, pheno.n, n_rare)
         })?;
         self.manifest.outputs.results_dir = Some(self.config.results_dir());
         self.manifest.write(&self.config.output_dir)?;
@@ -509,14 +563,12 @@ impl<'a> StaarPipeline<'a> {
         &mut self,
         store: &GenoStoreResult,
     ) -> Result<PhenoStageOut, CohortError> {
-        let primary_trait = &self.config.trait_names[0];
-
         let pheno = load_phenotype(
             self.engine.df(),
             &self.config.phenotype,
             &self.config.covariates,
             &store.geno,
-            primary_trait,
+            &self.config.trait_names,
             self.config.ancestry_col.as_deref(),
             self.config.ai_base_tests,
             self.config.ai_seed,
@@ -631,6 +683,82 @@ impl<'a> StaarPipeline<'a> {
             working_weights: None,
             kinship: Some(state),
         })
+    }
+
+    /// Fit the joint multi-trait null model. Unrelated continuous only;
+    /// the binary and kinship combinations are rejected at config build
+    /// time, and the binary-first-trait reject fires inside
+    /// `load_phenotype` before this stage ever runs.
+    fn stage_fit_multi_null(
+        &mut self,
+        pheno: &PhenoStageOut,
+    ) -> Result<MultiNullContinuous, CohortError> {
+        self.out.status("Fitting joint multi-trait null model...");
+        let null = MultiNullContinuous::fit(&pheno.y, &pheno.x);
+        self.out.status(&format!(
+            "  k = {} traits, n = {} samples, Σ_res fitted",
+            null.n_pheno, null.n_samples,
+        ));
+        Ok(null)
+    }
+
+    fn stage_run_multi_scoring(
+        &mut self,
+        store: &GenoStoreResult,
+        null: &MultiNullContinuous,
+        pheno: &PhenoStageOut,
+    ) -> Result<ScoringOutput, CohortError> {
+        let request = MultiScoringRequest {
+            mask_categories: &self.config.mask_categories,
+            maf_cutoff: self.config.maf_cutoff,
+            window_size: self.config.window_size,
+            scang_params: &self.config.scang_params,
+        };
+        let results = scoring::run_multi_score_tests(
+            &self.cohort(),
+            &store.manifest,
+            &request,
+            null,
+            &pheno.pheno_mask,
+            self.out,
+        )?;
+        Ok(ScoringOutput {
+            results,
+            individual_pvals: Vec::new(),
+        })
+    }
+
+    fn stage_write_multi_results(
+        &mut self,
+        scoring: &ScoringOutput,
+        _variants: &[AnnotatedVariant],
+        null: &MultiNullContinuous,
+        n: usize,
+        n_rare: i64,
+    ) -> Result<(), CohortError> {
+        let results_dir = self.config.results_dir();
+        std::fs::create_dir_all(&results_dir).map_err(|e| {
+            CohortError::Resource(format!(
+                "Cannot create results directory '{}': {e}",
+                results_dir.display()
+            ))
+        })?;
+
+        // Multi-trait path does not produce `--individual` per-variant
+        // p-values; the joint kernel works on dense G₀ rather than the
+        // per-variant score cache the single-trait individual-test
+        // producer feeds off.
+        write_results(
+            &scoring.results,
+            &self.config.trait_names,
+            self.config.maf_cutoff,
+            &results_dir,
+            NullMeta::Multi(null),
+            TraitType::Continuous,
+            n,
+            n_rare,
+            self.out,
+        )
     }
 
     fn stage_emit_sumstats(
@@ -794,7 +922,9 @@ impl<'a> StaarPipeline<'a> {
             &self.config.trait_names,
             self.config.maf_cutoff,
             &results_dir,
-            null_model,
+            NullMeta::Single {
+                sigma2: null_model.sigma2,
+            },
             trait_type,
             n,
             n_rare,
@@ -988,6 +1118,59 @@ mod tests {
         assert_eq!(m.run_mode, c.run_mode);
         assert_eq!(m.trait_name, c.trait_names[0]);
         assert_eq!(m.config_hash, c.config_hash(None));
+    }
+
+    /// Single-trait runs keep the existing per-trait results directory
+    /// layout so two parallel runs in the same output dir do not stomp
+    /// each other.
+    #[test]
+    fn results_dir_single_trait_is_per_trait() {
+        let c = dummy_config();
+        let dir = c.results_dir();
+        assert!(
+            dir.ends_with("results/BMI"),
+            "expected per-trait directory, got {}",
+            dir.display()
+        );
+    }
+
+    /// Multi-trait runs shelve results under the stable `"multi"` label;
+    /// the exact trait list lives in `staar.meta.json` so the directory
+    /// name stays short and filesystem-legal.
+    #[test]
+    fn results_dir_multi_trait_is_multi_label() {
+        let mut c = dummy_config();
+        c.trait_names = vec!["BMI".into(), "HEIGHT".into(), "LDL".into()];
+        c.run_mode = RunMode::MultiTrait;
+        let dir = c.results_dir();
+        assert!(
+            dir.ends_with("results/multi"),
+            "expected results/multi, got {}",
+            dir.display()
+        );
+    }
+
+    /// The manifest label for a multi run embeds every trait so
+    /// forensic `run.json` reads still identify the exact inputs.
+    #[test]
+    fn new_run_manifest_label_for_multi_trait() {
+        let mut c = dummy_config();
+        c.trait_names = vec!["BMI".into(), "HEIGHT".into()];
+        c.run_mode = RunMode::MultiTrait;
+        let m = c.new_run_manifest(None);
+        assert_eq!(m.run_mode, RunMode::MultiTrait);
+        assert_eq!(m.trait_name, "multi:BMI+HEIGHT");
+    }
+
+    /// Config-hash invariance: adding a second trait must change the
+    /// hash so the resume planner does not reuse a single-trait run.
+    #[test]
+    fn config_hash_changes_when_second_trait_added() {
+        let c1 = dummy_config();
+        let mut c2 = dummy_config();
+        c2.trait_names.push("HEIGHT".into());
+        c2.run_mode = RunMode::MultiTrait;
+        assert_ne!(c1.config_hash(None), c2.config_hash(None));
     }
 
     #[test]
