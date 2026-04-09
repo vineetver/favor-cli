@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use memmap2::Advice;
+
 use super::encoding::*;
 use super::variants::{CarrierEntry, CarrierList};
 use crate::error::CohortError;
@@ -40,6 +42,13 @@ impl SparseG {
             .chunks_exact(8)
             .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
             .collect();
+
+        // Scoring loop jumps from one variant's carrier block to another,
+        // so default sequential readahead fetches pages we never touch and
+        // evicts ones we just used. MADV_RANDOM turns readahead off; the
+        // kernel now only pages in what we actually read. Best-effort:
+        // `advise` is a hint, ignored on unsupported kernels.
+        mmap.advise(Advice::Random);
 
         Ok(Self {
             mmap,

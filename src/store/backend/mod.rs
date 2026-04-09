@@ -7,7 +7,7 @@ use std::ops::Deref;
 use std::path::Path;
 
 use arrow::record_batch::RecordBatchReader;
-use memmap2::Mmap;
+use memmap2::{Advice, Mmap};
 
 use crate::error::CohortError;
 
@@ -29,6 +29,17 @@ pub struct MappedBytes {
 impl MappedBytes {
     pub fn new(inner: Mmap) -> Self {
         Self { inner }
+    }
+
+    /// Hint the kernel about the expected access pattern. Best-effort:
+    /// logs nothing on failure because `madvise` is a hint, not a
+    /// correctness contract, and unsupported kernels silently ignore it.
+    /// Used by `SparseG` to turn off default readahead on `sparse_g.bin`
+    /// — the scoring loop jumps to one variant, reads its carriers, and
+    /// jumps to another, so sequential prefetch evicts pages we will
+    /// touch again soon.
+    pub fn advise(&self, advice: Advice) {
+        let _ = self.inner.advise(advice);
     }
 }
 
