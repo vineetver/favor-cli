@@ -58,15 +58,9 @@ impl MaskPlan {
 
         for cat in categories {
             match cat {
-                MaskCategory::Coding => {
-                    for &(ref mt, pred) in masks::CODING_MASKS {
-                        gene_predicates.push((mt.clone(), pred));
-                    }
-                }
+                MaskCategory::Coding => gene_predicates.extend_from_slice(masks::CODING_MASKS),
                 MaskCategory::Noncoding => {
-                    for &(ref mt, pred) in masks::NONCODING_MASKS {
-                        gene_predicates.push((mt.clone(), pred));
-                    }
+                    gene_predicates.extend_from_slice(masks::NONCODING_MASKS)
                 }
                 MaskCategory::SlidingWindow => want_windows = true,
                 MaskCategory::Scang => want_scang = true,
@@ -76,7 +70,7 @@ impl MaskPlan {
 
         let mut results: ResultSet = gene_predicates
             .iter()
-            .map(|(mt, _)| (mt.clone(), Vec::new()))
+            .map(|(mt, _)| (*mt, Vec::new()))
             .collect();
 
         let window_slot = want_windows.then(|| {
@@ -401,6 +395,8 @@ fn score_gene_masks(
                 n_variants: qualifying.len() as u32,
                 cumulative_mac: cmac,
                 staar,
+                burden_beta: f64::NAN,
+                burden_se: f64::NAN,
             },
         ));
     }
@@ -602,6 +598,8 @@ fn score_one_window(
         n_variants: m as u32,
         cumulative_mac: cmac,
         staar,
+        burden_beta: f64::NAN,
+        burden_se: f64::NAN,
     })
 }
 

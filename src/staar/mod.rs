@@ -88,7 +88,7 @@ impl std::str::FromStr for MaskCategory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MaskType {
     PLof,
     Missense,
@@ -110,25 +110,25 @@ pub enum MaskType {
 }
 
 impl MaskType {
-    pub fn file_stem(&self) -> String {
+    pub fn file_stem(self) -> &'static str {
         match self {
-            Self::PLof => "coding_pLoF".into(),
-            Self::Missense => "coding_missense".into(),
-            Self::DisruptiveMissense => "coding_disruptive_missense".into(),
-            Self::PLofMissense => "coding_pLoF_missense".into(),
-            Self::Synonymous => "coding_synonymous".into(),
-            Self::Ptv => "coding_ptv".into(),
-            Self::PtvDs => "coding_ptv_ds".into(),
-            Self::Upstream => "noncoding_upstream".into(),
-            Self::Downstream => "noncoding_downstream".into(),
-            Self::Utr => "noncoding_utr".into(),
-            Self::PromoterCage => "noncoding_promoter_CAGE".into(),
-            Self::PromoterDhs => "noncoding_promoter_DHS".into(),
-            Self::EnhancerCage => "noncoding_enhancer_CAGE".into(),
-            Self::EnhancerDhs => "noncoding_enhancer_DHS".into(),
-            Self::Ncrna => "noncoding_ncRNA".into(),
-            Self::SlidingWindow => "sliding_window".into(),
-            Self::Scang => "scang".into(),
+            Self::PLof => "coding_pLoF",
+            Self::Missense => "coding_missense",
+            Self::DisruptiveMissense => "coding_disruptive_missense",
+            Self::PLofMissense => "coding_pLoF_missense",
+            Self::Synonymous => "coding_synonymous",
+            Self::Ptv => "coding_ptv",
+            Self::PtvDs => "coding_ptv_ds",
+            Self::Upstream => "noncoding_upstream",
+            Self::Downstream => "noncoding_downstream",
+            Self::Utr => "noncoding_utr",
+            Self::PromoterCage => "noncoding_promoter_CAGE",
+            Self::PromoterDhs => "noncoding_promoter_DHS",
+            Self::EnhancerCage => "noncoding_enhancer_CAGE",
+            Self::EnhancerDhs => "noncoding_enhancer_DHS",
+            Self::Ncrna => "noncoding_ncRNA",
+            Self::SlidingWindow => "sliding_window",
+            Self::Scang => "scang",
         }
     }
 }
@@ -145,4 +145,9 @@ pub struct GeneResult {
     pub n_variants: u32,
     pub cumulative_mac: u32,
     pub staar: score::StaarResult,
+    /// Unweighted burden coefficient β̂ = (1ᵀU)/(1ᵀK1) and its standard
+    /// error sqrt(1/(1ᵀK1)). Only the meta-analysis path populates these
+    /// today; single-study scoring leaves them NaN.
+    pub burden_beta: f64,
+    pub burden_se: f64,
 }

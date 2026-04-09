@@ -138,6 +138,140 @@ pub fn write_individual_results(
     Ok(())
 }
 
+/// Field names for the 6 base STAAR tests, in the canonical column order
+/// used by both the schema builder and the column packer below.
+const TEST_NAMES: [&str; 6] = [
+    "Burden(1,25)",
+    "Burden(1,1)",
+    "SKAT(1,25)",
+    "SKAT(1,1)",
+    "ACAT-V(1,25)",
+    "ACAT-V(1,1)",
+];
+
+const STAAR_OMNIBUS_NAMES: [&str; 6] = [
+    "STAAR-B(1,25)",
+    "STAAR-B(1,1)",
+    "STAAR-S(1,25)",
+    "STAAR-S(1,1)",
+    "STAAR-A(1,25)",
+    "STAAR-A(1,1)",
+];
+
+/// Arrow schema for one mask's results parquet. Same shape every time;
+/// only `channels` varies between runs.
+fn mask_results_schema(channels: &[&str]) -> Schema {
+    let mut fields = vec![
+        Field::new("ensembl_id", DataType::Utf8, false),
+        Field::new("gene_symbol", DataType::Utf8, false),
+        Field::new(Col::Chromosome.as_str(), DataType::Utf8, false),
+        Field::new("start", DataType::UInt32, false),
+        Field::new("end", DataType::UInt32, false),
+        Field::new("n_variants", DataType::UInt32, false),
+        Field::new("cMAC", DataType::UInt32, false),
+    ];
+    for test in &TEST_NAMES {
+        fields.push(Field::new(*test, DataType::Float64, true));
+    }
+    for ch in channels {
+        for test in &TEST_NAMES {
+            fields.push(Field::new(format!("{test}-{ch}"), DataType::Float64, true));
+        }
+    }
+    for name in &STAAR_OMNIBUS_NAMES {
+        fields.push(Field::new(*name, DataType::Float64, true));
+    }
+    fields.push(Field::new("ACAT-O", DataType::Float64, true));
+    fields.push(Field::new("STAAR-O", DataType::Float64, true));
+    Schema::new(fields)
+}
+
+/// Pack one mask's sorted gene results into the column order produced by
+/// [`mask_results_schema`]. p-value columns are Float64; f32 truncated
+/// 5e-324 (the smallest f64 denormal that CCT and chisq survival use as a
+/// lower bound) to literal 0.0, masking the very underflows the floor
+/// exists to prevent.
+fn build_mask_columns(sorted: &[&GeneResult], n_channels: usize) -> Vec<ArrayRef> {
+    let nr = sorted.len();
+    let mut b_ensembl = StringBuilder::with_capacity(nr, nr * 16);
+    let mut b_symbol = StringBuilder::with_capacity(nr, nr * 12);
+    let mut b_chrom = StringBuilder::with_capacity(nr, nr * 2);
+    let mut b_start = UInt32Builder::with_capacity(nr);
+    let mut b_end = UInt32Builder::with_capacity(nr);
+    let mut b_nvariants = UInt32Builder::with_capacity(nr);
+    let mut b_cmac = UInt32Builder::with_capacity(nr);
+
+    let n_p_cols = 6 + 6 * n_channels + 6; // base + per-annotation + omnibus
+    let mut p_builders: Vec<Float64Builder> = (0..n_p_cols)
+        .map(|_| Float64Builder::with_capacity(nr))
+        .collect();
+    let mut b_acat_o = Float64Builder::with_capacity(nr);
+    let mut b_staar_o = Float64Builder::with_capacity(nr);
+
+    for r in sorted {
+        let s = &r.staar;
+        b_ensembl.append_value(&r.ensembl_id);
+        b_symbol.append_value(&r.gene_symbol);
+        b_chrom.append_value(r.chromosome.label());
+        b_start.append_value(r.start);
+        b_end.append_value(r.end);
+        b_nvariants.append_value(r.n_variants);
+        b_cmac.append_value(r.cumulative_mac);
+
+        let mut pi = 0;
+        for p in [
+            s.burden_1_25,
+            s.burden_1_1,
+            s.skat_1_25,
+            s.skat_1_1,
+            s.acat_v_1_25,
+            s.acat_v_1_1,
+        ] {
+            p_builders[pi].append_value(p);
+            pi += 1;
+        }
+        for ann_p in &s.per_annotation {
+            for &v in ann_p {
+                p_builders[pi].append_value(v);
+                pi += 1;
+            }
+        }
+        while pi < 6 + 6 * n_channels {
+            p_builders[pi].append_value(f64::NAN);
+            pi += 1;
+        }
+        for p in [
+            s.staar_b_1_25,
+            s.staar_b_1_1,
+            s.staar_s_1_25,
+            s.staar_s_1_1,
+            s.staar_a_1_25,
+            s.staar_a_1_1,
+        ] {
+            p_builders[pi].append_value(p);
+            pi += 1;
+        }
+        b_acat_o.append_value(s.acat_o);
+        b_staar_o.append_value(s.staar_o);
+    }
+
+    let mut columns: Vec<ArrayRef> = vec![
+        Arc::new(b_ensembl.finish()),
+        Arc::new(b_symbol.finish()),
+        Arc::new(b_chrom.finish()),
+        Arc::new(b_start.finish()),
+        Arc::new(b_end.finish()),
+        Arc::new(b_nvariants.finish()),
+        Arc::new(b_cmac.finish()),
+    ];
+    for b in &mut p_builders {
+        columns.push(Arc::new(b.finish()));
+    }
+    columns.push(Arc::new(b_acat_o.finish()));
+    columns.push(Arc::new(b_staar_o.finish()));
+    columns
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn write_results(
     all_mask_results: &[(MaskType, Vec<GeneResult>)],
@@ -158,6 +292,10 @@ pub fn write_results(
         .map(|c| c.weight_display_name().expect("STAAR_WEIGHTS entries have display names"))
         .collect();
     let n_channels = channels.len();
+
+    // Schema is identical for every mask file (same channels, same test set)
+    // — build it once before the loop instead of rebuilding it inside.
+    let schema = Arc::new(mask_results_schema(&channels));
 
     for (mask_type, results) in all_mask_results {
         if results.is_empty() {
@@ -181,134 +319,15 @@ pub fn write_results(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let nr = sorted_results.len();
-        let mut b_ensembl = StringBuilder::with_capacity(nr, nr * 16);
-        let mut b_symbol = StringBuilder::with_capacity(nr, nr * 12);
-        let mut b_chrom = StringBuilder::with_capacity(nr, nr * 2);
-        let mut b_start = UInt32Builder::with_capacity(nr);
-        let mut b_end = UInt32Builder::with_capacity(nr);
-        let mut b_nvariants = UInt32Builder::with_capacity(nr);
-        let mut b_cmac = UInt32Builder::with_capacity(nr);
-
-        // All p-value columns are Float64. f32 truncated 5e-324 (the
-        // smallest f64 denormal, which CCT and chisq survival use as a
-        // lower bound) to literal 0.0, masking the very underflows the
-        // floor exists to prevent.
-        let n_p_cols = 6 + 6 * n_channels + 6; // base + annotation + omnibus
-        let mut p_builders: Vec<Float64Builder> = (0..n_p_cols)
-            .map(|_| Float64Builder::with_capacity(nr))
-            .collect();
-        let mut b_acat_o = Float64Builder::with_capacity(nr);
-        let mut b_staar_o = Float64Builder::with_capacity(nr);
-
-        for r in &sorted_results {
-            let s = &r.staar;
-            b_ensembl.append_value(&r.ensembl_id);
-            b_symbol.append_value(&r.gene_symbol);
-            b_chrom.append_value(r.chromosome.label());
-            b_start.append_value(r.start);
-            b_end.append_value(r.end);
-            b_nvariants.append_value(r.n_variants);
-            b_cmac.append_value(r.cumulative_mac);
-
-            let mut pi = 0;
-            for p in [
-                s.burden_1_25,
-                s.burden_1_1,
-                s.skat_1_25,
-                s.skat_1_1,
-                s.acat_v_1_25,
-                s.acat_v_1_1,
-            ] {
-                p_builders[pi].append_value(p);
-                pi += 1;
-            }
-            for ann_p in &s.per_annotation {
-                for &v in ann_p {
-                    p_builders[pi].append_value(v);
-                    pi += 1;
-                }
-            }
-            while pi < 6 + 6 * n_channels {
-                p_builders[pi].append_value(f64::NAN);
-                pi += 1;
-            }
-            for p in [
-                s.staar_b_1_25,
-                s.staar_b_1_1,
-                s.staar_s_1_25,
-                s.staar_s_1_1,
-                s.staar_a_1_25,
-                s.staar_a_1_1,
-            ] {
-                p_builders[pi].append_value(p);
-                pi += 1;
-            }
-            b_acat_o.append_value(s.acat_o);
-            b_staar_o.append_value(s.staar_o);
-        }
-
-        let test_names = [
-            "Burden(1,25)",
-            "Burden(1,1)",
-            "SKAT(1,25)",
-            "SKAT(1,1)",
-            "ACAT-V(1,25)",
-            "ACAT-V(1,1)",
-        ];
-        let mut fields = vec![
-            Field::new("ensembl_id", DataType::Utf8, false),
-            Field::new("gene_symbol", DataType::Utf8, false),
-            Field::new(Col::Chromosome.as_str(), DataType::Utf8, false),
-            Field::new("start", DataType::UInt32, false),
-            Field::new("end", DataType::UInt32, false),
-            Field::new("n_variants", DataType::UInt32, false),
-            Field::new("cMAC", DataType::UInt32, false),
-        ];
-        for test in &test_names {
-            fields.push(Field::new(*test, DataType::Float64, true));
-        }
-        for ch in &channels {
-            for test in &test_names {
-                fields.push(Field::new(format!("{test}-{ch}"), DataType::Float64, true));
-            }
-        }
-        for name in [
-            "STAAR-B(1,25)",
-            "STAAR-B(1,1)",
-            "STAAR-S(1,25)",
-            "STAAR-S(1,1)",
-            "STAAR-A(1,25)",
-            "STAAR-A(1,1)",
-        ] {
-            fields.push(Field::new(name, DataType::Float64, true));
-        }
-        fields.push(Field::new("ACAT-O", DataType::Float64, true));
-        fields.push(Field::new("STAAR-O", DataType::Float64, true));
-        let schema = Arc::new(Schema::new(fields));
-
-        let mut columns: Vec<ArrayRef> = vec![
-            Arc::new(b_ensembl.finish()),
-            Arc::new(b_symbol.finish()),
-            Arc::new(b_chrom.finish()),
-            Arc::new(b_start.finish()),
-            Arc::new(b_end.finish()),
-            Arc::new(b_nvariants.finish()),
-            Arc::new(b_cmac.finish()),
-        ];
-        for b in &mut p_builders {
-            columns.push(Arc::new(b.finish()));
-        }
-        columns.push(Arc::new(b_acat_o.finish()));
-        columns.push(Arc::new(b_staar_o.finish()));
-
+        let columns = build_mask_columns(&sorted_results, n_channels);
         let batch = RecordBatch::try_new(schema.clone(), columns)
             .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
+        let schema_for_write = schema.clone();
         write_parquet_atomic(&out_path, |file| {
             let props = WriterProperties::builder()
                 .set_compression(Compression::ZSTD(Default::default()))
                 .build();
-            let mut writer = ArrowWriter::try_new(file, schema, Some(props))
+            let mut writer = ArrowWriter::try_new(file, schema_for_write, Some(props))
                 .map_err(|e| CohortError::Resource(format!("Parquet writer: {e}")))?;
             writer
                 .write(&batch)
@@ -396,7 +415,7 @@ const SIGNIFICANCE: f64 = 2.5e-6;
 
 struct PlotGene {
     gene: String,
-    mask: String,
+    mask: &'static str,
     chromosome: String,
     genome_x: f64,
     neg_log_p: f64,
@@ -418,20 +437,16 @@ pub fn generate_report(
     title: &str,
 ) -> Result<(), CohortError> {
     let genes = collect_plot_genes(results);
-    let pvals = collect_pvalues(results);
     let n_genes: usize = results.iter().map(|(_, r)| r.len()).sum();
     let n_sig = genes.iter().filter(|g| g.staar_o < SIGNIFICANCE).count();
-    let masks: Vec<String> = results
+    let masks: Vec<&'static str> = results
         .iter()
         .filter(|(_, r)| !r.is_empty())
         .map(|(m, _)| m.file_stem())
         .collect();
 
-    // Manhattan data: JSON arrays
     let manhattan_json = manhattan_traces(&genes);
-    // QQ data
-    let qq_json = qq_trace(&pvals);
-    // Volcano data
+    let qq_json = qq_traces_per_mask(results);
     let volcano_json = volcano_trace(&genes);
     // Table rows
     let table_rows = table_json(&genes);
@@ -621,15 +636,6 @@ fn chrom_offsets() -> HashMap<String, (usize, u64)> {
     map
 }
 
-fn collect_pvalues(results: &[(MaskType, Vec<GeneResult>)]) -> Vec<f64> {
-    results
-        .iter()
-        .flat_map(|(_, genes)| genes.iter().map(|g| g.staar.staar_o))
-        .filter(|p| p.is_finite() && *p <= 1.0)
-        .map(|p| if p <= 0.0 { 1e-300 } else { p })
-        .collect()
-}
-
 fn manhattan_traces(genes: &[PlotGene]) -> String {
     // Group by chromosome for alternating colors
     let colors = ["#4361ee", "#7f8fa6"];
@@ -716,52 +722,84 @@ fn manhattan_traces(genes: &[PlotGene]) -> String {
     )
 }
 
-fn qq_trace(pvalues: &[f64]) -> String {
-    let mut valid: Vec<f64> = pvalues
+/// Sorted, finite, non-zero p-values for one mask.
+fn collect_mask_pvalues(genes: &[GeneResult]) -> Vec<f64> {
+    let mut v: Vec<f64> = genes
         .iter()
-        .filter(|p| p.is_finite() && **p > 0.0 && **p <= 1.0)
-        .copied()
+        .map(|g| g.staar.staar_o)
+        .filter(|p| p.is_finite() && *p > 0.0 && *p <= 1.0)
         .collect();
-    valid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v
+}
 
-    if valid.is_empty() {
+/// Build one QQ trace per mask plus a single y=x diagonal. Subsampling
+/// preserves the tail (top 100 points) so genome-wide-significant deviations
+/// stay visible even on dense plots.
+fn qq_traces_per_mask(results: &[(MaskType, Vec<GeneResult>)]) -> String {
+    // Distinct hues for up to 17 masks (the full STAAR catalog has 17).
+    const PALETTE: &[&str] = &[
+        "#4361ee", "#c62828", "#2e7d32", "#ef6c00", "#6a1b9a", "#00838f", "#827717", "#ad1457",
+        "#1565c0", "#558b2f", "#d84315", "#283593", "#00695c", "#4e342e", "#37474f", "#bf360c",
+        "#9e9d24",
+    ];
+
+    let mut traces: Vec<String> = Vec::new();
+    let mut axis_max: f64 = 1.0;
+
+    for (color_idx, (mask, genes)) in results.iter().filter(|(_, g)| !g.is_empty()).enumerate() {
+        let valid = collect_mask_pvalues(genes);
+        if valid.is_empty() {
+            continue;
+        }
+        let n = valid.len();
+        let observed: Vec<f64> = valid.iter().map(|p| -p.log10()).collect();
+        let expected: Vec<f64> = (0..n)
+            .map(|i| -((i as f64 + 0.5) / n as f64).log10())
+            .collect();
+
+        if let Some(&o) = observed.last() {
+            axis_max = axis_max.max(o);
+        }
+        if let Some(&e) = expected.last() {
+            axis_max = axis_max.max(e);
+        }
+
+        let step = if n > 3000 { n / 3000 } else { 1 };
+        let mut exp_s = Vec::with_capacity(n / step + 100);
+        let mut obs_s = Vec::with_capacity(n / step + 100);
+        for i in (0..n).step_by(step) {
+            exp_s.push(format!("{:.4}", expected[i]));
+            obs_s.push(format!("{:.4}", observed[i]));
+        }
+        for i in n.saturating_sub(100)..n {
+            exp_s.push(format!("{:.4}", expected[i]));
+            obs_s.push(format!("{:.4}", observed[i]));
+        }
+
+        let color = PALETTE[color_idx % PALETTE.len()];
+        traces.push(format!(
+            "{{x:[{exp}],y:[{obs}],mode:'markers',type:'scatter',\
+             name:'{name}',marker:{{color:'{color}',size:3,opacity:0.65}},\
+             hoverinfo:'x+y+name'}}",
+            exp = exp_s.join(","),
+            obs = obs_s.join(","),
+            name = mask.file_stem(),
+            color = color,
+        ));
+    }
+
+    if traces.is_empty() {
         return "var traces=[];".into();
     }
 
-    let n = valid.len();
-    let observed: Vec<f64> = valid.iter().map(|p| -p.log10()).collect();
-    let expected: Vec<f64> = (0..n)
-        .map(|i| -((i as f64 + 0.5) / n as f64).log10())
-        .collect();
-    let axis_max = observed
-        .last()
-        .copied()
-        .unwrap_or(1.0)
-        .max(*expected.last().unwrap_or(&1.0))
-        + 0.5;
+    let ax = axis_max + 0.5;
+    traces.push(format!(
+        "{{x:[0,{ax:.1}],y:[0,{ax:.1}],mode:'lines',line:{{color:'#ccc',dash:'dash'}},showlegend:false}}",
+        ax = ax,
+    ));
 
-    // Subsample for performance, keep tail
-    let step = if n > 3000 { n / 3000 } else { 1 };
-    let mut exp_s = Vec::new();
-    let mut obs_s = Vec::new();
-    for i in (0..n).step_by(step) {
-        exp_s.push(format!("{:.4}", expected[i]));
-        obs_s.push(format!("{:.4}", observed[i]));
-    }
-    // Always include tail
-    for i in n.saturating_sub(100)..n {
-        exp_s.push(format!("{:.4}", expected[i]));
-        obs_s.push(format!("{:.4}", observed[i]));
-    }
-
-    format!(
-        "var traces=[{{x:[{exp}],y:[{obs}],mode:'markers',type:'scatter',\
-         marker:{{color:'#4361ee',size:3,opacity:0.5}},hoverinfo:'x+y',showlegend:false}},\
-         {{x:[0,{ax:.1}],y:[0,{ax:.1}],mode:'lines',line:{{color:'#ccc',dash:'dash'}},showlegend:false}}];",
-        exp = exp_s.join(","),
-        obs = obs_s.join(","),
-        ax = axis_max,
-    )
+    format!("var traces=[{}];", traces.join(","))
 }
 
 fn volcano_trace(genes: &[PlotGene]) -> String {
@@ -902,6 +940,8 @@ mod tests {
                 acat_o: p,
                 staar_o: p,
             },
+            burden_beta: f64::NAN,
+            burden_se: f64::NAN,
         }
     }
 

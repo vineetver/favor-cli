@@ -200,32 +200,65 @@ pub struct SegmentCov {
     pos_index: HashMap<u32, Vec<usize>>,
 }
 
+/// Lex-min orientation of a biallelic site. Two studies that disagree on
+/// which allele is REF vs ALT must hash to the same `(pos, ref, alt)` group
+/// so their summary statistics can be combined.
+fn canonical_alleles<'a>(ref_b: &'a str, alt_b: &'a str) -> (&'a str, &'a str) {
+    if ref_b <= alt_b {
+        (ref_b, alt_b)
+    } else {
+        (alt_b, ref_b)
+    }
+}
+
 impl SegmentCov {
-    /// Extract sub-matrix for a subset of variants identified by (position, ref, alt).
+    /// Extract sub-matrix for a subset of variants identified by `(pos, ref,
+    /// alt)` in the **caller's canonical orientation**.
+    ///
+    /// Lookup is orientation-blind so a study that stored a variant flipped
+    /// still resolves. The caller's K is signed against canonical-orientation
+    /// dosage; the stored covariance is signed against local-orientation
+    /// dosage. With `G_local = ±G_canonical`, the j-th diagonal of K is
+    /// invariant (`G²` = `(−G)²`) but each off-diagonal `K[i,j] = G_i·G_j`
+    /// flips sign whenever exactly one of `(i, j)` is locally flipped. We
+    /// track a per-row sign and multiply through, so the returned sub-matrix
+    /// is consistently in canonical orientation.
     fn extract_submatrix(&self, keys: &[(u32, &str, &str)]) -> Mat<f64> {
         let m = keys.len();
         let mut mat = Mat::zeros(m, m);
 
-        let mut key_to_local: Vec<Option<usize>> = Vec::with_capacity(m);
+        let mut key_to_local: Vec<Option<(usize, f64)>> = Vec::with_capacity(m);
         for &(pos, ref_a, alt_a) in keys {
-            let local = self.pos_index.get(&pos).and_then(|candidates| {
-                candidates
-                    .iter()
-                    .find(|&&i| self.refs[i] == ref_a && self.alts[i] == alt_a)
-                    .copied()
+            let canon = canonical_alleles(ref_a, alt_a);
+            let resolved = self.pos_index.get(&pos).and_then(|candidates| {
+                candidates.iter().find_map(|&i| {
+                    let local = (self.refs[i].as_str(), self.alts[i].as_str());
+                    if canonical_alleles(local.0, local.1) != canon {
+                        return None;
+                    }
+                    // Local matches canonical when its REF is the lex-min,
+                    // i.e. local.0 == canon.0. Otherwise dosage is negated.
+                    let sign = if local.0 == canon.0 { 1.0 } else { -1.0 };
+                    Some((i, sign))
+                })
             });
-            key_to_local.push(local);
+            key_to_local.push(resolved);
         }
 
         for i in 0..m {
-            let Some(li) = key_to_local[i] else { continue };
+            let Some((li, si)) = key_to_local[i] else {
+                continue;
+            };
             for j in 0..=i {
-                let Some(lj) = key_to_local[j] else { continue };
+                let Some((lj, sj)) = key_to_local[j] else {
+                    continue;
+                };
                 let (row, col) = if li >= lj { (li, lj) } else { (lj, li) };
                 let idx = row * (row + 1) / 2 + col;
                 if idx < self.cov_lower.len() {
-                    mat[(i, j)] = self.cov_lower[idx];
-                    mat[(j, i)] = self.cov_lower[idx];
+                    let v = self.cov_lower[idx] * si * sj;
+                    mat[(i, j)] = v;
+                    mat[(j, i)] = v;
                 }
             }
         }
@@ -265,9 +298,9 @@ pub fn load_studies(paths: &[std::path::PathBuf]) -> Result<Vec<StudyHandle>, Co
         });
     }
 
-    if studies.len() < 2 {
+    if studies.is_empty() {
         return Err(CohortError::Input(
-            "MetaSTAAR requires at least 2 studies.".into(),
+            "MetaSTAAR requires at least 1 study directory.".into(),
         ));
     }
 
@@ -330,11 +363,18 @@ pub fn merge_chromosome(
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Group by lex-min(ref,alt) so two studies that disagree on REF/ALT
+    // orientation collapse into one row. The score statistic is signed by
+    // alt-allele dosage, so flipping ref↔alt flips the sign of `u_stat`.
+    // The covariance K is invariant under that flip and stays put — the
+    // segment-cache lookup canonicalises on its own side.
     engine.execute(&format!(
         "CREATE OR REPLACE TABLE _meta_variants AS \
          SELECT \
-             {pos}, {ref_a}, {alt_a}, \
-             SUM(u_stat) AS u_meta, \
+             {pos}, \
+             CASE WHEN {ref_a} <= {alt_a} THEN {ref_a} ELSE {alt_a} END AS {ref_a}, \
+             CASE WHEN {ref_a} <= {alt_a} THEN {alt_a} ELSE {ref_a} END AS {alt_a}, \
+             SUM(CASE WHEN {ref_a} <= {alt_a} THEN u_stat ELSE -u_stat END) AS u_meta, \
              SUM(mac) AS mac_total, \
              SUM(n_obs) AS n_total, \
              first_value({gene}) FILTER (WHERE {gene} != '') AS {gene}, \
@@ -350,7 +390,9 @@ pub fn merge_chromosome(
              CAST(array_agg(named_struct('s', study_idx, 'seg', segment_id)) AS VARCHAR) AS study_segs \
          FROM _study_variants \
          WHERE {maf} < {maf_cutoff} \
-         GROUP BY {pos}, {ref_a}, {alt_a} \
+         GROUP BY {pos}, \
+             CASE WHEN {ref_a} <= {alt_a} THEN {ref_a} ELSE {alt_a} END, \
+             CASE WHEN {ref_a} <= {alt_a} THEN {alt_a} ELSE {ref_a} END \
          ORDER BY {pos}",
         pos = Col::Position, ref_a = Col::RefAllele, alt_a = Col::AltAllele,
         maf = Col::Maf,
@@ -648,6 +690,7 @@ pub fn meta_score_gene(
 
     let sr = score::run_staar_from_sumstats(&u, &cov, &ann_matrix, &mafs, n_total);
 
+    let (burden_beta, burden_se) = unweighted_burden_estimate(&u, &cov);
     let cmac: i64 = indices.iter().map(|&gi| meta_variants[gi].mac_total).sum();
 
     Some(GeneResult {
@@ -659,7 +702,34 @@ pub fn meta_score_gene(
         n_variants: m as u32,
         cumulative_mac: cmac as u32,
         staar: sr,
+        burden_beta,
+        burden_se,
     })
+}
+
+/// Unweighted (collapsing) burden coefficient and standard error from
+/// a meta-analysis score vector and its covariance:
+///
+///   β̂  = 1ᵀU / 1ᵀK1
+///   SE = √(1 / 1ᵀK1)
+///
+/// Returns NaN when 1ᵀK1 ≤ 0 (degenerate gene with no usable variance).
+fn unweighted_burden_estimate(u: &Mat<f64>, k: &Mat<f64>) -> (f64, f64) {
+    let m = u.nrows();
+    let mut one_t_u = 0.0;
+    for i in 0..m {
+        one_t_u += u[(i, 0)];
+    }
+    let mut one_t_k_one = 0.0;
+    for i in 0..m {
+        for j in 0..m {
+            one_t_k_one += k[(i, j)];
+        }
+    }
+    if one_t_k_one <= 0.0 || !one_t_k_one.is_finite() {
+        return (f64::NAN, f64::NAN);
+    }
+    (one_t_u / one_t_k_one, (1.0 / one_t_k_one).sqrt())
 }
 
 fn parse_study_segments(s: &str) -> Vec<(usize, i32)> {
@@ -758,7 +828,6 @@ pub fn emit_sumstats(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_chromosome_sparse(
     view: &ChromosomeView<'_>,
     analysis: &AnalysisVectors,
@@ -795,47 +864,10 @@ fn emit_chromosome_sparse(
     ));
 
     let total_variants = chrom_indices.len();
-    let mut b_position = Int32Builder::with_capacity(total_variants);
-    let mut b_ref = StringBuilder::with_capacity(total_variants, total_variants * 4);
-    let mut b_alt = StringBuilder::with_capacity(total_variants, total_variants * 4);
-    let mut b_maf = Float64Builder::with_capacity(total_variants);
-    let mut b_mac = Int32Builder::with_capacity(total_variants);
-    let mut b_n_obs = Int32Builder::with_capacity(total_variants);
-    let mut b_u_stat = Float64Builder::with_capacity(total_variants);
-    let mut b_v_stat = Float64Builder::with_capacity(total_variants);
-    let mut b_segment_id = Int32Builder::with_capacity(total_variants);
-    let mut b_gene = StringBuilder::with_capacity(total_variants, total_variants * 8);
-    let mut b_region = StringBuilder::with_capacity(total_variants, total_variants * 8);
-    let mut b_consequence = StringBuilder::with_capacity(total_variants, total_variants * 8);
-    let mut b_cadd = Float64Builder::with_capacity(total_variants);
-    let mut b_revel = Float64Builder::with_capacity(total_variants);
-    let mut b_cage_prom = BooleanBuilder::with_capacity(total_variants);
-    let mut b_cage_enh = BooleanBuilder::with_capacity(total_variants);
-    let mut b_ccre_prom = BooleanBuilder::with_capacity(total_variants);
-    let mut b_ccre_enh = BooleanBuilder::with_capacity(total_variants);
-    let mut b_weights: [Float64Builder; 11] =
-        std::array::from_fn(|_| Float64Builder::with_capacity(total_variants));
-
-    let n_segments = segments.len();
-    let mut s_segment_id = Int32Builder::with_capacity(n_segments);
-    let mut s_n_variants = Int32Builder::with_capacity(n_segments);
-    let mut s_positions = ListBuilder::new(Int32Builder::with_capacity(total_variants));
-    let mut s_refs = ListBuilder::new(StringBuilder::with_capacity(
-        total_variants,
-        total_variants * 4,
-    ));
-    let mut s_alts = ListBuilder::new(StringBuilder::with_capacity(
-        total_variants,
-        total_variants * 4,
-    ));
-    let mut s_cov_lower = ListBuilder::new(Float64Builder::with_capacity(
-        total_variants * (total_variants + 1) / 2,
-    ));
+    let mut writer = SumstatsWriter::with_capacity(total_variants, segments.len());
 
     for (seg_id, seg_indices) in &segments {
         let seg_id = *seg_id;
-        let m = seg_indices.len();
-
         // Resolve each segment variant to variant_vcf via VariantIndex, then
         // batch-load carrier lists from SparseG.
         let variant_vcfs: Vec<u32> = seg_indices
@@ -851,92 +883,13 @@ fn emit_chromosome_sparse(
         let (u, k) = sparse_score::score_gene_sparse(&seg_carriers, analysis);
 
         for (j, &gi) in seg_indices.iter().enumerate() {
-            let v = &variants[gi];
-            b_position.append_value(v.position as i32);
-            b_ref.append_value(&v.ref_allele);
-            b_alt.append_value(&v.alt_allele);
-            b_maf.append_value(v.maf);
-            b_mac.append_value((2.0 * v.maf * n as f64).round() as i32);
-            b_n_obs.append_value(n as i32);
-            b_u_stat.append_value(u[(j, 0)]);
-            b_v_stat.append_value(k[(j, j)]);
-            b_segment_id.append_value(seg_id);
-            b_gene.append_value(&v.gene_name);
-            b_region.append_value(v.annotation.region_type.as_str());
-            b_consequence.append_value(v.annotation.consequence.as_str());
-            b_cadd.append_value(v.annotation.cadd_phred);
-            b_revel.append_value(v.annotation.revel);
-            b_cage_prom.append_value(v.annotation.regulatory.cage_promoter);
-            b_cage_enh.append_value(v.annotation.regulatory.cage_enhancer);
-            b_ccre_prom.append_value(v.annotation.regulatory.ccre_promoter);
-            b_ccre_enh.append_value(v.annotation.regulatory.ccre_enhancer);
-            for (i, builder) in b_weights.iter_mut().enumerate() {
-                builder.append_value(v.annotation.weights.0[i]);
-            }
+            writer.push_variant_row(&variants[gi], n, u[(j, 0)], k[(j, j)], seg_id);
         }
-
-        s_segment_id.append_value(seg_id);
-        s_n_variants.append_value(m as i32);
-
-        let pos_builder = s_positions.values();
-        for &gi in seg_indices {
-            pos_builder.append_value(variants[gi].position as i32);
-        }
-        s_positions.append(true);
-
-        let ref_builder = s_refs.values();
-        for &gi in seg_indices {
-            ref_builder.append_value(&variants[gi].ref_allele);
-        }
-        s_refs.append(true);
-
-        let alt_builder = s_alts.values();
-        for &gi in seg_indices {
-            alt_builder.append_value(&variants[gi].alt_allele);
-        }
-        s_alts.append(true);
-
-        let cov_builder = s_cov_lower.values();
-        for i in 0..m {
-            for j in 0..=i {
-                cov_builder.append_value(k[(i, j)]);
-            }
-        }
-        s_cov_lower.append(true);
+        writer.push_segment(seg_id, seg_indices, variants, &k);
     }
 
-    write_variants_parquet(
-        dir,
-        &mut b_position,
-        &mut b_ref,
-        &mut b_alt,
-        &mut b_maf,
-        &mut b_mac,
-        &mut b_n_obs,
-        &mut b_u_stat,
-        &mut b_v_stat,
-        &mut b_segment_id,
-        &mut b_gene,
-        &mut b_region,
-        &mut b_consequence,
-        &mut b_cadd,
-        &mut b_revel,
-        &mut b_cage_prom,
-        &mut b_cage_enh,
-        &mut b_ccre_prom,
-        &mut b_ccre_enh,
-        &mut b_weights,
-    )?;
-
-    write_segments_parquet(
-        dir,
-        &mut s_segment_id,
-        &mut s_n_variants,
-        &mut s_positions,
-        &mut s_refs,
-        &mut s_alts,
-        &mut s_cov_lower,
-    )?;
+    writer.write_variants(dir)?;
+    writer.write_segments(dir)?;
 
     out.status(&format!("    chr{chrom} done"));
     Ok(())
@@ -1003,59 +956,209 @@ fn parquet_props() -> WriterProperties {
         .build()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_variants_parquet(
-    dir: &Path,
-    b_position: &mut Int32Builder,
-    b_ref: &mut StringBuilder,
-    b_alt: &mut StringBuilder,
-    b_maf: &mut Float64Builder,
-    b_mac: &mut Int32Builder,
-    b_n_obs: &mut Int32Builder,
-    b_u_stat: &mut Float64Builder,
-    b_v_stat: &mut Float64Builder,
-    b_segment_id: &mut Int32Builder,
-    b_gene: &mut StringBuilder,
-    b_region: &mut StringBuilder,
-    b_consequence: &mut StringBuilder,
-    b_cadd: &mut Float64Builder,
-    b_revel: &mut Float64Builder,
-    b_cage_prom: &mut BooleanBuilder,
-    b_cage_enh: &mut BooleanBuilder,
-    b_ccre_prom: &mut BooleanBuilder,
-    b_ccre_enh: &mut BooleanBuilder,
-    b_weights: &mut [Float64Builder; 11],
-) -> Result<(), CohortError> {
-    let schema = Arc::new(variant_schema());
-    let mut columns: Vec<ArrayRef> = vec![
-        Arc::new(b_position.finish()),
-        Arc::new(b_ref.finish()),
-        Arc::new(b_alt.finish()),
-        Arc::new(b_maf.finish()),
-        Arc::new(b_mac.finish()),
-        Arc::new(b_n_obs.finish()),
-        Arc::new(b_u_stat.finish()),
-        Arc::new(b_v_stat.finish()),
-        Arc::new(b_segment_id.finish()),
-        Arc::new(b_gene.finish()),
-        Arc::new(b_region.finish()),
-        Arc::new(b_consequence.finish()),
-        Arc::new(b_cadd.finish()),
-        Arc::new(b_revel.finish()),
-        Arc::new(b_cage_prom.finish()),
-        Arc::new(b_cage_enh.finish()),
-        Arc::new(b_ccre_prom.finish()),
-        Arc::new(b_ccre_enh.finish()),
-    ];
-    for b in b_weights.iter_mut() {
-        columns.push(Arc::new(b.finish()));
+/// Owns every Arrow builder for one chromosome's MetaSTAAR sumstats output.
+/// Each column is a field; `push_variant_row` / `push_segment` keep the
+/// 19 variant columns and the 6 segment columns in lock-step instead of
+/// scattering the parameter list across helper boundaries.
+struct SumstatsWriter {
+    // Variant-row builders.
+    position: Int32Builder,
+    ref_allele: StringBuilder,
+    alt_allele: StringBuilder,
+    maf: Float64Builder,
+    mac: Int32Builder,
+    n_obs: Int32Builder,
+    u_stat: Float64Builder,
+    v_stat: Float64Builder,
+    segment_id: Int32Builder,
+    gene: StringBuilder,
+    region: StringBuilder,
+    consequence: StringBuilder,
+    cadd: Float64Builder,
+    revel: Float64Builder,
+    cage_prom: BooleanBuilder,
+    cage_enh: BooleanBuilder,
+    ccre_prom: BooleanBuilder,
+    ccre_enh: BooleanBuilder,
+    weights: [Float64Builder; 11],
+
+    // Segment-row builders.
+    seg_id: Int32Builder,
+    seg_n_variants: Int32Builder,
+    seg_positions: ListBuilder<Int32Builder>,
+    seg_refs: ListBuilder<StringBuilder>,
+    seg_alts: ListBuilder<StringBuilder>,
+    seg_cov_lower: ListBuilder<Float64Builder>,
+}
+
+impl SumstatsWriter {
+    fn with_capacity(total_variants: usize, n_segments: usize) -> Self {
+        Self {
+            position: Int32Builder::with_capacity(total_variants),
+            ref_allele: StringBuilder::with_capacity(total_variants, total_variants * 4),
+            alt_allele: StringBuilder::with_capacity(total_variants, total_variants * 4),
+            maf: Float64Builder::with_capacity(total_variants),
+            mac: Int32Builder::with_capacity(total_variants),
+            n_obs: Int32Builder::with_capacity(total_variants),
+            u_stat: Float64Builder::with_capacity(total_variants),
+            v_stat: Float64Builder::with_capacity(total_variants),
+            segment_id: Int32Builder::with_capacity(total_variants),
+            gene: StringBuilder::with_capacity(total_variants, total_variants * 8),
+            region: StringBuilder::with_capacity(total_variants, total_variants * 8),
+            consequence: StringBuilder::with_capacity(total_variants, total_variants * 8),
+            cadd: Float64Builder::with_capacity(total_variants),
+            revel: Float64Builder::with_capacity(total_variants),
+            cage_prom: BooleanBuilder::with_capacity(total_variants),
+            cage_enh: BooleanBuilder::with_capacity(total_variants),
+            ccre_prom: BooleanBuilder::with_capacity(total_variants),
+            ccre_enh: BooleanBuilder::with_capacity(total_variants),
+            weights: std::array::from_fn(|_| Float64Builder::with_capacity(total_variants)),
+
+            seg_id: Int32Builder::with_capacity(n_segments),
+            seg_n_variants: Int32Builder::with_capacity(n_segments),
+            seg_positions: ListBuilder::new(Int32Builder::with_capacity(total_variants)),
+            seg_refs: ListBuilder::new(StringBuilder::with_capacity(
+                total_variants,
+                total_variants * 4,
+            )),
+            seg_alts: ListBuilder::new(StringBuilder::with_capacity(
+                total_variants,
+                total_variants * 4,
+            )),
+            seg_cov_lower: ListBuilder::new(Float64Builder::with_capacity(
+                total_variants * (total_variants + 1) / 2,
+            )),
+        }
     }
 
+    fn push_variant_row(
+        &mut self,
+        v: &AnnotatedVariant,
+        n_samples: usize,
+        u: f64,
+        k_diag: f64,
+        segment_id: i32,
+    ) {
+        self.position.append_value(v.position as i32);
+        self.ref_allele.append_value(&v.ref_allele);
+        self.alt_allele.append_value(&v.alt_allele);
+        self.maf.append_value(v.maf);
+        self.mac
+            .append_value((2.0 * v.maf * n_samples as f64).round() as i32);
+        self.n_obs.append_value(n_samples as i32);
+        self.u_stat.append_value(u);
+        self.v_stat.append_value(k_diag);
+        self.segment_id.append_value(segment_id);
+        self.gene.append_value(&v.gene_name);
+        self.region.append_value(v.annotation.region_type.as_str());
+        self.consequence
+            .append_value(v.annotation.consequence.as_str());
+        self.cadd.append_value(v.annotation.cadd_phred);
+        self.revel.append_value(v.annotation.revel);
+        self.cage_prom
+            .append_value(v.annotation.regulatory.cage_promoter);
+        self.cage_enh
+            .append_value(v.annotation.regulatory.cage_enhancer);
+        self.ccre_prom
+            .append_value(v.annotation.regulatory.ccre_promoter);
+        self.ccre_enh
+            .append_value(v.annotation.regulatory.ccre_enhancer);
+        for (i, builder) in self.weights.iter_mut().enumerate() {
+            builder.append_value(v.annotation.weights.0[i]);
+        }
+    }
+
+    fn push_segment(
+        &mut self,
+        seg_id: i32,
+        seg_indices: &[usize],
+        variants: &[AnnotatedVariant],
+        k: &Mat<f64>,
+    ) {
+        let m = seg_indices.len();
+        self.seg_id.append_value(seg_id);
+        self.seg_n_variants.append_value(m as i32);
+
+        let pos_builder = self.seg_positions.values();
+        for &gi in seg_indices {
+            pos_builder.append_value(variants[gi].position as i32);
+        }
+        self.seg_positions.append(true);
+
+        let ref_builder = self.seg_refs.values();
+        for &gi in seg_indices {
+            ref_builder.append_value(&variants[gi].ref_allele);
+        }
+        self.seg_refs.append(true);
+
+        let alt_builder = self.seg_alts.values();
+        for &gi in seg_indices {
+            alt_builder.append_value(&variants[gi].alt_allele);
+        }
+        self.seg_alts.append(true);
+
+        let cov_builder = self.seg_cov_lower.values();
+        for i in 0..m {
+            for j in 0..=i {
+                cov_builder.append_value(k[(i, j)]);
+            }
+        }
+        self.seg_cov_lower.append(true);
+    }
+
+    fn write_variants(&mut self, dir: &Path) -> Result<(), CohortError> {
+        let schema = Arc::new(variant_schema());
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(self.position.finish()),
+            Arc::new(self.ref_allele.finish()),
+            Arc::new(self.alt_allele.finish()),
+            Arc::new(self.maf.finish()),
+            Arc::new(self.mac.finish()),
+            Arc::new(self.n_obs.finish()),
+            Arc::new(self.u_stat.finish()),
+            Arc::new(self.v_stat.finish()),
+            Arc::new(self.segment_id.finish()),
+            Arc::new(self.gene.finish()),
+            Arc::new(self.region.finish()),
+            Arc::new(self.consequence.finish()),
+            Arc::new(self.cadd.finish()),
+            Arc::new(self.revel.finish()),
+            Arc::new(self.cage_prom.finish()),
+            Arc::new(self.cage_enh.finish()),
+            Arc::new(self.ccre_prom.finish()),
+            Arc::new(self.ccre_enh.finish()),
+        ];
+        for b in self.weights.iter_mut() {
+            columns.push(Arc::new(b.finish()));
+        }
+        write_record_batch(dir, "variants.parquet", schema, columns)
+    }
+
+    fn write_segments(&mut self, dir: &Path) -> Result<(), CohortError> {
+        let schema = Arc::new(segment_schema());
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(self.seg_id.finish()),
+            Arc::new(self.seg_n_variants.finish()),
+            Arc::new(self.seg_positions.finish()),
+            Arc::new(self.seg_refs.finish()),
+            Arc::new(self.seg_alts.finish()),
+            Arc::new(self.seg_cov_lower.finish()),
+        ];
+        write_record_batch(dir, "segments.parquet", schema, columns)
+    }
+}
+
+fn write_record_batch(
+    dir: &Path,
+    file_name: &str,
+    schema: Arc<Schema>,
+    columns: Vec<ArrayRef>,
+) -> Result<(), CohortError> {
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
-
-    let file = File::create(dir.join("variants.parquet"))
-        .map_err(|e| CohortError::Resource(format!("Create variants.parquet: {e}")))?;
+    let path = dir.join(file_name);
+    let file = File::create(&path)
+        .map_err(|e| CohortError::Resource(format!("Create {}: {e}", path.display())))?;
     let mut writer = ArrowWriter::try_new(file, schema, Some(parquet_props()))
         .map_err(|e| CohortError::Resource(format!("Parquet writer init: {e}")))?;
     writer
@@ -1064,42 +1167,255 @@ fn write_variants_parquet(
     writer
         .close()
         .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
-
     Ok(())
 }
 
-fn write_segments_parquet(
-    dir: &Path,
-    s_segment_id: &mut Int32Builder,
-    s_n_variants: &mut Int32Builder,
-    s_positions: &mut ListBuilder<Int32Builder>,
-    s_refs: &mut ListBuilder<StringBuilder>,
-    s_alts: &mut ListBuilder<StringBuilder>,
-    s_cov_lower: &mut ListBuilder<Float64Builder>,
-) -> Result<(), CohortError> {
-    let schema = Arc::new(segment_schema());
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(s_segment_id.finish()),
-        Arc::new(s_n_variants.finish()),
-        Arc::new(s_positions.finish()),
-        Arc::new(s_refs.finish()),
-        Arc::new(s_alts.finish()),
-        Arc::new(s_cov_lower.finish()),
-    ];
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::staar::masks::MaskGroup;
+    use crate::staar::score;
+    use crate::types::{
+        AnnotationWeights, Consequence, FunctionalAnnotation, RegionType, RegulatoryFlags,
+    };
 
-    let batch = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
+    /// Lower-triangular packing must match what `extract_submatrix` reads:
+    /// `cov_lower[i*(i+1)/2 + j]` for `i ≥ j`.
+    fn pack_lower(k: &Mat<f64>) -> Vec<f64> {
+        let m = k.nrows();
+        let mut packed = Vec::with_capacity(m * (m + 1) / 2);
+        for i in 0..m {
+            for j in 0..=i {
+                packed.push(k[(i, j)]);
+            }
+        }
+        packed
+    }
 
-    let file = File::create(dir.join("segments.parquet"))
-        .map_err(|e| CohortError::Resource(format!("Create segments.parquet: {e}")))?;
-    let mut writer = ArrowWriter::try_new(file, schema, Some(parquet_props()))
-        .map_err(|e| CohortError::Resource(format!("Parquet writer init: {e}")))?;
-    writer
-        .write(&batch)
-        .map_err(|e| CohortError::Resource(format!("Parquet write: {e}")))?;
-    writer
-        .close()
-        .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
+    fn make_variant(pos: u32, ref_b: &str, alt_b: &str, maf: f64) -> AnnotatedVariant {
+        AnnotatedVariant {
+            chromosome: Chromosome::Autosome(22),
+            position: pos,
+            ref_allele: ref_b.into(),
+            alt_allele: alt_b.into(),
+            maf,
+            gene_name: "GENE".into(),
+            annotation: FunctionalAnnotation {
+                region_type: RegionType::Exonic,
+                consequence: Consequence::NonsynonymousSNV,
+                cadd_phred: 20.0,
+                revel: 0.5,
+                regulatory: RegulatoryFlags::default(),
+                weights: AnnotationWeights([1.0; 11]),
+            },
+        }
+    }
 
-    Ok(())
+    fn segment_cov(positions: &[u32], refs: &[&str], alts: &[&str], k: &Mat<f64>) -> SegmentCov {
+        let mut pos_index: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (i, &p) in positions.iter().enumerate() {
+            pos_index.entry(p).or_default().push(i);
+        }
+        SegmentCov {
+            refs: refs.iter().map(|s| s.to_string()).collect(),
+            alts: alts.iter().map(|s| s.to_string()).collect(),
+            cov_lower: pack_lower(k),
+            pos_index,
+        }
+    }
+
+    fn dummy_study(n: usize) -> StudyHandle {
+        StudyHandle {
+            path: std::path::PathBuf::new(),
+            meta: StudyMeta {
+                cohort_meta_version: 1,
+                trait_type: "Continuous".into(),
+                trait_name: "TRAIT".into(),
+                n_samples: n,
+                sigma2: 1.0,
+                maf_cutoff: 0.01,
+                covariates: vec![],
+                segment_size: SEGMENT_BP,
+            },
+        }
+    }
+
+    type Fixture = (Mat<f64>, Mat<f64>, Vec<f64>, Vec<Vec<f64>>, Vec<u32>);
+    fn fixture(m: usize, n: usize) -> Fixture {
+        let u = Mat::<f64>::from_fn(m, 1, |i, _| 0.3 * (i as f64 + 1.0));
+        // Diagonal-dominant ⇒ PSD by construction.
+        let mut k = Mat::<f64>::zeros(m, m);
+        for i in 0..m {
+            k[(i, i)] = 1.0 + i as f64 * 0.1;
+            for j in 0..i {
+                let v = 0.05 * (i + j) as f64;
+                k[(i, j)] = v;
+                k[(j, i)] = v;
+            }
+        }
+        // 2*maf*n integer ⇒ mac round-trips through (mac/(2n)) without drift.
+        let mafs: Vec<f64> = (0..m)
+            .map(|i| (i as f64 + 1.0) * 10.0 / (2.0 * n as f64))
+            .collect();
+        let ann: Vec<Vec<f64>> = (0..11).map(|_| vec![1.0; m]).collect();
+        let positions: Vec<u32> = (0..m as u32).map(|i| 1000 * (i + 1)).collect();
+        (u, k, mafs, ann, positions)
+    }
+
+    /// One study through `meta_score_gene` must reproduce direct
+    /// `run_staar_from_sumstats`: SUM-of-one is identity, sub-matrix
+    /// extraction is identity.
+    #[test]
+    fn k1_meta_matches_direct_sumstats() {
+        let m = 4;
+        let n = 10_000usize;
+        let (u, k, mafs, ann, positions) = fixture(m, n);
+        let direct = score::run_staar_from_sumstats(&u, &k, &ann, &mafs, n);
+        let (expected_beta, expected_se) = unweighted_burden_estimate(&u, &k);
+
+        let refs: Vec<&str> = vec!["A"; m];
+        let alts: Vec<&str> = vec!["C"; m];
+        let variants: Vec<MetaVariant> = (0..m)
+            .map(|i| MetaVariant {
+                variant: make_variant(positions[i], refs[i], alts[i], mafs[i]),
+                u_meta: u[(i, 0)],
+                mac_total: (2.0 * mafs[i] * n as f64).round() as i64,
+                n_total: n as i64,
+                study_segments: vec![(0, 0)],
+            })
+            .collect();
+
+        let group = MaskGroup {
+            name: "GENE".into(),
+            chromosome: Chromosome::Autosome(22),
+            start: positions[0],
+            end: *positions.last().unwrap(),
+            variant_indices: (0..m).collect(),
+        };
+
+        let mut cache = HashMap::new();
+        cache.insert((0, 0), segment_cov(&positions, &refs, &alts, &k));
+        let studies = vec![dummy_study(n)];
+
+        let result = meta_score_gene(&group, &variants, &studies, &cache).expect("score");
+        assert!(
+            (result.staar.staar_o - direct.staar_o).abs() < 1e-12,
+            "K=1 meta {} vs direct {}",
+            result.staar.staar_o,
+            direct.staar_o
+        );
+        assert_eq!(result.n_variants, m as u32);
+        assert!((result.burden_beta - expected_beta).abs() < 1e-12);
+        assert!((result.burden_se - expected_se).abs() < 1e-12);
+    }
+
+    #[test]
+    fn canonical_orientation_is_lex_min() {
+        assert_eq!(canonical_alleles("A", "C"), ("A", "C"));
+        assert_eq!(canonical_alleles("C", "A"), ("A", "C"));
+        // Indels: lex order extends naturally; "C" < "CT".
+        assert_eq!(canonical_alleles("CT", "C"), ("C", "CT"));
+        assert_eq!(canonical_alleles("C", "CT"), ("C", "CT"));
+        // Equal alleles never occur in real VCF; the function is total anyway.
+        assert_eq!(canonical_alleles("A", "A"), ("A", "A"));
+    }
+
+    /// A segment that stored a variant flipped (`alt`,`ref`) must still
+    /// resolve when the caller asks in canonical (`ref`,`alt`) order.
+    #[test]
+    fn extract_submatrix_is_orientation_blind() {
+        let positions = vec![100u32];
+        let k = Mat::<f64>::from_fn(1, 1, |_, _| 4.2);
+        let local_flipped = segment_cov(&positions, &["C"], &["A"], &k);
+        let pulled = local_flipped.extract_submatrix(&[(100, "A", "C")]);
+        assert!((pulled[(0, 0)] - 4.2).abs() < 1e-12);
+    }
+
+    /// Off-diagonal `K[i,j] = G_i·G_j` flips sign when exactly one of the
+    /// two variants was stored in flipped orientation. Diagonal is invariant.
+    #[test]
+    fn extract_submatrix_signs_off_diagonal_on_partial_flip() {
+        // Two variants: variant A at pos 100 (canonical = ("A","C")), variant
+        // B at pos 200 (canonical = ("G","T")). Store the segment with B in
+        // FLIPPED orientation, so the local cov[A,B] is signed against
+        // (-G_B), not against +G_B.
+        let positions = vec![100u32, 200u32];
+        let canonical_k = Mat::<f64>::from_fn(2, 2, |i, j| match (i, j) {
+            (0, 0) => 5.0,
+            (1, 1) => 3.0,
+            _ => 1.5, // off-diagonal
+        });
+        // Build the LOCAL k that would have been emitted if B were stored
+        // flipped: row 1 / col 1 negated except for the diagonal.
+        let local_k = Mat::<f64>::from_fn(2, 2, |i, j| {
+            let s = if i == 1 || j == 1 { -1.0 } else { 1.0 };
+            // diagonal is sign-squared = +1
+            let s = if i == j { 1.0 } else { s };
+            canonical_k[(i, j)] * s
+        });
+        assert!((local_k[(0, 1)] - (-1.5)).abs() < 1e-12);
+
+        let seg = segment_cov(&positions, &["A", "T"], &["C", "G"], &local_k);
+
+        // Caller asks in canonical orientation.
+        let pulled = seg.extract_submatrix(&[(100, "A", "C"), (200, "G", "T")]);
+        assert!((pulled[(0, 0)] - 5.0).abs() < 1e-12);
+        assert!((pulled[(1, 1)] - 3.0).abs() < 1e-12);
+        assert!(
+            (pulled[(0, 1)] - 1.5).abs() < 1e-12,
+            "off-diagonal must be sign-corrected: got {}",
+            pulled[(0, 1)]
+        );
+        assert!((pulled[(1, 0)] - 1.5).abs() < 1e-12);
+    }
+
+    /// Two studies whose summary statistics algebraically sum to one
+    /// pseudo-combined study must yield the same staar_o as direct
+    /// `run_staar_from_sumstats` on the combined U/K. This pins the
+    /// "split-and-merge equals direct" invariant for MetaSTAAR.
+    #[test]
+    fn k2_split_recovers_combined_baseline() {
+        let m = 4;
+        let n_a = 5_000usize;
+        let n_b = 5_000usize;
+        let n = n_a + n_b;
+        let (u, k, mafs, ann, positions) = fixture(m, n);
+        let direct = score::run_staar_from_sumstats(&u, &k, &ann, &mafs, n);
+
+        let half_k = Mat::<f64>::from_fn(m, m, |i, j| k[(i, j)] * 0.5);
+        let half_u = Mat::<f64>::from_fn(m, 1, |i, _| u[(i, 0)] * 0.5);
+
+        let refs: Vec<&str> = vec!["A"; m];
+        let alts: Vec<&str> = vec!["C"; m];
+        let variants: Vec<MetaVariant> = (0..m)
+            .map(|i| MetaVariant {
+                variant: make_variant(positions[i], refs[i], alts[i], mafs[i]),
+                u_meta: half_u[(i, 0)] + half_u[(i, 0)],
+                mac_total: (2.0 * mafs[i] * n as f64).round() as i64,
+                n_total: n as i64,
+                study_segments: vec![(0, 10), (1, 20)],
+            })
+            .collect();
+
+        let group = MaskGroup {
+            name: "GENE".into(),
+            chromosome: Chromosome::Autosome(22),
+            start: positions[0],
+            end: *positions.last().unwrap(),
+            variant_indices: (0..m).collect(),
+        };
+
+        let mut cache = HashMap::new();
+        cache.insert((0, 10), segment_cov(&positions, &refs, &alts, &half_k));
+        cache.insert((1, 20), segment_cov(&positions, &refs, &alts, &half_k));
+        let studies = vec![dummy_study(n_a), dummy_study(n_b)];
+
+        let result = meta_score_gene(&group, &variants, &studies, &cache).expect("score");
+        assert!(
+            (result.staar.staar_o - direct.staar_o).abs() < 1e-12,
+            "K=2 split meta {} vs direct {}",
+            result.staar.staar_o,
+            direct.staar_o
+        );
+    }
 }
