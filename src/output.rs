@@ -24,9 +24,6 @@ pub enum OutputMode {
 
 impl OutputMode {
     pub fn detect(format: &Format) -> Self {
-        if std::env::var("COHORT_MACHINE").is_ok_and(|v| !v.is_empty()) {
-            return Self::Machine;
-        }
         match format {
             Format::Json => Self::Machine,
             Format::Human => Self::Human,

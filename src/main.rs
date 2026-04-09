@@ -24,7 +24,14 @@ use output::OutputMode;
 
 fn main() {
     let cli = Cli::parse();
-    let mode = OutputMode::detect(&cli.format);
+    // COHORT_MACHINE forces machine mode regardless of --format / tty.
+    // Resolved here at the composition root so the output adapter stays
+    // env-free.
+    let mode = if std::env::var("COHORT_MACHINE").is_ok_and(|v| !v.is_empty()) {
+        OutputMode::Machine
+    } else {
+        OutputMode::detect(&cli.format)
+    };
     let out = output::create(&mode);
 
     if let Some(t) = cli.threads {
