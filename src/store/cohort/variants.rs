@@ -26,24 +26,6 @@ impl CarrierList {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn mac(&self) -> u32 {
-        self.entries.iter().map(|e| e.dosage as u32).sum()
-    }
-}
-
-#[allow(dead_code)] // fields accessed via VariantIndex weight methods
-pub struct WeightVector {
-    pub name: &'static str,
-    pub values: Vec<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -99,8 +81,6 @@ pub struct VariantIndex {
     entries: Vec<VariantIndexEntry>,
     gene_variants: HashMap<String, Vec<u32>>,
     vid_to_vcf: HashMap<Box<str>, u32>,
-    #[allow(dead_code)]
-    pub weight_channels: Vec<WeightVector>,
 }
 
 impl VariantIndex {
@@ -115,31 +95,10 @@ impl VariantIndex {
             .map(|(i, e)| (e.vid.clone(), i as u32))
             .collect();
 
-        let weight_names: [&str; 11] = [
-            "cadd_phred",
-            "linsight",
-            "fathmm_xf",
-            "apc_epigenetics_active",
-            "apc_epigenetics_repressed",
-            "apc_epigenetics_transcription",
-            "apc_conservation",
-            "apc_protein_function",
-            "apc_local_nucleotide_diversity",
-            "apc_mutation_density",
-            "apc_transcription_factor",
-        ];
-        let weight_channels: Vec<WeightVector> = (0..11)
-            .map(|ch| WeightVector {
-                name: weight_names[ch],
-                values: entries.iter().map(|e| e.weights.0[ch]).collect(),
-            })
-            .collect();
-
         Ok(Self {
             entries,
             gene_variants,
             vid_to_vcf,
-            weight_channels,
         })
     }
 
@@ -158,26 +117,6 @@ impl VariantIndex {
         self.gene_variants.len()
     }
 
-    #[allow(dead_code)]
-    pub fn compile_mask(
-        &self,
-        gene_vcfs: &[u32],
-        maf_cutoff: f64,
-        chrom: Chromosome,
-        gene_name: &str,
-        predicate: fn(&AnnotatedVariant) -> bool,
-    ) -> Vec<usize> {
-        gene_vcfs
-            .iter()
-            .enumerate()
-            .filter(|(_, &v)| {
-                let e = &self.entries[v as usize];
-                e.maf < maf_cutoff && predicate(&e.to_annotated_variant_with_gene(chrom, gene_name))
-            })
-            .map(|(i, _)| i)
-            .collect()
-    }
-
     #[inline]
     pub fn get(&self, variant_vcf: u32) -> &VariantIndexEntry {
         &self.entries[variant_vcf as usize]
@@ -194,21 +133,11 @@ impl VariantIndex {
     pub fn all_entries(&self) -> &[VariantIndexEntry] {
         &self.entries
     }
-
-    #[allow(dead_code)]
-    pub fn weight_channel(&self, index: usize) -> &WeightVector {
-        &self.weight_channels[index]
-    }
-
-    #[allow(dead_code)]
-    pub fn weight_values(&self, channel: usize, variant_vcfs: &[u32]) -> Vec<f64> {
-        let vals = &self.weight_channels[channel].values;
-        variant_vcfs.iter().map(|&v| vals[v as usize]).collect()
-    }
 }
 
 /// Look up a typed Arrow array by column name so schema reorderings stay safe.
-fn col_by_name<'a, T: arrow::array::Array + 'static>(
+/// Shared by the variants.parquet reader here and the builder that writes it.
+pub(super) fn col_by_name<'a, T: arrow::array::Array + 'static>(
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
 ) -> Result<&'a T, CohortError> {
@@ -350,31 +279,10 @@ mod tests {
             .map(|(i, e)| (e.vid.clone(), i as u32))
             .collect();
 
-        let weight_names: [&str; 11] = [
-            "cadd_phred",
-            "linsight",
-            "fathmm_xf",
-            "apc_epigenetics_active",
-            "apc_epigenetics_repressed",
-            "apc_epigenetics_transcription",
-            "apc_conservation",
-            "apc_protein_function",
-            "apc_local_nucleotide_diversity",
-            "apc_mutation_density",
-            "apc_transcription_factor",
-        ];
-        let weight_channels: Vec<WeightVector> = (0..11)
-            .map(|ch| WeightVector {
-                name: weight_names[ch],
-                values: entries.iter().map(|e| e.weights.0[ch]).collect(),
-            })
-            .collect();
-
         VariantIndex {
             entries,
             gene_variants,
             vid_to_vcf,
-            weight_channels,
         }
     }
 
@@ -417,78 +325,6 @@ mod tests {
         assert_eq!(vi.get(0).position, 100);
         assert_eq!(vi.get(1).position, 200);
         assert_eq!(vi.get(2).position, 300);
-    }
-
-    #[test]
-    fn weight_channel_alignment() {
-        let vi = make_test_index();
-        for ch in 0..11 {
-            let wv = vi.weight_channel(ch);
-            assert_eq!(wv.values.len(), vi.len());
-            for (i, &val) in wv.values.iter().enumerate() {
-                assert_eq!(
-                    val,
-                    vi.get(i as u32).weights.0[ch],
-                    "weight channel {ch} misaligned at variant_vcf {i}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn weight_values_subset() {
-        let vi = make_test_index();
-        let subset = &[0u32, 2];
-        let vals = vi.weight_values(0, subset);
-        assert_eq!(vals.len(), 2);
-        assert_eq!(vals[0], vi.get(0).weights.0[0]);
-        assert_eq!(vals[1], vi.get(2).weights.0[0]);
-    }
-
-    #[test]
-    fn compile_mask_filters_correctly() {
-        let vi = make_test_index();
-        let gene_vcfs = vi.gene_variant_vcfs("GENE1");
-        let chrom = Chromosome::Autosome(22);
-
-        let all = vi.compile_mask(gene_vcfs, 1.0, chrom, "GENE1", |_| true);
-        assert_eq!(all, vec![0, 1]);
-
-        let maf_filtered = vi.compile_mask(gene_vcfs, 0.002, chrom, "GENE1", |_| true);
-        assert_eq!(maf_filtered, vec![0]);
-
-        let missense_only = vi.compile_mask(gene_vcfs, 1.0, chrom, "GENE1", |av| {
-            av.annotation.consequence.is_missense()
-        });
-        assert_eq!(missense_only, vec![0]);
-
-        let plof = vi.compile_mask(gene_vcfs, 0.01, chrom, "GENE1", |av| {
-            av.annotation.consequence.is_plof()
-        });
-        assert_eq!(plof, vec![1]);
-    }
-
-    #[test]
-    fn mask_composition_equivalence() {
-        let vi = make_test_index();
-        let gene_vcfs = vi.gene_variant_vcfs("GENE1");
-        let chrom = Chromosome::Autosome(22);
-
-        let combined = vi.compile_mask(gene_vcfs, 0.01, chrom, "GENE1", |av| {
-            av.annotation.consequence.is_missense() || av.annotation.consequence.is_plof()
-        });
-
-        let missense = vi.compile_mask(gene_vcfs, 0.01, chrom, "GENE1", |av| {
-            av.annotation.consequence.is_missense()
-        });
-        let plof = vi.compile_mask(gene_vcfs, 0.01, chrom, "GENE1", |av| {
-            av.annotation.consequence.is_plof()
-        });
-        let mut union: Vec<usize> = missense.iter().chain(plof.iter()).copied().collect();
-        union.sort_unstable();
-        union.dedup();
-
-        assert_eq!(combined, union);
     }
 
     #[test]

@@ -278,11 +278,11 @@ fn validate_header(path: &Path) -> Result<(u32, u32), HeaderError> {
     Ok((n_variants, n_genes))
 }
 
-/// Intermediate result from per-gene computation.
+/// Intermediate result from per-gene computation. Vids are resolved from
+/// `variant_offsets` at write time via the `VariantIndex`, so we don't clone
+/// per-variant `Box<str>`s inside the rayon closure.
 struct GeneComputed {
     gene_name: String,
-    variant_vids: Vec<Box<str>>,
-    /// Positional offsets for U scatter (build-time only, not written to disk).
     variant_offsets: Vec<u32>,
     u_values: Vec<f64>,
     k_flat: Vec<f64>, // empty if m > MAX_K_VARIANTS
@@ -315,10 +315,6 @@ pub fn build_chromosome(
             }
             let carriers = sparse_g.load_variants(as_u32_slice(&gene_vcfs));
             let variant_offsets: Vec<u32> = gene_vcfs.iter().map(|VariantVcf(v)| *v).collect();
-            let variant_vids: Vec<Box<str>> = gene_vcfs
-                .iter()
-                .map(|VariantVcf(v)| variant_index.get(*v).vid.clone())
-                .collect();
             let (u_values, k_flat) = if m > MAX_K_VARIANTS {
                 (sparse_score::compute_u_only(&carriers, analysis), Vec::new())
             } else {
@@ -334,7 +330,6 @@ pub fn build_chromosome(
             };
             Some(GeneComputed {
                 gene_name: gene_name.clone(),
-                variant_vids,
                 variant_offsets,
                 u_values,
                 k_flat,
@@ -356,7 +351,6 @@ pub fn build_chromosome(
 
     gene_computed.sort_by(|a, b| a.gene_name.cmp(&b.gene_name));
 
-    // Phase 3: write binary
     let chrom_dir = out_dir.join(format!("chromosome={chrom}"));
     std::fs::create_dir_all(&chrom_dir)
         .map_err(|e| CohortError::Resource(format!("mkdir {}: {e}", chrom_dir.display())))?;
@@ -402,7 +396,7 @@ pub fn build_chromosome(
             .map_err(|e| CohortError::Resource(format!("Write gene name: {e}")))?;
 
         // n_variants (u32)
-        let m = gc.variant_vids.len() as u32;
+        let m = gc.variant_offsets.len() as u32;
         w.write_all(&m.to_le_bytes())
             .map_err(|e| CohortError::Resource(format!("Write m: {e}")))?;
 
@@ -411,9 +405,10 @@ pub fn build_chromosome(
         w.write_all(&[has_k])
             .map_err(|e| CohortError::Resource(format!("Write has_k: {e}")))?;
 
-        // Per-variant vid strings (length-prefixed)
-        for vid in &gc.variant_vids {
-            let vid_bytes = vid.as_bytes();
+        // Per-variant vid strings, resolved from offsets at write time so
+        // the parallel build loop never clones vids per variant.
+        for &vcf in &gc.variant_offsets {
+            let vid_bytes = variant_index.get(vcf).vid.as_bytes();
             w.write_all(&(vid_bytes.len() as u16).to_le_bytes())
                 .map_err(|e| CohortError::Resource(format!("Write vid len: {e}")))?;
             w.write_all(vid_bytes)

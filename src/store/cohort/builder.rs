@@ -1,6 +1,7 @@
 //! Build sparse_g.bin + variants.parquet + membership.parquet from _rare_all.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write as IoWrite};
 use std::path::Path;
@@ -21,18 +22,17 @@ use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::output::Output;
 use super::encoding::*;
+use super::variants::col_by_name;
 
-/// Look up a typed Arrow array by column name so schema reorderings stay safe.
-fn col_by_name<'a, T: arrow::array::Array + 'static>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> Result<&'a T, CohortError> {
-    let idx = batch.schema().index_of(name).map_err(|_| {
-        CohortError::Resource(format!("_rare_all missing column {name}"))
-    })?;
-    batch.column(idx).as_any().downcast_ref::<T>().ok_or_else(|| {
-        CohortError::Resource(format!("_rare_all column {name} has wrong type"))
-    })
+/// Stringify an Arrow cell used as a join key. Fast path for `StringArray`
+/// (ingest + genotype parquet both produce these); falls back to the generic
+/// Arrow display formatter so an upstream schema change still works, just
+/// slower.
+fn str_cell(col: &dyn Array, row: usize) -> String {
+    if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
+        return a.value(row).to_string();
+    }
+    arrow::util::display::array_value_to_string(col, row).unwrap_or_default()
 }
 
 pub struct BuildStats {
@@ -43,9 +43,9 @@ pub struct BuildStats {
 
 struct UniqueVariant {
     pos: i32,
-    ref_a: String,
-    alt_a: String,
-    genes: Vec<String>,
+    ref_a: Box<str>,
+    alt_a: Box<str>,
+    genes: Vec<Box<str>>,
 }
 
 pub fn build_chromosome(
@@ -60,20 +60,11 @@ pub fn build_chromosome(
 
     let meta_batches = engine.collect(&column::carrier_metadata_sql(chrom))?;
 
-    let str_val = |col: &dyn Array, row: usize| -> String {
-        if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
-            return a.value(row).to_string();
-        }
-        arrow::util::display::array_value_to_string(col, row).unwrap_or_default()
-    };
-
-    struct RawRow {
-        pos: i32,
-        ref_a: String,
-        alt_a: String,
-        gene: String,
-    }
-    let mut raw_rows: Vec<RawRow> = Vec::new();
+    // Build unique_variants directly from meta_batches. The SQL orders rows
+    // by (pos, ref, alt, gene) so same-variant rows arrive consecutively and
+    // collapse into a single UniqueVariant whose `genes` list holds every
+    // distinct gene for that locus.
+    let mut unique_variants: Vec<UniqueVariant> = Vec::new();
     for batch in &meta_batches {
         let pos_arr = batch
             .column(0)
@@ -81,43 +72,38 @@ pub fn build_chromosome(
             .downcast_ref::<Int32Array>()
             .ok_or_else(|| CohortError::Analysis("_rare_all missing position".into()))?;
         for i in 0..batch.num_rows() {
-            raw_rows.push(RawRow {
-                pos: pos_arr.value(i),
-                ref_a: str_val(batch.column(1).as_ref(), i),
-                alt_a: str_val(batch.column(2).as_ref(), i),
-                gene: str_val(batch.column(3).as_ref(), i),
+            let pos = pos_arr.value(i);
+            let ref_a = str_cell(batch.column(1).as_ref(), i);
+            let alt_a = str_cell(batch.column(2).as_ref(), i);
+            let gene = str_cell(batch.column(3).as_ref(), i);
+
+            if let Some(last) = unique_variants.last_mut() {
+                if last.pos == pos && &*last.ref_a == ref_a.as_str() && &*last.alt_a == alt_a.as_str() {
+                    if !gene.is_empty() && !last.genes.iter().any(|g| &**g == gene.as_str()) {
+                        last.genes.push(gene.into_boxed_str());
+                    }
+                    continue;
+                }
+            }
+            let genes = if gene.is_empty() {
+                Vec::new()
+            } else {
+                vec![gene.into_boxed_str()]
+            };
+            unique_variants.push(UniqueVariant {
+                pos,
+                ref_a: ref_a.into_boxed_str(),
+                alt_a: alt_a.into_boxed_str(),
+                genes,
             });
         }
     }
 
-    if raw_rows.is_empty() {
+    if unique_variants.is_empty() {
         return Ok(BuildStats {
             n_variants: 0,
             n_genes: 0,
             total_carriers: 0,
-        });
-    }
-
-    let mut unique_variants: Vec<UniqueVariant> = Vec::new();
-    for row in &raw_rows {
-        if let Some(last) = unique_variants.last_mut() {
-            if last.pos == row.pos && last.ref_a == row.ref_a && last.alt_a == row.alt_a {
-                if !row.gene.is_empty() && !last.genes.contains(&row.gene) {
-                    last.genes.push(row.gene.clone());
-                }
-                continue;
-            }
-        }
-        let genes = if row.gene.is_empty() {
-            Vec::new()
-        } else {
-            vec![row.gene.clone()]
-        };
-        unique_variants.push(UniqueVariant {
-            pos: row.pos,
-            ref_a: row.ref_a.clone(),
-            alt_a: row.alt_a.clone(),
-            genes,
         });
     }
 
@@ -126,11 +112,13 @@ pub fn build_chromosome(
     let mut unique_pos: Vec<i32> = unique_variants.iter().map(|v| v.pos).collect();
     unique_pos.sort_unstable();
     unique_pos.dedup();
-    let pos_str = unique_pos
-        .iter()
-        .map(|p| p.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
+    let mut pos_str = String::with_capacity(unique_pos.len() * 8);
+    for (i, p) in unique_pos.iter().enumerate() {
+        if i > 0 {
+            pos_str.push(',');
+        }
+        write!(&mut pos_str, "{p}").expect("write to String cannot fail");
+    }
 
     engine.register_parquet_file("_geno_carrier", Path::new(geno_parquet_path))?;
     let dos_batches = engine.collect(&format!(
@@ -140,13 +128,31 @@ pub fn build_chromosome(
          ORDER BY position, \"ref\", alt"
     ))?;
 
-    let mut dosage_map: HashMap<(i32, String, String), Vec<(u32, u8)>> = HashMap::new();
+    // Sort-merge: both `unique_variants` (from meta_batches) and `dos_batches`
+    // are sorted by (position, ref, alt). Walk them in lockstep so we never
+    // build a HashMap keyed by the string columns. One cursor into
+    // unique_variants advances past every dos row's smaller neighbors, and
+    // matching rows write straight into the pre-sized `dosage_vecs`. Dos
+    // rows with no matching uv are skipped; uvs with no matching dos keep
+    // an empty carrier list.
+    let mut dosage_vecs: Vec<Vec<(u32, u8)>> = vec![Vec::new(); n_variants];
+    let mut uv_idx = 0usize;
     for batch in &dos_batches {
         let pos_arr = batch
             .column(0)
             .as_any()
             .downcast_ref::<Int32Array>()
             .ok_or_else(|| CohortError::Analysis("Genotype parquet missing position".into()))?;
+        let ref_arr = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| CohortError::Analysis("Genotype parquet ref not StringArray".into()))?;
+        let alt_arr = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| CohortError::Analysis("Genotype parquet alt not StringArray".into()))?;
         let dos_col = batch.column(3);
         let dos_fsl = dos_col.as_any().downcast_ref::<FixedSizeListArray>();
         let dos_list = dos_col.as_any().downcast_ref::<ListArray>();
@@ -157,18 +163,32 @@ pub fn build_chromosome(
         }
 
         for i in 0..batch.num_rows() {
-            let pos = pos_arr.value(i);
-            let ref_a = str_val(batch.column(1).as_ref(), i);
-            let alt_a = str_val(batch.column(2).as_ref(), i);
+            let dos_key = (pos_arr.value(i), ref_arr.value(i), alt_arr.value(i));
+
+            while uv_idx < n_variants {
+                let uv = &unique_variants[uv_idx];
+                if (uv.pos, &*uv.ref_a, &*uv.alt_a) < dos_key {
+                    uv_idx += 1;
+                    continue;
+                }
+                break;
+            }
+            if uv_idx >= n_variants {
+                break;
+            }
+            let uv = &unique_variants[uv_idx];
+            if (uv.pos, &*uv.ref_a, &*uv.alt_a) != dos_key {
+                continue;
+            }
+
             let dosage_arr = if let Some(fsl) = dos_fsl {
                 fsl.value(i)
             } else {
                 dos_list.unwrap().value(i)
             };
             let dosages_f32 = dosage_arr.as_any().downcast_ref::<Float32Array>();
-
-            let mut carriers = Vec::new();
             let n_dos = dosage_arr.len();
+            let carriers = &mut dosage_vecs[uv_idx];
             for si in 0..n_samples.min(n_dos) {
                 if dosage_arr.is_null(si) {
                     continue;
@@ -184,7 +204,6 @@ pub fn build_chromosome(
                     carriers.push((si as u32, (d.round() as u8).min(2)));
                 }
             }
-            dosage_map.insert((pos, ref_a, alt_a), carriers);
         }
     }
     let _ = engine.execute("DROP TABLE IF EXISTS _geno_carrier");
@@ -206,13 +225,13 @@ pub fn build_chromosome(
     let mut data_offset: u64 = 0;
     let mut total_carriers: u64 = 0;
 
-    for uv in &unique_variants {
+    for (i, _uv) in unique_variants.iter().enumerate() {
         offsets.push(data_offset);
 
-        let carriers = dosage_map
-            .get(&(uv.pos, uv.ref_a.clone(), uv.alt_a.clone()))
-            .cloned()
-            .unwrap_or_default();
+        // Sort-merge stashed this variant's carriers at `dosage_vecs[i]`.
+        // Moving out avoids cloning the carrier list and lets the Vec's
+        // backing allocation drop with it.
+        let carriers = std::mem::take(&mut dosage_vecs[i]);
 
         let max_carriers = u16::MAX as usize;
         let n_carriers = carriers.len().min(max_carriers) as u16;
@@ -249,13 +268,13 @@ pub fn build_chromosome(
 
     let mut mem_variant_vcf = UInt32Builder::new();
     let mut mem_gene = StringBuilder::new();
-    let mut n_genes_set = std::collections::HashSet::new();
+    let mut n_genes_set: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
     for (variant_vcf, uv) in unique_variants.iter().enumerate() {
         for gene in &uv.genes {
             mem_variant_vcf.append_value(variant_vcf as u32);
-            mem_gene.append_value(gene);
-            n_genes_set.insert(gene.clone());
+            mem_gene.append_value(&**gene);
+            n_genes_set.insert(&**gene);
         }
     }
 
@@ -326,10 +345,8 @@ fn write_variants_parquet(
     struct MetaRow {
         end_position: i32,
         maf: f64,
-        #[allow(dead_code)]
-        gene: String,
-        region_type: String,
-        consequence: String,
+        region_type: Box<str>,
+        consequence: Box<str>,
         cadd_phred: f64,
         revel: f64,
         cage_prom: bool,
@@ -339,14 +356,13 @@ fn write_variants_parquet(
         weights: [f64; 11],
     }
 
-    let mut meta_map: HashMap<(i32, String, String), MetaRow> = HashMap::new();
+    let mut meta_map: HashMap<(i32, Box<str>, Box<str>), MetaRow> = HashMap::new();
     for batch in full_batches {
         let pos_arr = col_by_name::<Int32Array>(batch, Col::Position.as_str())?;
         let end_arr = col_by_name::<Int32Array>(batch, Col::EndPosition.as_str())?;
         let ref_arr = col_by_name::<StringArray>(batch, Col::RefAllele.as_str())?;
         let alt_arr = col_by_name::<StringArray>(batch, Col::AltAllele.as_str())?;
         let maf_arr = col_by_name::<Float64Array>(batch, Col::Maf.as_str())?;
-        let gene_arr = col_by_name::<StringArray>(batch, Col::GeneName.as_str())?;
         let rt_arr = col_by_name::<StringArray>(batch, Col::RegionType.as_str())?;
         let csq_arr = col_by_name::<StringArray>(batch, Col::Consequence.as_str())?;
         let cadd_arr = col_by_name::<Float64Array>(batch, Col::CaddPhred.as_str())?;
@@ -363,8 +379,8 @@ fn write_variants_parquet(
         for i in 0..batch.num_rows() {
             let key = (
                 pos_arr.value(i),
-                ref_arr.value(i).to_string(),
-                alt_arr.value(i).to_string(),
+                Box::<str>::from(ref_arr.value(i)),
+                Box::<str>::from(alt_arr.value(i)),
             );
             if meta_map.contains_key(&key) {
                 continue;
@@ -378,9 +394,8 @@ fn write_variants_parquet(
                 MetaRow {
                     end_position: end_arr.value(i),
                     maf: maf_arr.value(i),
-                    gene: gene_arr.value(i).to_string(),
-                    region_type: rt_arr.value(i).to_string(),
-                    consequence: csq_arr.value(i).to_string(),
+                    region_type: rt_arr.value(i).into(),
+                    consequence: csq_arr.value(i).into(),
                     cadd_phred: cadd_arr.value(i),
                     revel: revel_arr.value(i),
                     cage_prom: cps.value(i),
@@ -418,8 +433,8 @@ fn write_variants_parquet(
 
         vvcf_b.append_value(variant_vcf as u32);
         pos_b.append_value(uv.pos);
-        ref_b.append_value(&uv.ref_a);
-        alt_b.append_value(&uv.alt_a);
+        ref_b.append_value(&*uv.ref_a);
+        alt_b.append_value(&*uv.alt_a);
         vid_b.append_value(crate::types::format_vid(
             chrom,
             uv.pos as u32,
@@ -430,8 +445,8 @@ fn write_variants_parquet(
         if let Some(m) = mr {
             end_b.append_value(m.end_position);
             maf_b.append_value(m.maf);
-            rt_b.append_value(&m.region_type);
-            csq_b.append_value(&m.consequence);
+            rt_b.append_value(&*m.region_type);
+            csq_b.append_value(&*m.consequence);
             cadd_b.append_value(m.cadd_phred);
             revel_b.append_value(m.revel);
             cp_b.append_value(m.cage_prom);

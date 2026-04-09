@@ -1,24 +1,7 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use crate::error::CohortError;
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct StoreManifest {
-    pub version: u32,
-}
-
-#[allow(dead_code)]
-impl StoreManifest {
-    pub const CURRENT_VERSION: u32 = 1;
-
-    pub fn current() -> Self {
-        Self { version: Self::CURRENT_VERSION }
-    }
-}
 
 pub fn tmp_path(path: &Path) -> PathBuf {
     path.with_extension(format!(
