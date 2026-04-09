@@ -1,10 +1,12 @@
 pub mod annotate;
+pub mod annotation;
 pub mod enrich;
 pub mod ingest;
 pub mod inspect;
 pub mod interpret;
 pub mod meta_staar;
 pub mod staar;
+pub mod store;
 
 use std::path::{Path, PathBuf};
 

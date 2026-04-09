@@ -25,7 +25,7 @@ use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement};
 use crate::output::Output;
 use crate::resource::Resources;
-use crate::store::list::{VariantSet, VariantSetKind};
+use crate::store::list::VariantSet;
 
 #[derive(Serialize, Deserialize)]
 pub struct CohortManifest {
@@ -244,23 +244,13 @@ pub const STAAR_ANNOTATION_COLUMNS: &[ColumnRequirement] = &[
 ];
 
 pub struct GenoStoreResult {
-    pub sample_names: Vec<String>,
-    pub store_dir: PathBuf,
+    // For Existing cohorts geno.output_dir is the cohort dir itself; for Fresh
+    // builds it is the staging dir from extract_genotypes. store_dir always
+    // points at the cohort dir under `.cohort/cohorts/<id>/`.
+    pub geno: crate::staar::genotype::GenotypeResult,
     pub manifest: CohortManifest,
     pub engine: DfEngine,
-    pub geno_output_dir: Option<PathBuf>,
-}
-
-impl GenoStoreResult {
-    pub fn to_genotype_result(&self) -> crate::staar::genotype::GenotypeResult {
-        crate::staar::genotype::GenotypeResult {
-            sample_names: self.sample_names.clone(),
-            output_dir: self
-                .geno_output_dir
-                .clone()
-                .unwrap_or_else(|| self.store_dir.clone()),
-        }
-    }
+    pub store_dir: PathBuf,
 }
 
 pub(crate) fn read_sample_names_at(store_dir: &Path) -> Result<Vec<String>, CohortError> {
@@ -293,11 +283,10 @@ pub fn run_annotation_join(
     };
     let missing = contract.check(&ann_cols);
     if !missing.is_empty() {
-        let tier_hint = match ann_vs.kind() {
-            Some(VariantSetKind::Annotated {
-                tier: crate::config::Tier::Base,
-            }) => " Your data was annotated with base tier. Re-run: `cohort annotate --full`.",
-            _ => " Re-run: `cohort annotate --full`.",
+        let tier_hint = if matches!(ann_vs.tier(), Some(crate::config::Tier::Base)) {
+            " Your data was annotated with base tier. Re-run: `cohort annotate --full`."
+        } else {
+            " Re-run: `cohort annotate --full`."
         };
         return Err(CohortError::DataMissing(format!(
             "Missing annotation columns in {}:\n{}\n\
@@ -334,6 +323,11 @@ pub fn build(
     fs::create_dir_all(&staging).map_err(|e| {
         CohortError::Resource(format!("Cannot create '{}': {e}", staging.display()))
     })?;
+
+    // Hold a writer lock for the duration of the build so two parallel
+    // `cohort ingest` runs cannot race the staging swap. Lock file lives
+    // next to staging so it survives the rename of `store_dir`.
+    let _lock = BuildLock::acquire(&staging.with_extension("lock"))?;
 
     let key = compute_key(vcf_path, annotations_path)?;
     let n_samples = geno_result.sample_names.len();
@@ -478,6 +472,58 @@ pub fn finish_interrupted_swap(staging: &Path, final_path: &Path) -> Result<(), 
 }
 
 use crate::store::manifest::{fsync_parent, write_atomic};
+
+/// Exclusive build lock, file-based. Held for the duration of a cohort
+/// build so concurrent runs serialize on the staging swap. Drops the lock
+/// (and removes the file) on `Drop` so a panic mid-build still releases.
+struct BuildLock {
+    #[cfg(unix)]
+    file: std::fs::File,
+    path: PathBuf,
+}
+
+impl BuildLock {
+    fn acquire(path: &Path) -> Result<Self, CohortError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                CohortError::Resource(format!("create {}: {e}", parent.display()))
+            })?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|e| CohortError::Resource(format!("open lock {}: {e}", path.display())))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc != 0 {
+                return Err(CohortError::Resource(format!(
+                    "another cohort build holds the lock at {}; wait for it to finish or remove the file",
+                    path.display()
+                )));
+            }
+        }
+        Ok(Self {
+            #[cfg(unix)]
+            file,
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for BuildLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
 fn now_string() -> String {
     let d = SystemTime::now()

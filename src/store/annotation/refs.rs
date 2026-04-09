@@ -12,13 +12,14 @@
 //! alias appears in both.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, Tier};
 use crate::error::CohortError;
 use crate::store::annotation::{AnnotationDb, TissueDb};
+use crate::store::manifest::write_atomic;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -113,6 +114,56 @@ impl AnnotationRegistry {
             ))
         })
     }
+
+    /// Append (or replace) one entry in the on-disk `refs.toml`. Defaults
+    /// derived from `Config` are not stored on disk — only operator
+    /// attachments end up here. Same name overwrites.
+    pub fn attach(
+        refs_path: &Path,
+        name: &str,
+        kind: AnnotationKind,
+        path: PathBuf,
+    ) -> Result<(), CohortError> {
+        if !path.exists() {
+            return Err(CohortError::Input(format!(
+                "annotation path does not exist: {}",
+                path.display()
+            )));
+        }
+        if !path.is_dir() {
+            return Err(CohortError::Input(format!(
+                "annotation path is not a directory: {}",
+                path.display()
+            )));
+        }
+
+        let mut file = if refs_path.exists() {
+            let body = std::fs::read_to_string(refs_path).map_err(|e| {
+                CohortError::Resource(format!("read {}: {e}", refs_path.display()))
+            })?;
+            toml::from_str::<RefsFile>(&body).map_err(|e| {
+                CohortError::Input(format!("parse {}: {e}", refs_path.display()))
+            })?
+        } else {
+            if let Some(parent) = refs_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    CohortError::Resource(format!("create {}: {e}", parent.display()))
+                })?;
+            }
+            RefsFile::default()
+        };
+
+        file.refs.retain(|r| r.name != name);
+        file.refs.push(AnnotationRef {
+            name: name.to_string(),
+            kind,
+            path,
+        });
+
+        let body = toml::to_string_pretty(&file)
+            .map_err(|e| CohortError::Resource(format!("serialize refs.toml: {e}")))?;
+        write_atomic(refs_path, body.as_bytes())
+    }
 }
 
 fn default_entries(config: &Config) -> Vec<AnnotationRef> {
@@ -146,3 +197,60 @@ pub fn favor_alias_for(tier: Tier) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_round_trip_replaces_existing_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let refs_path = tmp.path().join("annotations").join("refs.toml");
+        let data_a = tmp.path().join("data_a");
+        let data_b = tmp.path().join("data_b");
+        std::fs::create_dir_all(&data_a).unwrap();
+        std::fs::create_dir_all(&data_b).unwrap();
+
+        AnnotationRegistry::attach(
+            &refs_path,
+            "my-favor",
+            AnnotationKind::Favor { tier: Tier::Base },
+            data_a.clone(),
+        )
+        .unwrap();
+
+        // Re-attach the same alias with a different path: should replace, not duplicate.
+        AnnotationRegistry::attach(
+            &refs_path,
+            "my-favor",
+            AnnotationKind::Favor { tier: Tier::Full },
+            data_b.clone(),
+        )
+        .unwrap();
+
+        let body = std::fs::read_to_string(&refs_path).unwrap();
+        let parsed: RefsFile = toml::from_str(&body).unwrap();
+        assert_eq!(parsed.refs.len(), 1);
+        let entry = &parsed.refs[0];
+        assert_eq!(entry.name, "my-favor");
+        assert_eq!(entry.path, data_b);
+        assert_eq!(entry.kind, AnnotationKind::Favor { tier: Tier::Full });
+    }
+
+    #[test]
+    fn attach_rejects_missing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let refs_path = tmp.path().join("annotations").join("refs.toml");
+        let bogus = tmp.path().join("does-not-exist");
+        let err = AnnotationRegistry::attach(
+            &refs_path,
+            "x",
+            AnnotationKind::Tissue,
+            bogus,
+        )
+        .unwrap_err();
+        match err {
+            CohortError::Input(msg) => assert!(msg.contains("does not exist")),
+            _ => panic!("expected Input error"),
+        }
+    }
+}

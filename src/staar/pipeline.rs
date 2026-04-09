@@ -18,7 +18,7 @@ use crate::staar::run_manifest::{
     self, ArtifactKind, CacheDecision, CacheOutcome, ConfigHashInputs, ResumeDecision,
     ResumeSummary, RunManifest, Stage,
 };
-use crate::staar::scoring::{self, ResultSet};
+use crate::staar::scoring::{self, ResultSet, ScoringRequest};
 use crate::staar::{
     self, ancestry::AncestryInfo, MaskCategory, NullModelKind, RunMode, ScoringMode, TraitType,
 };
@@ -26,7 +26,7 @@ use crate::store::cache::score_cache;
 use crate::store::cohort::{
     self, CohortHandle, CohortId, CohortManifest, GenoStoreResult, STAAR_ANNOTATION_COLUMNS,
 };
-use crate::store::list::{AnnotatedSet, VariantSet, VariantSetKind};
+use crate::store::list::VariantSet;
 use crate::types::{AnnotatedVariant, Chromosome};
 
 pub enum CohortSource {
@@ -54,12 +54,11 @@ pub struct StaarConfig {
     pub kinship: Vec<PathBuf>,
     pub kinship_groups: Option<String>,
     pub known_loci: Option<PathBuf>,
-    pub emit_sumstats: bool,
+    pub run_mode: RunMode,
     pub rebuild_store: bool,
     pub column_map: HashMap<String, String>,
     pub output_dir: PathBuf,
     pub cohort_id: CohortId,
-    pub cohort_manifest_proxy: PathBuf,
 }
 
 impl StaarConfig {
@@ -87,14 +86,6 @@ impl StaarConfig {
         self.output_dir.join("sumstats").join(&self.trait_names[0])
     }
 
-    pub fn run_mode(&self) -> RunMode {
-        if self.emit_sumstats {
-            RunMode::EmitSumstats
-        } else {
-            RunMode::Analyze
-        }
-    }
-
     pub fn scoring_mode(&self, trait_type: TraitType) -> ScoringMode {
         if self.ancestry_col.is_some() {
             ScoringMode::AiStaar
@@ -120,11 +111,18 @@ impl StaarConfig {
 }
 
 impl StaarConfig {
-    pub fn hash_inputs(&self) -> ConfigHashInputs<'_> {
+    pub fn hash_inputs<'a>(
+        &'a self,
+        existing_cohort_manifest: Option<&'a Path>,
+    ) -> ConfigHashInputs<'a> {
         let (genotypes, annotations): (&Path, &Path) = match &self.cohort_source {
-            CohortSource::Fresh { genotypes, annotations } => (genotypes, annotations),
+            CohortSource::Fresh {
+                genotypes,
+                annotations,
+            } => (genotypes, annotations),
             CohortSource::Existing => {
-                let p: &Path = self.cohort_manifest_proxy.as_ref();
+                let p = existing_cohort_manifest
+                    .expect("existing cohort config hash requires a resolved manifest path");
                 (p, p)
             }
         };
@@ -135,21 +133,21 @@ impl StaarConfig {
             trait_names: &self.trait_names,
             covariates: &self.covariates,
             maf_cutoff: self.maf_cutoff,
-            run_mode: self.run_mode(),
+            run_mode: self.run_mode,
             kinship: &self.kinship,
             kinship_groups: self.kinship_groups.as_deref(),
         }
     }
 
-    pub fn config_hash(&self) -> String {
-        run_manifest::compute_config_hash(&self.hash_inputs())
+    pub fn config_hash(&self, existing_cohort_manifest: Option<&Path>) -> String {
+        run_manifest::compute_config_hash(&self.hash_inputs(existing_cohort_manifest))
     }
 
-    pub fn new_run_manifest(&self) -> RunManifest {
+    pub fn new_run_manifest(&self, existing_cohort_manifest: Option<&Path>) -> RunManifest {
         RunManifest::new(
-            self.run_mode(),
+            self.run_mode,
             self.trait_names[0].clone(),
-            self.config_hash(),
+            self.config_hash(existing_cohort_manifest),
         )
     }
 }
@@ -157,14 +155,6 @@ impl StaarConfig {
 pub struct ScoringOutput {
     pub results: ResultSet,
     pub individual_pvals: Vec<(usize, f64)>,
-}
-
-pub struct ScoringContext {
-    pub analysis: AnalysisVectors,
-    pub scoring_mode: ScoringMode,
-    pub cache_dir: PathBuf,
-    pub ancestry: Option<AncestryInfo>,
-    pub spa_active: bool,
 }
 
 struct PhenoStageOut {
@@ -175,7 +165,6 @@ struct PhenoStageOut {
     pheno_mask: Vec<bool>,
     ancestry: Option<AncestryInfo>,
     compact_samples: Vec<String>,
-    genotype_result: staar::genotype::GenotypeResult,
 }
 
 pub struct StaarPipeline<'a> {
@@ -199,7 +188,8 @@ impl<'a> StaarPipeline<'a> {
             res.threads,
             res.environment()
         ));
-        let manifest = config.new_run_manifest();
+        let existing_manifest = existing_cohort_manifest_path(engine, &config);
+        let manifest = config.new_run_manifest(existing_manifest.as_deref());
         Ok(Self {
             config,
             engine,
@@ -263,7 +253,7 @@ impl<'a> StaarPipeline<'a> {
         })?;
 
         // Sumstats early-exit run mode.
-        if self.config.run_mode() == RunMode::EmitSumstats {
+        if self.config.run_mode == RunMode::EmitSumstats {
             self.stage(Stage::EmitSumstats, |p| {
                 p.stage_emit_sumstats(&store, &null_model, &pheno)
             })?;
@@ -279,22 +269,24 @@ impl<'a> StaarPipeline<'a> {
         self.manifest.outputs.score_cache_dir = Some(cache_dir.clone());
         self.manifest.write(&self.config.output_dir)?;
 
-        let ctx = ScoringContext {
-            analysis,
-            scoring_mode: self.config.scoring_mode(pheno.trait_type),
-            cache_dir,
-            ancestry: pheno.ancestry.clone(),
-            spa_active: self.config.spa && pheno.trait_type == TraitType::Binary,
-        };
-        self.warn_mode_combinations(pheno.trait_type, ctx.scoring_mode);
+        let scoring_mode = self.config.scoring_mode(pheno.trait_type);
+        self.warn_mode_combinations(pheno.trait_type, scoring_mode);
 
-        let scoring =
-            self.stage(Stage::RunScoring, |p| p.stage_run_scoring(&store, &ctx))?;
+        let scoring = self.stage(Stage::RunScoring, |p| {
+            p.stage_run_scoring(
+                &store,
+                &analysis,
+                scoring_mode,
+                &cache_dir,
+                pheno.ancestry.as_ref(),
+                pheno.trait_type,
+            )
+        })?;
 
         // load_rare_variants walks every chromosome and reads each VariantIndex
         // through the cohort handle. Hold the result in a local so the
         // WriteResults stage doesn't trigger a second walk.
-        let cohort = self.engine.cohort(&self.config.cohort_id);
+        let cohort = self.cohort();
         let variants = load_rare_variants(&cohort, &store.manifest, self.config.maf_cutoff)?;
         let n_rare = variants.len() as i64;
 
@@ -356,13 +348,13 @@ impl<'a> StaarPipeline<'a> {
         let annotations = match &self.config.cohort_source {
             CohortSource::Fresh { annotations, .. } => annotations,
             CohortSource::Existing => {
-                if !self.config.cohort_manifest_proxy.exists() {
+                let manifest_path = self.cohort_manifest_path();
+                if !manifest_path.exists() {
                     return Err(CohortError::DataMissing(format!(
                         "Cohort '{}' not found at {}. Run `cohort ingest <vcf> \
                          --annotations <set> --cohort-id {}` first.",
                         self.config.cohort_id.as_str(),
-                        self.config
-                            .cohort_manifest_proxy
+                        manifest_path
                             .parent()
                             .map(|p| p.display().to_string())
                             .unwrap_or_default(),
@@ -384,13 +376,13 @@ impl<'a> StaarPipeline<'a> {
         }
 
         // Typed tier check: STAAR needs all 11 annotation weight columns.
-        if let Ok(annotated) = AnnotatedSet::open(annotations) {
-            let weight_cols: Vec<crate::column::Col> = STAAR_WEIGHTS.to_vec();
-            annotated.supports(&weight_cols)?;
-        }
+        // `supports` errors if the set is not annotated, or if any weight
+        // column is missing for the tier it was annotated against.
+        let ann_vs = VariantSet::open(annotations)?;
+        let weight_cols: Vec<crate::column::Col> = STAAR_WEIGHTS.to_vec();
+        ann_vs.supports(&weight_cols)?;
 
         // Raw annotation column contract.
-        let ann_vs = VariantSet::open(annotations)?;
         let contract = ColumnContract {
             command: "staar",
             required: STAAR_ANNOTATION_COLUMNS,
@@ -399,11 +391,10 @@ impl<'a> StaarPipeline<'a> {
         if missing.is_empty() {
             return Ok(());
         }
-        let tier_hint = match ann_vs.kind() {
-            Some(VariantSetKind::Annotated {
-                tier: crate::config::Tier::Base,
-            }) => " Your data was annotated with base tier. Re-run: `cohort annotate --full`.",
-            _ => " Re-run: `cohort annotate --full`.",
+        let tier_hint = if matches!(ann_vs.tier(), Some(crate::config::Tier::Base)) {
+            " Your data was annotated with base tier. Re-run: `cohort annotate --full`."
+        } else {
+            " Re-run: `cohort annotate --full`."
         };
         Err(CohortError::DataMissing(format!(
             "Missing annotation columns in {}:\n{}\n\
@@ -415,8 +406,6 @@ impl<'a> StaarPipeline<'a> {
     }
 
     fn stage_ensure_store(&mut self) -> Result<GenoStoreResult, CohortError> {
-        let cohort = self.engine.cohort(&self.config.cohort_id);
-
         // Existing cohort path: trust the manifest, no rebuild, no probe.
         // The operator already built this cohort via `cohort ingest`.
         if matches!(self.config.cohort_source, CohortSource::Existing) {
@@ -425,11 +414,14 @@ impl<'a> StaarPipeline<'a> {
                 outcome: CacheOutcome::Hit,
                 reason: "loaded by cohort id".into(),
             });
-            return cohort.load(self.engine);
+            return self.cohort().load(self.engine);
         }
 
         let (genotypes, annotations) = match &self.config.cohort_source {
-            CohortSource::Fresh { genotypes, annotations } => (genotypes, annotations),
+            CohortSource::Fresh {
+                genotypes,
+                annotations,
+            } => (genotypes.clone(), annotations.clone()),
             CohortSource::Existing => unreachable!("handled above"),
         };
 
@@ -445,17 +437,21 @@ impl<'a> StaarPipeline<'a> {
             // Drop any score-cache + lookup index that referenced this
             // cohort under its current id; the rebuild changes the
             // content fingerprint and would orphan them otherwise.
-            if let Err(e) = self.engine.store().cache().prune_cohort(&self.config.cohort_id) {
-                self.out
-                    .warn(&format!("  prune cache before rebuild: {e}"));
+            if let Err(e) = self
+                .engine
+                .store()
+                .cache()
+                .prune_cohort(&self.config.cohort_id)
+            {
+                self.out.warn(&format!("  prune cache before rebuild: {e}"));
             }
             cohort::StoreProbe {
-                store_dir: cohort.dir().to_path_buf(),
+                store_dir: self.cohort().dir().to_path_buf(),
                 manifest: None,
                 miss_reason: None,
             }
         } else {
-            let probe = cohort.probe(genotypes, annotations);
+            let probe = self.cohort().probe(&genotypes, &annotations);
             let decision = if probe.manifest.is_some() {
                 CacheDecision {
                     artifact: ArtifactKind::GenotypeStore,
@@ -479,10 +475,10 @@ impl<'a> StaarPipeline<'a> {
         };
 
         let geno_staging_dir = self.config.output_dir.join(".geno_staging");
-        cohort.build_or_load(
+        self.cohort().build_or_load(
             crate::store::cohort::CohortSources {
-                genotypes,
-                annotations,
+                genotypes: &genotypes,
+                annotations: &annotations,
             },
             crate::store::cohort::BuildOpts {
                 staging_dir: &geno_staging_dir,
@@ -498,14 +494,13 @@ impl<'a> StaarPipeline<'a> {
         &mut self,
         store: &GenoStoreResult,
     ) -> Result<PhenoStageOut, CohortError> {
-        let genotype_result = store.to_genotype_result();
         let primary_trait = &self.config.trait_names[0];
 
         let pheno = load_phenotype(
             &store.engine,
             &self.config.phenotype,
             &self.config.covariates,
-            &genotype_result,
+            &store.geno,
             primary_trait,
             self.config.ancestry_col.as_deref(),
             self.config.ai_base_tests,
@@ -516,8 +511,7 @@ impl<'a> StaarPipeline<'a> {
         let mut x = pheno.x;
 
         if let Some(ref loci_path) = self.config.known_loci {
-            let x_cond =
-                load_known_loci(&store.engine, &genotype_result, loci_path, pheno.n, self.out)?;
+            let x_cond = load_known_loci(&store.engine, &store.geno, loci_path, pheno.n, self.out)?;
             x = augment_covariates(&x, &x_cond);
             self.out.status(&format!(
                 "  Conditional: {} known loci added as covariates",
@@ -526,6 +520,7 @@ impl<'a> StaarPipeline<'a> {
         }
 
         let compact_samples: Vec<String> = store
+            .geno
             .sample_names
             .iter()
             .zip(pheno.pheno_mask.iter())
@@ -540,7 +535,6 @@ impl<'a> StaarPipeline<'a> {
             pheno_mask: pheno.pheno_mask,
             ancestry: pheno.ancestry,
             compact_samples,
-            genotype_result,
         })
     }
 
@@ -577,17 +571,14 @@ impl<'a> StaarPipeline<'a> {
         pheno: &PhenoStageOut,
         store: &GenoStoreResult,
     ) -> Result<NullModel, CohortError> {
-        let kinships = staar::kinship::load_kinship(
-            &self.config.kinship,
-            &pheno.compact_samples,
-            self.out,
-        )?;
+        let kinships =
+            staar::kinship::load_kinship(&self.config.kinship, &pheno.compact_samples, self.out)?;
         let groups = match self.config.kinship_groups.as_deref() {
             Some(col) => staar::kinship::load_groups(
                 &store.engine,
                 &self.config.phenotype,
                 col,
-                &pheno.genotype_result,
+                &store.geno,
                 &pheno.pheno_mask,
                 &self.config.column_map,
                 self.out,
@@ -599,13 +590,9 @@ impl<'a> StaarPipeline<'a> {
             NullModelKind::KinshipReml => {
                 staar::kinship::fit_reml(&pheno.y, &pheno.x, &kinships, &groups, None)?
             }
-            NullModelKind::KinshipPql => staar::kinship::fit_pql_glmm(
-                &pheno.y,
-                &pheno.x,
-                &kinships,
-                &groups,
-                self.out,
-            )?,
+            NullModelKind::KinshipPql => {
+                staar::kinship::fit_pql_glmm(&pheno.y, &pheno.x, &kinships, &groups, self.out)?
+            }
             _ => unreachable!("fit_kinship_null_model called with non-kinship kind"),
         };
         self.out.status(&format!(
@@ -643,7 +630,7 @@ impl<'a> StaarPipeline<'a> {
                 sumstats_dir.display()
             ))
         })?;
-        let cohort = self.engine.cohort(&self.config.cohort_id);
+        let cohort = self.cohort();
         let variants = load_rare_variants(&cohort, &store.manifest, self.config.maf_cutoff)?;
         let analysis = AnalysisVectors::from_null_model(null_model, &pheno.pheno_mask)?;
         let meta = staar::meta::StudyMeta {
@@ -711,16 +698,18 @@ impl<'a> StaarPipeline<'a> {
         self.out
             .status("Building score cache (all U/K, no MAF filter)...");
         std::fs::create_dir_all(&dir).map_err(|e| {
-            CohortError::Resource(format!("Cannot create score cache directory '{}': {e}", dir.display()))
+            CohortError::Resource(format!(
+                "Cannot create score cache directory '{}': {e}",
+                dir.display()
+            ))
         })?;
 
-        let cohort = self.engine.cohort(&self.config.cohort_id);
+        let cohort = self.cohort();
         for ci in &store.manifest.chromosomes {
             let chrom: Chromosome = ci.name.parse().map_err(|e: String| CohortError::Input(e))?;
             let view = cohort.chromosome(&chrom)?;
             score_cache::build_chromosome(
-                view.sparse_g()?,
-                view.index()?,
+                &view,
                 analysis,
                 &dir,
                 &ci.name,
@@ -734,15 +723,27 @@ impl<'a> StaarPipeline<'a> {
     fn stage_run_scoring(
         &mut self,
         store: &GenoStoreResult,
-        ctx: &ScoringContext,
+        analysis: &AnalysisVectors,
+        scoring_mode: ScoringMode,
+        cache_dir: &Path,
+        ancestry: Option<&AncestryInfo>,
+        trait_type: TraitType,
     ) -> Result<ScoringOutput, CohortError> {
+        let request = ScoringRequest {
+            mask_categories: &self.config.mask_categories,
+            maf_cutoff: self.config.maf_cutoff,
+            window_size: self.config.window_size,
+            scang_params: &self.config.scang_params,
+            mode: scoring_mode,
+            cache_dir,
+            ancestry,
+            spa_active: self.config.spa && trait_type == TraitType::Binary,
+        };
         let (results, individual_pvals) = scoring::run_score_tests(
-            self.engine,
-            &self.config.cohort_id,
+            &self.cohort(),
             &store.manifest,
-            &self.config,
-            &ctx.analysis,
-            ctx,
+            &request,
+            analysis,
             self.out,
         )?;
         Ok(ScoringOutput {
@@ -800,6 +801,14 @@ impl<'a> StaarPipeline<'a> {
             );
         }
     }
+
+    fn cohort(&self) -> CohortHandle<'_> {
+        self.engine.cohort(&self.config.cohort_id)
+    }
+
+    fn cohort_manifest_path(&self) -> PathBuf {
+        self.cohort().dir().join("manifest.json")
+    }
 }
 
 /// Walk the manifest's chromosomes and collect rare variants for output
@@ -820,6 +829,15 @@ fn load_rare_variants(
         }
     }
     Ok(all)
+}
+
+fn existing_cohort_manifest_path(engine: &Engine, config: &StaarConfig) -> Option<PathBuf> {
+    match config.cohort_source {
+        CohortSource::Existing => {
+            Some(engine.cohort(&config.cohort_id).dir().join("manifest.json"))
+        }
+        CohortSource::Fresh { .. } => None,
+    }
 }
 
 #[cfg(test)]
@@ -851,26 +869,25 @@ mod tests {
             kinship: Vec::new(),
             kinship_groups: None,
             known_loci: None,
-            emit_sumstats: false,
+            run_mode: RunMode::Analyze,
             rebuild_store: false,
             column_map: HashMap::new(),
             output_dir: PathBuf::from("/tmp/out"),
             cohort_id: CohortId::new("dummy"),
-            cohort_manifest_proxy: PathBuf::from(".cohort/cohorts/dummy/manifest.json"),
         }
     }
 
     #[test]
     fn run_mode_default_is_analyze() {
         let c = dummy_config();
-        assert_eq!(c.run_mode(), RunMode::Analyze);
+        assert_eq!(c.run_mode, RunMode::Analyze);
     }
 
     #[test]
     fn run_mode_emit_sumstats() {
         let mut c = dummy_config();
-        c.emit_sumstats = true;
-        assert_eq!(c.run_mode(), RunMode::EmitSumstats);
+        c.run_mode = RunMode::EmitSumstats;
+        assert_eq!(c.run_mode, RunMode::EmitSumstats);
     }
 
     #[test]
@@ -901,10 +918,19 @@ mod tests {
     fn null_model_kind_dispatch() {
         let mut c = dummy_config();
         assert_eq!(c.null_model_kind(TraitType::Continuous), NullModelKind::Glm);
-        assert_eq!(c.null_model_kind(TraitType::Binary), NullModelKind::Logistic);
+        assert_eq!(
+            c.null_model_kind(TraitType::Binary),
+            NullModelKind::Logistic
+        );
         c.kinship.push(PathBuf::from("/no/such/k.tsv"));
-        assert_eq!(c.null_model_kind(TraitType::Continuous), NullModelKind::KinshipReml);
-        assert_eq!(c.null_model_kind(TraitType::Binary), NullModelKind::KinshipPql);
+        assert_eq!(
+            c.null_model_kind(TraitType::Continuous),
+            NullModelKind::KinshipReml
+        );
+        assert_eq!(
+            c.null_model_kind(TraitType::Binary),
+            NullModelKind::KinshipPql
+        );
     }
 
     #[test]
@@ -914,17 +940,17 @@ mod tests {
         // them must change the digest. The exhaustive sort/byte-level
         // assertions live in run_manifest::tests::compute_config_hash_*.
         let c1 = dummy_config();
-        let h1 = c1.config_hash();
+        let h1 = c1.config_hash(None);
         let mut c2 = dummy_config();
         c2.maf_cutoff = 0.05;
-        assert_ne!(h1, c2.config_hash());
+        assert_ne!(h1, c2.config_hash(None));
         let mut c3 = dummy_config();
-        c3.emit_sumstats = true;
-        assert_ne!(h1, c3.config_hash());
+        c3.run_mode = RunMode::EmitSumstats;
+        assert_ne!(h1, c3.config_hash(None));
         let mut c4 = dummy_config();
         c4.covariates = vec!["sex".into(), "age".into()];
         // Covariate order doesn't matter (sorted before hashing).
-        assert_eq!(h1, c4.config_hash());
+        assert_eq!(h1, c4.config_hash(None));
     }
 
     #[test]
@@ -942,10 +968,10 @@ mod tests {
     #[test]
     fn new_run_manifest_uses_config_hash() {
         let c = dummy_config();
-        let m = c.new_run_manifest();
-        assert_eq!(m.run_mode, c.run_mode());
+        let m = c.new_run_manifest(None);
+        assert_eq!(m.run_mode, c.run_mode);
         assert_eq!(m.trait_name, c.trait_names[0]);
-        assert_eq!(m.config_hash, c.config_hash());
+        assert_eq!(m.config_hash, c.config_hash(None));
     }
 
     #[test]
@@ -959,7 +985,7 @@ mod tests {
         let mut config = dummy_config();
         config.output_dir = dir.path().to_path_buf();
 
-        let mut prior = config.new_run_manifest();
+        let mut prior = config.new_run_manifest(None);
         prior.begin(Stage::Validate);
         prior.complete(Stage::Validate);
         prior.begin(Stage::EnsureStore);
@@ -974,9 +1000,9 @@ mod tests {
         prior.write(&config.output_dir).unwrap();
 
         let probed = RunManifest::probe(&config.output_dir).expect("run.json should round-trip");
-        assert_eq!(probed.config_hash, config.config_hash());
+        assert_eq!(probed.config_hash, config.config_hash(None));
 
-        let decision = run_manifest::plan_resume(Some(probed), &config.config_hash());
+        let decision = run_manifest::plan_resume(Some(probed), &config.config_hash(None));
         let skippable = decision.skippable().to_vec();
         assert!(skippable.contains(&Stage::EnsureStore));
         assert!(skippable.contains(&Stage::EnsureScoreCache));
@@ -991,7 +1017,7 @@ mod tests {
         let mut config = dummy_config();
         config.output_dir = dir.path().to_path_buf();
 
-        let prior = config.new_run_manifest();
+        let prior = config.new_run_manifest(None);
         prior.write(&config.output_dir).unwrap();
 
         let mut config2 = dummy_config();
@@ -999,7 +1025,7 @@ mod tests {
         config2.maf_cutoff = 0.05;
 
         let probed = RunManifest::probe(&config2.output_dir).unwrap();
-        let decision = run_manifest::plan_resume(Some(probed), &config2.config_hash());
+        let decision = run_manifest::plan_resume(Some(probed), &config2.config_hash(None));
         match decision {
             ResumeDecision::Discarded(reason) => {
                 assert!(reason.contains("config hash"));

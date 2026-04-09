@@ -49,11 +49,44 @@ impl Store {
         &*self.backend
     }
 
+    pub fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
     /// Open a cohort handle by id. Lazy: does not read the manifest until
     /// a method on the returned handle is called.
     pub fn cohort(&self, id: &CohortId) -> CohortHandle<'_> {
         let dir = self.layout.cohort_dir(id);
         CohortHandle::new(self, id.clone(), dir)
+    }
+
+    /// Cohort ids that exist on disk under `cohorts_root/`. A directory
+    /// counts as a cohort only if it contains a `manifest.json`, so
+    /// half-built `.staging` dirs and stray files are ignored.
+    pub fn list_cohorts(&self) -> Result<Vec<CohortId>, CohortError> {
+        let root = self.layout.cohorts_root();
+        if !root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<CohortId> = Vec::new();
+        for entry in fs::read_dir(&root)
+            .map_err(|e| CohortError::Resource(format!("read {}: {e}", root.display())))?
+        {
+            let entry = entry
+                .map_err(|e| CohortError::Resource(format!("read {}: {e}", root.display())))?;
+            let p = entry.path();
+            if !p.is_dir() {
+                continue;
+            }
+            if !p.join("manifest.json").exists() {
+                continue;
+            }
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                out.push(CohortId::new(name));
+            }
+        }
+        out.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(out)
     }
 
     /// Build the annotation registry from `<store_root>/annotations/refs.toml`

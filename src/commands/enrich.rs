@@ -9,7 +9,7 @@ use crate::error::CohortError;
 use crate::output::Output;
 use crate::runtime::Engine;
 use crate::store::annotation::TissueDb;
-use crate::store::list::{parquet_row_count, AnnotatedSet};
+use crate::store::list::{parquet_row_count, VariantSet};
 
 pub fn build_config(
     input: PathBuf,
@@ -52,7 +52,7 @@ pub fn run_enrich(
         return emit_dry_run(engine, config, out);
     }
 
-    let annotated = AnnotatedSet::open(&config.input)?;
+    let annotated = VariantSet::open(&config.input)?;
     annotated.supports(&[Col::Vid])?;
     let registry = engine.annotation_registry()?;
     let tissue_db = registry.open_tissue("favor-tissue")?;
@@ -108,7 +108,7 @@ fn emit_dry_run(
     config: &EnrichConfig,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
-    let annotated = AnnotatedSet::open(&config.input)?;
+    let annotated = VariantSet::open(&config.input)?;
     let tissue_db = TissueDb::open(&engine.config().tissue_dir())?;
     let available_tables: Vec<&str> = tissue_db
         .available_tables()
@@ -166,7 +166,7 @@ fn resolve_tissue(
 }
 
 fn run_enrichment(
-    annotated: &AnnotatedSet,
+    annotated: &VariantSet,
     tissue_db: &TissueDb,
     resolved_tissues: &[String],
     engine: &DfEngine,

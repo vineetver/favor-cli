@@ -63,6 +63,18 @@ fn run(
             memory_budget,
         } => setup::setup(out, root, tier, packs, environment, memory_budget),
         Command::Data { action } => data::transfer::run(action, out),
+        Command::Annotation { action } => match action {
+            cli::AnnotationAction::Attach { name, kind, path } => {
+                let engine = runtime::Engine::open_unconfigured(store_path)?;
+                commands::annotation::attach(&engine, &name, kind, path, out)
+            }
+        },
+        Command::Store { action } => match action {
+            cli::StoreAction::Gc => {
+                let engine = runtime::Engine::open(store_path)?;
+                commands::store::gc(&engine, out)
+            }
+        },
         Command::Uninstall => setup::uninstall(out),
 
         Command::Ingest {

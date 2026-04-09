@@ -34,8 +34,7 @@ use crate::output::Output;
 use crate::staar::carrier::sparse_score;
 use crate::staar::carrier::AnalysisVectors;
 use crate::store::cohort::handle::ChromosomeView;
-use crate::store::cohort::sparse_g::SparseG;
-use crate::store::cohort::variants::VariantIndex;
+use crate::store::cohort::types::{as_u32_slice, VariantVcf};
 use crate::store::cohort::CohortManifest;
 
 const MAGIC: &[u8; 8] = b"FVSCORE2";
@@ -294,13 +293,14 @@ struct GeneComputed {
 /// Iterates all genes via VariantIndex (membership.parquet). Carrier data
 /// loaded from SparseG with block prefetching. O(MAC × k) per gene.
 pub fn build_chromosome(
-    sparse_g: &SparseG,
-    variant_index: &VariantIndex,
+    view: &ChromosomeView<'_>,
     analysis: &AnalysisVectors,
     out_dir: &Path,
     chrom: &str,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
+    let variant_index = view.index()?;
+    let sparse_g = view.sparse_g()?;
     let n_variants = variant_index.len();
 
     let gene_names: Vec<String> = variant_index.gene_names().map(|s| s.to_string()).collect();
@@ -308,16 +308,16 @@ pub fn build_chromosome(
     let mut gene_computed: Vec<GeneComputed> = gene_names
         .par_iter()
         .filter_map(|gene_name| {
-            let gene_vcfs = variant_index.gene_variant_vcfs(gene_name);
+            let gene_vcfs = view.gene_variants(gene_name).ok()?;
             let m = gene_vcfs.len();
             if m == 0 {
                 return None;
             }
-            let carriers = sparse_g.load_variants(gene_vcfs);
-            let variant_offsets: Vec<u32> = gene_vcfs.to_vec();
+            let carriers = sparse_g.load_variants(as_u32_slice(&gene_vcfs));
+            let variant_offsets: Vec<u32> = gene_vcfs.iter().map(|VariantVcf(v)| *v).collect();
             let variant_vids: Vec<Box<str>> = gene_vcfs
                 .iter()
-                .map(|&v| variant_index.get(v).vid.clone())
+                .map(|VariantVcf(v)| variant_index.get(*v).vid.clone())
                 .collect();
             let (u_values, k_flat) = if m > MAX_K_VARIANTS {
                 (sparse_score::compute_u_only(&carriers, analysis), Vec::new())

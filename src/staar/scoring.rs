@@ -17,11 +17,9 @@ use rayon::prelude::*;
 
 use crate::error::CohortError;
 use crate::output::Output;
-use crate::runtime::Engine;
 use crate::staar::carrier::sparse_score;
 use crate::staar::carrier::AnalysisVectors;
 use crate::staar::masks::{self, MaskGroup};
-use crate::staar::pipeline::{ScoringContext, StaarConfig};
 use crate::staar::score;
 use crate::staar::{self, GeneResult, MaskCategory, MaskType, ScoringMode};
 use crate::store::cache::score_cache::{self, ChromScoreCache, GeneKBlock};
@@ -29,12 +27,26 @@ use crate::store::cohort::variants::{CarrierList, VariantIndexEntry};
 use crate::store::cohort::{ChromosomeView, CohortHandle, CohortManifest};
 use crate::types::{AnnotatedVariant, Chromosome};
 
+use super::ancestry::AncestryInfo;
+use super::masks::ScangParams;
+
 /// Function-pointer mask predicate over an `AnnotatedVariant`.
 type MaskPredicate = fn(&AnnotatedVariant) -> bool;
 
 /// Per-mask result vectors. Order matches the predicate vector built by
 /// `MaskPlan::build`.
 pub type ResultSet = Vec<(MaskType, Vec<GeneResult>)>;
+
+pub struct ScoringRequest<'a> {
+    pub mask_categories: &'a [MaskCategory],
+    pub maf_cutoff: f64,
+    pub window_size: u32,
+    pub scang_params: &'a ScangParams,
+    pub mode: ScoringMode,
+    pub cache_dir: &'a Path,
+    pub ancestry: Option<&'a AncestryInfo>,
+    pub spa_active: bool,
+}
 
 /// Compiled mask plan: gene predicates + window/scang flags + result-vector
 /// indices for window outputs.
@@ -129,35 +141,26 @@ impl<'v> ChromCtx<'v> {
 /// Public entry point: score every chromosome in `manifest` and return
 /// per-mask gene/window result vectors plus individual p-values.
 pub fn run_score_tests(
-    engine: &Engine,
-    cohort_id: &crate::store::cohort::CohortId,
+    cohort: &CohortHandle<'_>,
     manifest: &CohortManifest,
-    config: &StaarConfig,
+    request: &ScoringRequest<'_>,
     analysis: &AnalysisVectors,
-    ctx: &ScoringContext,
     out: &dyn Output,
 ) -> Result<(ResultSet, Vec<(usize, f64)>), CohortError> {
     out.status("Running score tests (carrier-indexed sparse)...");
 
-    let mut plan = MaskPlan::build(&config.mask_categories, out);
+    let mut plan = MaskPlan::build(request.mask_categories, out);
 
     // `score_one_window` always takes the cached-U/K path; SPA on windows
     // isn't wired yet. Warn once so --spa users know their window p-values
     // aren't SPA-corrected.
-    if ctx.scoring_mode == ScoringMode::Spa && plan.has_window_work() {
-        out.warn(
-            "--spa: window scoring uses non-SPA p-values; SPA only applies to gene masks",
-        );
+    if request.mode == ScoringMode::Spa && plan.has_window_work() {
+        out.warn("--spa: window scoring uses non-SPA p-values; SPA only applies to gene masks");
     }
 
-    let cohort = engine.cohort(cohort_id);
-
     for ci in &manifest.chromosomes {
-        let chrom: Chromosome = ci
-            .name
-            .parse()
-            .map_err(|e: String| CohortError::Input(e))?;
-        let chrom_ctx = ChromCtx::open(&cohort, chrom, &ctx.cache_dir)?;
+        let chrom: Chromosome = ci.name.parse().map_err(|e: String| CohortError::Input(e))?;
+        let chrom_ctx = ChromCtx::open(cohort, chrom, request.cache_dir)?;
         let n_variants = chrom_ctx.view.index()?.len();
         let n_genes = chrom_ctx.view.index()?.n_genes();
         out.status(&format!(
@@ -169,16 +172,15 @@ pub fn run_score_tests(
             score_chrom_genes(
                 &chrom_ctx,
                 &plan.gene_predicates,
-                config,
+                request,
                 analysis,
-                ctx,
                 &mut plan.results,
                 out,
             )?;
         }
 
         if plan.has_window_work() {
-            score_chrom_windows(&chrom_ctx, config, analysis, ctx, &mut plan, out);
+            score_chrom_windows(&chrom_ctx, request, analysis, &mut plan, out);
         }
     }
 
@@ -210,35 +212,30 @@ struct GeneInputs {
 fn score_chrom_genes(
     chrom_ctx: &ChromCtx<'_>,
     mask_predicates: &[(MaskType, MaskPredicate)],
-    config: &StaarConfig,
+    request: &ScoringRequest<'_>,
     analysis: &AnalysisVectors,
-    ctx: &ScoringContext,
     results: &mut ResultSet,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
     let gene_names: Vec<&String> = chrom_ctx.cache.gene_blocks.keys().collect();
-    let mode = ctx.scoring_mode;
-    let maf_cutoff = config.maf_cutoff;
+    let mode = request.mode;
+    let maf_cutoff = request.maf_cutoff;
 
     let per_gene: Vec<Vec<(usize, GeneResult)>> = gene_names
         .par_iter()
-        .map(|gene_name| -> Result<Option<Vec<(usize, GeneResult)>>, CohortError> {
-            let Some(block) = chrom_ctx.cache.gene_blocks.get(*gene_name) else {
-                return Ok(None);
-            };
-            let Some(inputs) = compile_gene_inputs(
-                gene_name,
-                block,
-                chrom_ctx,
-                analysis,
-                maf_cutoff,
-                mode,
-            )?
-            else {
-                return Ok(None);
-            };
-            score_gene_masks(&inputs, mask_predicates, chrom_ctx, analysis, ctx)
-        })
+        .map(
+            |gene_name| -> Result<Option<Vec<(usize, GeneResult)>>, CohortError> {
+                let Some(block) = chrom_ctx.cache.gene_blocks.get(*gene_name) else {
+                    return Ok(None);
+                };
+                let Some(inputs) =
+                    compile_gene_inputs(gene_name, block, chrom_ctx, analysis, maf_cutoff, mode)?
+                else {
+                    return Ok(None);
+                };
+                score_gene_masks(&inputs, mask_predicates, chrom_ctx, analysis, request)
+            },
+        )
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -351,7 +348,7 @@ fn score_gene_masks(
     mask_predicates: &[(MaskType, MaskPredicate)],
     chrom_ctx: &ChromCtx<'_>,
     analysis: &AnalysisVectors,
-    ctx: &ScoringContext,
+    request: &ScoringRequest<'_>,
 ) -> Result<Option<Vec<(usize, GeneResult)>>, CohortError> {
     let all_entries = chrom_ctx.view.index()?.all_entries();
     let n_vcf = analysis.n_vcf_total;
@@ -377,7 +374,7 @@ fn score_gene_masks(
             .collect();
         let ann_matrix = build_annotation_matrix(&inputs.gene_vcfs, &qualifying, all_entries);
 
-        let staar = run_one_test(ctx, &qualifying, &mafs, &ann_matrix, inputs, analysis);
+        let staar = run_one_test(request, &qualifying, &mafs, &ann_matrix, inputs, analysis);
 
         let cmac: u32 = mafs
             .iter()
@@ -430,30 +427,39 @@ fn build_annotation_matrix(
 /// carriers; both are guaranteed to have them because `compile_gene_inputs`
 /// loaded carriers when `mode != Standard`.
 fn run_one_test(
-    ctx: &ScoringContext,
+    request: &ScoringRequest<'_>,
     qualifying: &[usize],
     mafs: &[f64],
     ann_matrix: &[Vec<f64>],
     inputs: &GeneInputs,
     analysis: &AnalysisVectors,
 ) -> score::StaarResult {
-    match ctx.scoring_mode {
+    match request.mode {
         ScoringMode::Standard => {
-            let (u_sub, k_sub) = sparse_score::slice_sumstats(&inputs.u_full, &inputs.k_full, qualifying);
+            let (u_sub, k_sub) =
+                sparse_score::slice_sumstats(&inputs.u_full, &inputs.k_full, qualifying);
             score::run_staar_from_sumstats(&u_sub, &k_sub, ann_matrix, mafs, analysis.n_pheno)
         }
         ScoringMode::Spa => {
             let carriers = inputs.carriers.as_ref().expect("Spa requires carriers");
-            let subset: Vec<CarrierList> = qualifying.iter().map(|&i| carriers[i].clone()).collect();
+            let subset: Vec<CarrierList> =
+                qualifying.iter().map(|&i| carriers[i].clone()).collect();
             sparse_score::run_staar_sparse(&subset, analysis, ann_matrix, mafs, true)
         }
         ScoringMode::AiStaar => {
-            let ai = ctx.ancestry.as_ref().expect("AiStaar requires ancestry info");
+            let ai = request.ancestry.expect("AiStaar requires ancestry info");
             let carriers = inputs.carriers.as_ref().expect("AiStaar requires carriers");
-            let subset: Vec<CarrierList> = qualifying.iter().map(|&i| carriers[i].clone()).collect();
+            let subset: Vec<CarrierList> =
+                qualifying.iter().map(|&i| carriers[i].clone()).collect();
             // `--ancestry-col --spa --binary-trait` composes both: SPA fires
             // inside the per-population kernel, AI-STAAR Cauchy-combines.
-            staar::ancestry::run_ai_staar_gene(&subset, analysis, ai, ann_matrix, ctx.spa_active)
+            staar::ancestry::run_ai_staar_gene(
+                &subset,
+                analysis,
+                ai,
+                ann_matrix,
+                request.spa_active,
+            )
         }
     }
 }
@@ -462,18 +468,20 @@ fn run_one_test(
 /// the result vectors.
 fn score_chrom_windows(
     chrom_ctx: &ChromCtx<'_>,
-    config: &StaarConfig,
+    request: &ScoringRequest<'_>,
     analysis: &AnalysisVectors,
-    ctx: &ScoringContext,
     plan: &mut MaskPlan,
     out: &dyn Output,
 ) {
-    let maf_cutoff = config.maf_cutoff;
+    let maf_cutoff = request.maf_cutoff;
 
     let variant_index = match chrom_ctx.view.index() {
         Ok(i) => i,
         Err(e) => {
-            out.warn(&format!("    skipping windows on chr{}: {e}", chrom_ctx.name));
+            out.warn(&format!(
+                "    skipping windows on chr{}: {e}",
+                chrom_ctx.name
+            ));
             return;
         }
     };
@@ -488,7 +496,15 @@ fn score_chrom_windows(
     let n_vcf = analysis.n_vcf_total;
 
     let score_window = |g: &MaskGroup| -> Option<GeneResult> {
-        score_one_window(g, &chrom_variants, &global_indices, chrom_ctx, analysis, ctx, n_vcf)
+        score_one_window(
+            g,
+            &chrom_variants,
+            &global_indices,
+            chrom_ctx,
+            analysis,
+            request,
+            n_vcf,
+        )
     };
 
     if let Some(slot) = plan.window_slot {
@@ -496,8 +512,8 @@ fn score_chrom_windows(
             &chrom_variants,
             &chrom_indices,
             chrom_ctx.chrom,
-            config.window_size,
-            config.window_size / 2,
+            request.window_size,
+            request.window_size / 2,
         );
         if !groups.is_empty() {
             let r: Vec<GeneResult> = groups.iter().filter_map(score_window).collect();
@@ -513,7 +529,7 @@ fn score_chrom_windows(
             &chrom_variants,
             &chrom_indices,
             chrom_ctx.chrom,
-            &config.scang_params,
+            request.scang_params,
         );
         for (wsize, groups) in &scang_all {
             let r: Vec<GeneResult> = groups.iter().filter_map(score_window).collect();
@@ -531,7 +547,7 @@ fn score_one_window(
     global_indices: &[usize],
     chrom_ctx: &ChromCtx<'_>,
     analysis: &AnalysisVectors,
-    ctx: &ScoringContext,
+    request: &ScoringRequest<'_>,
     n_vcf: usize,
 ) -> Option<GeneResult> {
     let m = group.variant_indices.len();
@@ -559,12 +575,9 @@ fn score_one_window(
         })
         .collect();
 
-    let staar = match ctx.scoring_mode {
+    let staar = match request.mode {
         ScoringMode::AiStaar => {
-            let ai = ctx
-                .ancestry
-                .as_ref()
-                .expect("AiStaar requires ancestry info");
+            let ai = request.ancestry.expect("AiStaar requires ancestry info");
             let win_vcfs: Vec<crate::store::cohort::types::VariantVcf> = win_globals
                 .iter()
                 .map(|&i| crate::store::cohort::types::VariantVcf(i as u32))
@@ -602,4 +615,3 @@ fn score_one_window(
         burden_se: f64::NAN,
     })
 }
-

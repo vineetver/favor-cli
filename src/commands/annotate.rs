@@ -96,7 +96,7 @@ pub fn run_annotate(
 
     out.status(&format!(
         "Input: {} variants, join key: {:?}",
-        input.count(),
+        input.variant_count(),
         input.join_key()
     ));
     out.status(&format!(
@@ -122,7 +122,7 @@ fn emit_dry_run(config: &AnnotateConfig, out: &dyn Output) -> Result<(), CohortE
         command: "annotate".into(),
         inputs: json!({
             "file": config.input.to_string_lossy(),
-            "variant_count": input_vs.count(),
+            "variant_count": input_vs.variant_count(),
             "join_key": format!("{:?}", input_vs.join_key()),
             "tier": config.tier.as_str(),
         }),
@@ -147,7 +147,7 @@ fn validate_input(input: &VariantSet) -> Result<(), CohortError> {
             ColumnContract::format_missing(&missing)
         )));
     }
-    if input.count() == 0 {
+    if input.variant_count() == 0 {
         return Err(CohortError::Input(format!(
             "Input '{}' has 0 variants. Check that `cohort ingest` completed successfully.",
             input.root().display()
@@ -170,7 +170,7 @@ fn annotate_join(
     out: &dyn Output,
 ) -> Result<AnnotateResult, CohortError> {
     let join_key = input.join_key();
-    let input_count = input.count() as i64;
+    let input_count = input.variant_count() as i64;
 
     let input_struct_cols: Vec<&str> = input
         .columns()
@@ -202,7 +202,7 @@ fn annotate_join(
     }
 
     let output = writer.finish()?;
-    let output_count = output.count() as i64;
+    let output_count = output.variant_count() as i64;
     Ok(AnnotateResult {
         output,
         input_count,

@@ -8,9 +8,10 @@ use crate::output::Output;
 use crate::runtime::Engine;
 use crate::staar;
 use crate::staar::masks::ScangParams;
+use crate::staar::pipeline::{CohortSource, StaarConfig, StaarPipeline};
 #[cfg(test)]
 use crate::staar::MaskCategory;
-use crate::staar::pipeline::{CohortSource, StaarConfig, StaarPipeline};
+use crate::staar::RunMode;
 use crate::store::cohort::CohortId;
 use crate::store::list::VariantSet;
 
@@ -168,11 +169,6 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
 
     let column_map = parse_column_map(&args.column_map)?;
 
-    let cohort_manifest_proxy = PathBuf::from(format!(
-        ".cohort/cohorts/{}/manifest.json",
-        cohort_id.as_str()
-    ));
-
     Ok(StaarConfig {
         cohort_source,
         phenotype: args.phenotype,
@@ -194,22 +190,29 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
         kinship: args.kinship,
         kinship_groups: blank_to_none(args.kinship_groups),
         known_loci: args.known_loci,
-        emit_sumstats: args.emit_sumstats,
+        run_mode: if args.emit_sumstats {
+            RunMode::EmitSumstats
+        } else {
+            RunMode::Analyze
+        },
         rebuild_store: args.rebuild_store,
         column_map,
         output_dir,
         cohort_id,
-        cohort_manifest_proxy,
     })
 }
 
 use super::derive_cohort_id;
 
-fn parse_column_map(entries: &[String]) -> Result<std::collections::HashMap<String, String>, CohortError> {
+fn parse_column_map(
+    entries: &[String],
+) -> Result<std::collections::HashMap<String, String>, CohortError> {
     let mut map = std::collections::HashMap::new();
     for entry in entries {
         let (k, v) = entry.split_once('=').ok_or_else(|| {
-            CohortError::Input(format!("Invalid --column-map entry '{entry}'. Expected key=value."))
+            CohortError::Input(format!(
+                "Invalid --column-map entry '{entry}'. Expected key=value."
+            ))
         })?;
         map.insert(k.trim().to_string(), v.trim().to_string());
     }
@@ -258,11 +261,9 @@ fn emit_dry_run(
                         manifest_path.display()
                     ))
                 })?;
-                let m: crate::store::cohort::CohortManifest = serde_json::from_str(&txt)
-                    .map_err(|e| {
-                        CohortError::DataMissing(format!(
-                            "Cohort manifest unparseable: {e}"
-                        ))
+                let m: crate::store::cohort::CohortManifest =
+                    serde_json::from_str(&txt).map_err(|e| {
+                        CohortError::DataMissing(format!("Cohort manifest unparseable: {e}"))
                     })?;
                 let inputs = json!({
                     "cohort_id": config.cohort_id.as_str(),
@@ -272,7 +273,7 @@ fn emit_dry_run(
                     "trait": config.trait_names[0],
                     "maf_cutoff": config.maf_cutoff,
                     "cache_status": "hit",
-                    "run_mode": format!("{:?}", config.run_mode()),
+                    "run_mode": format!("{:?}", config.run_mode),
                 });
                 (
                     "hit",
@@ -328,7 +329,7 @@ fn emit_dry_run(
                     "trait": config.trait_names[0],
                     "maf_cutoff": config.maf_cutoff,
                     "cache_status": status,
-                    "run_mode": format!("{:?}", config.run_mode()),
+                    "run_mode": format!("{:?}", config.run_mode),
                 });
                 (status, store_info, mem, n_samples, est_rare, inputs)
             }
@@ -388,7 +389,10 @@ fn parquet_row_count(path: &std::path::Path) -> Result<i64, String> {
     // without scanning all part files, so we report None and let the caller
     // fall back to a safe default.
     if path.is_dir() {
-        return Err(format!("{} is a directory; row count not estimated", path.display()));
+        return Err(format!(
+            "{} is a directory; row count not estimated",
+            path.display()
+        ));
     }
     let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let reader = parquet::file::reader::SerializedFileReader::new(file)

@@ -71,7 +71,7 @@ impl VariantSet {
         chroms
     }
 
-    pub fn count(&self) -> u64 {
+    pub fn variant_count(&self) -> u64 {
         self.meta.variant_count
     }
 
@@ -86,19 +86,41 @@ impl VariantSet {
         &self.root
     }
 
-    pub fn kind(&self) -> Option<&VariantSetKind> {
-        self.meta.kind.as_ref()
+    pub fn tier(&self) -> Option<Tier> {
+        match &self.meta.kind {
+            Some(VariantSetKind::Annotated { tier }) => Some(*tier),
+            _ => None,
+        }
     }
 
-    pub fn require_annotated(&self) -> Result<(), CohortError> {
+    pub fn require_annotated(&self) -> Result<Tier, CohortError> {
         match &self.meta.kind {
-            Some(VariantSetKind::Annotated { .. }) => Ok(()),
+            Some(VariantSetKind::Annotated { tier }) => Ok(*tier),
             Some(VariantSetKind::Ingested) => Err(CohortError::Input(format!(
                 "{} is an ingested variant set, not annotated. Run `cohort annotate` first.",
                 self.root.display()
             ))),
-            None => Ok(()),
+            // Legacy meta predates the kind tag; preserve AnnotatedSet's old default to Full.
+            None => Ok(Tier::Full),
         }
+    }
+
+    pub fn supports(&self, required: &[Col]) -> Result<Tier, CohortError> {
+        let tier = self.require_annotated()?;
+        for &col in required {
+            if !tier.has(col) {
+                return Err(CohortError::Input(format!(
+                    "Column '{}' requires {} tier but '{}' was annotated \
+                     with {} tier.\nRe-annotate with: cohort annotate {} --full",
+                    col.as_str(),
+                    Tier::required_for(&[col]),
+                    self.root.display(),
+                    tier,
+                    self.root.display(),
+                )));
+            }
+        }
+        Ok(tier)
     }
 }
 
@@ -292,77 +314,3 @@ pub fn parquet_column_names(path: &Path) -> Result<Vec<String>, CohortError> {
         .collect())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnnotatedSetMeta {
-    pub source: String,
-    pub tier: Tier,
-    pub match_rate: f64,
-    pub variant_count: u64,
-    pub chromosomes: Vec<String>,
-    pub columns: Vec<String>,
-}
-
-pub struct AnnotatedSet {
-    root: PathBuf,
-    meta: AnnotatedSetMeta,
-}
-
-impl AnnotatedSet {
-    pub fn open(path: &Path) -> Result<Self, CohortError> {
-        let vs = VariantSet::open(path)?;
-        let tier = match vs.kind() {
-            Some(VariantSetKind::Annotated { tier }) => *tier,
-            Some(VariantSetKind::Ingested) => {
-                return Err(CohortError::Input(format!(
-                    "'{}' is an ingested variant set, not annotated. \
-                     Run `cohort annotate` first.",
-                    path.display()
-                )));
-            }
-            None => Tier::Full,
-        };
-        let chromosomes = vs
-            .chromosomes()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
-        Ok(Self {
-            root: path.to_path_buf(),
-            meta: AnnotatedSetMeta {
-                source: path.display().to_string(),
-                tier,
-                match_rate: 1.0,
-                variant_count: vs.count(),
-                chromosomes,
-                columns: vs.columns().to_vec(),
-            },
-        })
-    }
-
-    pub fn tier(&self) -> Tier {
-        self.meta.tier
-    }
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-    pub fn variant_count(&self) -> u64 {
-        self.meta.variant_count
-    }
-
-    /// Validate that this annotated set supports the given pipeline columns.
-    pub fn supports(&self, required: &[Col]) -> Result<(), CohortError> {
-        for &col in required {
-            if !self.tier().has(col) {
-                return Err(CohortError::Input(format!(
-                    "Column '{}' requires {} tier but this data was annotated \
-                     with {} tier.\nRe-annotate with: cohort annotate {} --full",
-                    col.as_str(),
-                    Tier::required_for(&[col]),
-                    self.tier(),
-                    self.meta.source,
-                )));
-            }
-        }
-        Ok(())
-    }
-}

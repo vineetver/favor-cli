@@ -84,6 +84,18 @@ pub enum Command {
         action: DataAction,
     },
 
+    /// Manage attached annotation databases (refs.toml)
+    Annotation {
+        #[command(subcommand)]
+        action: AnnotationAction,
+    },
+
+    /// Cohort store maintenance
+    Store {
+        #[command(subcommand)]
+        action: StoreAction,
+    },
+
     /// Ingest variants: auto-detect format, normalize, output parquet.
     /// For a multi-sample VCF (biobank dosages, e.g. UKB/TOPMed/All of Us)
     /// pass `--annotations <annotated-set>` and the cohort genotype store is
@@ -369,4 +381,34 @@ pub enum DataAction {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum AnnotationAction {
+    /// Attach an external annotation database to refs.toml
+    Attach {
+        /// Alias to register (e.g. "ukb-base", "favor-full-2024")
+        name: String,
+
+        /// Annotation kind: favor-base, favor-full, or tissue
+        #[arg(long)]
+        kind: AttachKind,
+
+        /// Path to the annotation directory
+        #[arg(long)]
+        path: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AttachKind {
+    FavorBase,
+    FavorFull,
+    Tissue,
+}
+
+#[derive(Subcommand)]
+pub enum StoreAction {
+    /// Garbage-collect orphaned cohort caches
+    Gc,
 }

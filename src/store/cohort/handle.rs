@@ -18,7 +18,7 @@ use crate::store::Store;
 use crate::types::Chromosome;
 
 use super::sparse_g::SparseG;
-use super::types::{as_u32_slice, CarrierBatch, VariantVcf};
+use super::types::{as_u32_slice, from_u32_slice, CarrierBatch, VariantVcf};
 use super::variants::VariantIndex;
 use super::{
     build, describe_miss, probe as cohort_probe, read_sample_names_at, run_annotation_join,
@@ -131,11 +131,13 @@ impl<'a> CohortHandle<'a> {
         let sample_names = read_sample_names_at(&self.dir)?;
         let df = DfEngine::new(engine.resources())?;
         Ok(GenoStoreResult {
-            sample_names,
-            store_dir: self.dir.clone(),
+            geno: crate::staar::genotype::GenotypeResult {
+                sample_names,
+                output_dir: self.dir.clone(),
+            },
             manifest,
             engine: df,
-            geno_output_dir: None,
+            store_dir: self.dir.clone(),
         })
     }
 
@@ -166,11 +168,13 @@ impl<'a> CohortHandle<'a> {
             let df = DfEngine::new(res)?;
 
             return Ok(GenoStoreResult {
-                sample_names,
-                store_dir: probe_result.store_dir,
+                geno: crate::staar::genotype::GenotypeResult {
+                    sample_names,
+                    output_dir: probe_result.store_dir.clone(),
+                },
                 manifest,
                 engine: df,
-                geno_output_dir: None,
+                store_dir: probe_result.store_dir,
             });
         }
 
@@ -223,11 +227,10 @@ impl<'a> CohortHandle<'a> {
         let manifest = build(&df, &geno, &self.dir, genotypes, annotations, out)?;
 
         Ok(GenoStoreResult {
-            sample_names: geno.sample_names.clone(),
-            store_dir: self.dir.clone(),
+            geno,
             manifest,
             engine: df,
-            geno_output_dir: Some(geno.output_dir),
+            store_dir: self.dir.clone(),
         })
     }
 }
@@ -276,5 +279,12 @@ impl<'a> ChromosomeView<'a> {
         );
         let entries = self.sparse_g()?.load_variants(as_u32_slice(vcfs));
         Ok(CarrierBatch { entries })
+    }
+
+    /// Variants assigned to `gene` on this chromosome, in dense
+    /// `VariantVcf` order. Empty when the gene is not in the membership
+    /// table.
+    pub fn gene_variants(&self, gene: &str) -> Result<Vec<VariantVcf>, CohortError> {
+        Ok(from_u32_slice(self.index()?.gene_variant_vcfs(gene)).to_vec())
     }
 }
