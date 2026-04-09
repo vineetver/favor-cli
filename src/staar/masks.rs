@@ -148,7 +148,7 @@ pub fn build_masks_from_registry(
                     })
                 })
                 .collect();
-            (mask_type.clone(), groups)
+            (*mask_type, groups)
         })
         .collect()
 }
