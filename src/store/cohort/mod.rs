@@ -491,12 +491,14 @@ impl BuildLock {
                 CohortError::Resource(format!("create {}: {e}", parent.display()))
             })?;
         }
-        let file = std::fs::OpenOptions::new()
+        let _file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(false)
             .open(path)
             .map_err(|e| CohortError::Resource(format!("open lock {}: {e}", path.display())))?;
+        #[cfg(unix)]
+        let file = _file;
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;

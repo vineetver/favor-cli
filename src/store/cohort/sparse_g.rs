@@ -2,8 +2,6 @@
 
 use std::path::Path;
 
-use memmap2::Advice;
-
 use super::encoding::*;
 use super::variants::{CarrierEntry, CarrierList};
 use crate::error::CohortError;
@@ -48,7 +46,8 @@ impl SparseG {
         // evicts ones we just used. MADV_RANDOM turns readahead off; the
         // kernel now only pages in what we actually read. Best-effort:
         // `advise` is a hint, ignored on unsupported kernels.
-        mmap.advise(Advice::Random);
+        #[cfg(unix)]
+        mmap.advise(memmap2::Advice::Random);
 
         Ok(Self {
             mmap,

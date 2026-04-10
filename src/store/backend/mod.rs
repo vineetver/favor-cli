@@ -7,7 +7,9 @@ use std::ops::Deref;
 use std::path::Path;
 
 use arrow::record_batch::RecordBatchReader;
-use memmap2::{Advice, Mmap};
+#[cfg(unix)]
+use memmap2::Advice;
+use memmap2::Mmap;
 
 use crate::error::CohortError;
 
@@ -38,6 +40,7 @@ impl MappedBytes {
     /// — the scoring loop jumps to one variant, reads its carriers, and
     /// jumps to another, so sequential prefetch evicts pages we will
     /// touch again soon.
+    #[cfg(unix)]
     pub fn advise(&self, advice: Advice) {
         let _ = self.inner.advise(advice);
     }
