@@ -86,13 +86,6 @@ impl VariantSet {
         &self.root
     }
 
-    pub fn tier(&self) -> Option<Tier> {
-        match &self.meta.kind {
-            Some(VariantSetKind::Annotated { tier }) => Some(*tier),
-            _ => None,
-        }
-    }
-
     pub fn require_annotated(&self) -> Result<Tier, CohortError> {
         match &self.meta.kind {
             Some(VariantSetKind::Annotated { tier }) => Ok(*tier),
