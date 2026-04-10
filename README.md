@@ -103,7 +103,7 @@ See [Setup guide](docs/setup.md) for detailed configuration, pack selection, HPC
 ## Docs
 
 - **[Setup guide](docs/setup.md)** - installation, configuration, data management, HPC best practices
-- [Storage engine](docs/storage.md) - store format and migration status
+- [Genotype store](docs/storage.md) - on-disk format for cohort genotype data
 - [Validation](docs/validation.md) - statistical accuracy vs R reference
 - [Performance](docs/performance.md) - benchmarks and optimization roadmap
 - [Agent reference](AGENTS.md) - machine interface for LLM agents
