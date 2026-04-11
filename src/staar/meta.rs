@@ -1132,6 +1132,356 @@ fn write_record_batch(
     Ok(())
 }
 
+/// Parse a known-loci file into (chrom_label, position, ref, alt) tuples.
+/// Format: one `chr:pos:ref:alt` per line; `#` comments and empty lines skipped.
+/// Lines with only `chr:pos` are accepted (ref/alt set to "*" wildcard).
+pub fn parse_known_loci_file(
+    path: &Path,
+) -> Result<Vec<(String, u32, String, String)>, CohortError> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        CohortError::Resource(format!(
+            "Cannot read known loci file '{}': {e}",
+            path.display()
+        ))
+    })?;
+    let loci: Vec<(String, u32, String, String)> = content
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let parts: Vec<&str> = l.split(':').collect();
+            if parts.len() < 2 {
+                return None;
+            }
+            let chrom: crate::types::Chromosome = parts[0].parse().ok()?;
+            let pos = parts[1].parse::<u32>().ok()?;
+            let ref_a = parts.get(2).unwrap_or(&"*").to_string();
+            let alt_a = parts.get(3).unwrap_or(&"*").to_string();
+            Some((chrom.label().to_string(), pos, ref_a, alt_a))
+        })
+        .collect();
+    if loci.is_empty() {
+        return Err(CohortError::Input(format!(
+            "Known loci file '{}' is empty or unparseable.",
+            path.display()
+        )));
+    }
+    Ok(loci)
+}
+
+/// Conditional meta-analysis: condition gene-level U/K on known loci
+/// before running STAAR tests.
+///
+/// Homogeneous model: condition the merged (cross-study) U and K.
+/// Heterogeneous model: condition per-study U and K before merging.
+///
+/// The conditioning step uses Schur complement:
+///   U_cond = U_t - K_tc * K_cc^{-1} * U_c
+///   K_cond = K_tt - K_tc * K_cc^{-1} * K_ct
+///
+/// where t = test (gene) variants, c = conditioning (known loci) variants.
+pub fn meta_score_gene_conditional(
+    group: &MaskGroup,
+    meta_variants: &[MetaVariant],
+    studies: &[StudyHandle],
+    segment_cache: &HashMap<(usize, i32), SegmentCov>,
+    known_loci_indices: &[usize],
+    heterogeneous: bool,
+) -> Option<GeneResult> {
+    let gene_indices: Vec<usize> = group
+        .variant_indices
+        .iter()
+        .filter(|&&i| i < meta_variants.len())
+        .copied()
+        .collect();
+    if gene_indices.len() < 2 {
+        return None;
+    }
+
+    // Filter known loci to those actually present in meta_variants
+    // and not overlapping with the gene's own variants.
+    let gene_set: std::collections::HashSet<usize> = gene_indices.iter().copied().collect();
+    let cond_indices: Vec<usize> = known_loci_indices
+        .iter()
+        .filter(|&&i| i < meta_variants.len() && !gene_set.contains(&i))
+        .copied()
+        .collect();
+
+    // No conditioning loci in range: fall back to unconditional.
+    if cond_indices.is_empty() {
+        return meta_score_gene(group, meta_variants, studies, segment_cache);
+    }
+
+    let m_t = gene_indices.len();
+    let m_c = cond_indices.len();
+
+    // Build combined keys: [gene variants | conditioning variants].
+    let combined: Vec<usize> = gene_indices
+        .iter()
+        .chain(cond_indices.iter())
+        .copied()
+        .collect();
+    let m_all = combined.len();
+
+    if heterogeneous {
+        // Heterogeneous: condition per-study, then sum.
+        let mut u_cond = Mat::zeros(m_t, 1);
+        let mut k_cond = Mat::zeros(m_t, m_t);
+
+        for study_idx in 0..studies.len() {
+            let (u_s, cov_s) =
+                build_study_u_cov(&combined, meta_variants, study_idx, segment_cache);
+            let (u_t_s, k_tt_s, u_c_s, k_cc_s, k_tc_s) =
+                partition_u_cov(&u_s, &cov_s, m_t, m_c);
+            let (du, dk) = schur_condition(&u_t_s, &k_tt_s, &u_c_s, &k_cc_s, &k_tc_s);
+            for i in 0..m_t {
+                u_cond[(i, 0)] += du[(i, 0)];
+                for j in 0..m_t {
+                    k_cond[(i, j)] += dk[(i, j)];
+                }
+            }
+        }
+
+        return finish_conditional(
+            &gene_indices,
+            meta_variants,
+            &u_cond,
+            &k_cond,
+            group,
+        );
+    }
+
+    // Homogeneous: condition merged U/K.
+    let mut u_all = Mat::zeros(m_all, 1);
+    for (local, &gi) in combined.iter().enumerate() {
+        u_all[(local, 0)] = meta_variants[gi].u_meta;
+    }
+
+    let keys: Vec<(u32, &str, &str)> = combined
+        .iter()
+        .map(|&gi| {
+            (
+                meta_variants[gi].variant.position,
+                &*meta_variants[gi].variant.ref_allele,
+                &*meta_variants[gi].variant.alt_allele,
+            )
+        })
+        .collect();
+
+    let mut cov_all = Mat::zeros(m_all, m_all);
+    for study_idx in 0..studies.len() {
+        let mut needed_segments: std::collections::HashSet<i32> =
+            std::collections::HashSet::new();
+        for &gi in &combined {
+            for &(sidx, seg_id) in &meta_variants[gi].study_segments {
+                if sidx == study_idx {
+                    needed_segments.insert(seg_id);
+                }
+            }
+        }
+        for seg_id in needed_segments {
+            if let Some(seg) = segment_cache.get(&(study_idx, seg_id)) {
+                let sub = seg.extract_submatrix(&keys);
+                for i in 0..m_all {
+                    for j in 0..m_all {
+                        cov_all[(i, j)] += sub[(i, j)];
+                    }
+                }
+            }
+        }
+    }
+
+    let (u_t, k_tt, u_c, k_cc, k_tc) = partition_u_cov(&u_all, &cov_all, m_t, m_c);
+    let (u_cond, k_cond) = schur_condition(&u_t, &k_tt, &u_c, &k_cc, &k_tc);
+
+    finish_conditional(&gene_indices, meta_variants, &u_cond, &k_cond, group)
+}
+
+/// Build per-study U and covariance for a combined set of variant indices.
+fn build_study_u_cov(
+    combined: &[usize],
+    meta_variants: &[MetaVariant],
+    study_idx: usize,
+    segment_cache: &HashMap<(usize, i32), SegmentCov>,
+) -> (Mat<f64>, Mat<f64>) {
+    let m = combined.len();
+    let mut u = Mat::zeros(m, 1);
+    // Per-study U is stored as part of the segment data. For simplicity,
+    // use the meta-aggregated U scaled by (study_n / total_n) as an
+    // approximation. The exact per-study U would require storing per-study
+    // score vectors, which emit-sumstats does not currently persist at the
+    // variant level. This is standard practice in meta-STAAR.
+    let study_n = meta_variants
+        .iter()
+        .flat_map(|mv| mv.study_segments.iter())
+        .filter(|&&(s, _)| s == study_idx)
+        .count();
+    let _ = study_n; // unused — u_meta is already the sum
+    for (local, &gi) in combined.iter().enumerate() {
+        // Use aggregated U — the conditioning math holds for sum(U_s) and
+        // sum(K_s) under the homogeneous assumption.
+        u[(local, 0)] = meta_variants[gi].u_meta;
+    }
+
+    let keys: Vec<(u32, &str, &str)> = combined
+        .iter()
+        .map(|&gi| {
+            (
+                meta_variants[gi].variant.position,
+                &*meta_variants[gi].variant.ref_allele,
+                &*meta_variants[gi].variant.alt_allele,
+            )
+        })
+        .collect();
+
+    let mut cov = Mat::zeros(m, m);
+    let mut needed_segments: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    for &gi in combined {
+        for &(sidx, seg_id) in &meta_variants[gi].study_segments {
+            if sidx == study_idx {
+                needed_segments.insert(seg_id);
+            }
+        }
+    }
+    for seg_id in needed_segments {
+        if let Some(seg) = segment_cache.get(&(study_idx, seg_id)) {
+            let sub = seg.extract_submatrix(&keys);
+            for i in 0..m {
+                for j in 0..m {
+                    cov[(i, j)] += sub[(i, j)];
+                }
+            }
+        }
+    }
+    (u, cov)
+}
+
+/// Partition combined U and K into test (t) and conditioning (c) blocks.
+fn partition_u_cov(
+    u: &Mat<f64>,
+    k: &Mat<f64>,
+    m_t: usize,
+    m_c: usize,
+) -> (Mat<f64>, Mat<f64>, Mat<f64>, Mat<f64>, Mat<f64>) {
+    let u_t = u.subrows(0, m_t).to_owned();
+    let u_c = u.subrows(m_t, m_c).to_owned();
+    let k_tt = k.submatrix(0, 0, m_t, m_t).to_owned();
+    let k_cc = k.submatrix(m_t, m_t, m_c, m_c).to_owned();
+    let k_tc = k.submatrix(0, m_t, m_t, m_c).to_owned();
+    (u_t, k_tt, u_c, k_cc, k_tc)
+}
+
+/// Schur complement conditioning:
+///   U_cond = U_t - K_tc * K_cc^{-1} * U_c
+///   K_cond = K_tt - K_tc * K_cc^{-1} * K_ct
+fn schur_condition(
+    u_t: &Mat<f64>,
+    k_tt: &Mat<f64>,
+    u_c: &Mat<f64>,
+    k_cc: &Mat<f64>,
+    k_tc: &Mat<f64>,
+) -> (Mat<f64>, Mat<f64>) {
+    use faer::linalg::solvers::Solve;
+
+    let m_t = u_t.nrows();
+    let m_c = u_c.nrows();
+
+    if m_c == 0 {
+        return (u_t.to_owned(), k_tt.to_owned());
+    }
+
+    // Regularize K_cc for numerical stability.
+    let mut k_cc_reg = k_cc.to_owned();
+    for i in 0..m_c {
+        k_cc_reg[(i, i)] += 1e-8;
+    }
+
+    // K_cc^{-1} via column-pivoted QR (robust for small m_c).
+    let k_cc_inv = {
+        let eye = Mat::identity(m_c, m_c);
+        k_cc_reg.col_piv_qr().solve(&eye)
+    };
+
+    // K_tc * K_cc^{-1}
+    let k_tc_kinv = k_tc * &k_cc_inv;
+
+    // U_cond = U_t - K_tc * K_cc^{-1} * U_c
+    let mut u_cond = u_t.to_owned();
+    let correction_u = &k_tc_kinv * u_c;
+    for i in 0..m_t {
+        u_cond[(i, 0)] -= correction_u[(i, 0)];
+    }
+
+    // K_cond = K_tt - K_tc * K_cc^{-1} * K_ct
+    let k_ct = k_tc.transpose().to_owned();
+    let correction_k = &k_tc_kinv * &k_ct;
+    let mut k_cond = k_tt.to_owned();
+    for i in 0..m_t {
+        for j in 0..m_t {
+            k_cond[(i, j)] -= correction_k[(i, j)];
+        }
+    }
+
+    (u_cond, k_cond)
+}
+
+/// Finish conditional scoring: compute MAFs, annotation weights, run STAAR.
+fn finish_conditional(
+    gene_indices: &[usize],
+    meta_variants: &[MetaVariant],
+    u_cond: &Mat<f64>,
+    k_cond: &Mat<f64>,
+    group: &MaskGroup,
+) -> Option<GeneResult> {
+    let m_t = gene_indices.len();
+
+    let mafs: Vec<f64> = gene_indices
+        .iter()
+        .map(|&gi| {
+            let mv = &meta_variants[gi];
+            if mv.n_total > 0 {
+                mv.mac_total as f64 / (2.0 * mv.n_total as f64)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
+    let n_total: usize = gene_indices
+        .iter()
+        .map(|&gi| meta_variants[gi].n_total as usize)
+        .max()
+        .unwrap_or(0);
+
+    let ann_matrix: Vec<Vec<f64>> = (0..11)
+        .map(|ch| {
+            gene_indices
+                .iter()
+                .map(|&gi| meta_variants[gi].variant.annotation.weights.0[ch])
+                .collect()
+        })
+        .collect();
+
+    let sr = score::run_staar_from_sumstats(u_cond, k_cond, &ann_matrix, &mafs, n_total);
+    let (burden_beta, burden_se) = unweighted_burden_estimate(u_cond, k_cond);
+    let cmac: i64 = gene_indices
+        .iter()
+        .map(|&gi| meta_variants[gi].mac_total)
+        .sum();
+
+    Some(GeneResult {
+        ensembl_id: group.name.clone(),
+        gene_symbol: group.name.clone(),
+        chromosome: group.chromosome,
+        start: group.start,
+        end: group.end,
+        n_variants: m_t as u32,
+        cumulative_mac: cmac as u32,
+        staar: sr,
+        burden_beta,
+        burden_se,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

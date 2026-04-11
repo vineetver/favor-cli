@@ -89,6 +89,8 @@ pub struct MetaStaarConfig {
     pub mask_categories: Vec<MaskCategory>,
     pub maf_cutoff: f64,
     pub window_size: u32,
+    pub known_loci: Option<PathBuf>,
+    pub conditional_model: crate::cli::ConditionalModel,
     pub output_dir: PathBuf,
 }
 

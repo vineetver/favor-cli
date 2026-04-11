@@ -4,6 +4,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::output::Format;
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ConditionalModel {
+    Homogeneous,
+    Heterogeneous,
+}
+
 #[derive(Debug, Clone, ValueEnum)]
 pub enum GenomeBuild {
     Hg38,
@@ -315,6 +321,15 @@ pub enum Command {
         /// Sliding window size in bp [default: 2000]
         #[arg(long, default_value = "2000")]
         window_size: u32,
+
+        /// Known loci for conditional analysis (one chr:pos:ref:alt per line)
+        #[arg(long)]
+        known_loci: Option<PathBuf>,
+
+        /// Conditional model: homogeneous (shared effects across studies) or
+        /// heterogeneous (study-specific effects)
+        #[arg(long, default_value = "homogeneous")]
+        conditional_model: ConditionalModel,
 
         /// Output directory
         #[arg(short, long)]
