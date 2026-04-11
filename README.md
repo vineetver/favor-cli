@@ -20,6 +20,8 @@
 
 ---
 
+> **Pre-1.0 software.** Interfaces, resource profiles, and on-disk layouts may change between releases.
+
 ## Install
 
 ```bash
@@ -100,10 +102,29 @@ The store root is resolved as: `--store-path` flag > `FAVOR_STORE` env > walk up
 
 See [Setup guide](docs/setup.md) for detailed configuration, pack selection, HPC tips, and working directory organization.
 
+## Resource requirements
+
+Tested on UKB exome chr22 (~200K samples, ~400K variants, ~17K rare) with 64 GB. Full genome not yet tested. Memory scales with sample count, not variant count.
+
+```text
+samples    RAM       notes
+───────    ──────    ─────────────────────────────
+ 10K       32 GB     comfortable
+200K       64 GB     tested (UKB exome chr22)
+```
+
+Memory, threads, and temp directory are auto-detected from SLURM and cgroup. Override with:
+
+```text
+SLURM_MEM_PER_NODE     memory pool
+FAVOR_KINSHIP_MEM_GB   kinship budget (default 16 GB)
+TMPDIR                 scratch space
+```
+
 ## Docs
 
 - **[Setup guide](docs/setup.md)** - installation, configuration, data management, HPC best practices
-- [Genotype store](docs/storage.md) - on-disk format for cohort genotype data
+- [Genotype store](docs/storage.md) - sparse genotype store for rare-variant analysis
 - [Validation](docs/validation.md) - statistical accuracy vs R reference
 - [Performance](docs/performance.md) - benchmarks and optimization roadmap
 - [Agent reference](AGENTS.md) - machine interface for LLM agents
