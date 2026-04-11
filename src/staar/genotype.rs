@@ -80,6 +80,8 @@ pub fn extract_genotypes(
     let mut gw = GenotypeWriter::new(n_samples, &geno_dir, available_memory)?;
 
     let mut finished_chroms: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ref_buf = String::with_capacity(256);
+    let mut alt_buf = String::with_capacity(256);
     let pb = output.progress(0, "extracting genotypes");
 
     for (file_idx, vcf_path) in vcf_paths.iter().enumerate() {
@@ -124,7 +126,7 @@ pub fn extract_genotypes(
                 }
             }
 
-            process_record_geno(&record, &mut gw, output)?;
+            process_record_geno(&record, &mut gw, &mut ref_buf, &mut alt_buf, output)?;
             pb.inc(1);
         }
 
@@ -220,9 +222,7 @@ impl GenotypeWriter {
             self.switch_chrom(chrom, output)?;
         }
 
-        for d in self.dosages.iter_mut() {
-            *d = f32::NAN;
-        }
+        self.dosages.fill(f32::NAN);
         let mut ac: f64 = 0.0;
         let mut an: f64 = 0.0;
 
@@ -333,51 +333,45 @@ impl GenotypeWriter {
     }
 }
 
-/// Process a single VCF record through the GenotypeWriter. Used by the
-/// standalone `extract_genotypes` path.
 fn process_record_geno(
     record: &noodles_vcf::Record,
     gw: &mut GenotypeWriter,
+    ref_buf: &mut String,
+    alt_buf: &mut String,
     output: &dyn Output,
 ) -> Result<(), CohortError> {
-    let raw_chrom = record.reference_sequence_name();
-    let chrom = match normalize_chrom(raw_chrom) {
+    let chrom = match normalize_chrom(record.reference_sequence_name()) {
         Some(c) => c,
         None => return Ok(()),
     };
-
     let pos = match record.variant_start() {
         Some(Ok(p)) => p.get() as i32,
         _ => return Ok(()),
     };
 
-    let ref_allele = record.reference_bases().to_uppercase();
+    ascii_uppercase_into(record.reference_bases(), ref_buf);
     let alt_bases = record.alternate_bases();
     let alt_str: &str = alt_bases.as_ref();
-    let alts: Vec<&str> = alt_str.split(',').collect();
-
     let samples_raw = record.samples();
     let samples_str: &str = samples_raw.as_ref();
 
-    for (alt_idx, alt) in alts.iter().enumerate() {
-        let alt_upper = alt.trim().to_uppercase();
-        if alt_upper == "*" || alt_upper == "." || alt_upper.is_empty() {
+    for (alt_idx, alt) in alt_str.split(',').enumerate() {
+        ascii_uppercase_into(alt.trim(), alt_buf);
+        if alt_buf == "*" || alt_buf == "." || alt_buf.is_empty() || alt_buf.starts_with('<') {
             continue;
         }
 
-        let (norm_ref, norm_alt, norm_pos) = parsimony_normalize(&ref_allele, &alt_upper, pos);
-        gw.push(
-            chrom,
-            norm_pos,
-            &norm_ref,
-            &norm_alt,
-            samples_str,
-            (alt_idx + 1) as u8,
-            output,
-        )?;
+        let (nr, na, np) = parsimony_normalize(ref_buf, alt_buf, pos);
+        gw.push(chrom, np, nr, na, samples_str, (alt_idx + 1) as u8, output)?;
     }
-
     Ok(())
+}
+
+fn ascii_uppercase_into(src: &str, buf: &mut String) {
+    buf.clear();
+    for &b in src.as_bytes() {
+        buf.push(b.to_ascii_uppercase() as char);
+    }
 }
 
 fn packed_schema(n_samples: usize) -> Schema {

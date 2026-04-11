@@ -219,52 +219,43 @@ pub fn normalize_chrom(raw: &str) -> Option<&'static str> {
 ///   Padded:    (ACGT, AGT, 100)→ (AC, A, 100)       — right-trimmed GT, left C→del
 ///   MNV:       (ACG, TCA, 100) → (ACG, TCA, 100)    — no common prefix/suffix
 ///   Redundant: (AACG, AATG, 100) → (C, T, 102)     — trimmed AA prefix + G suffix
-pub fn parsimony_normalize(ref_allele: &str, alt_allele: &str, pos: i32) -> (String, String, i32) {
-    let r_bytes = ref_allele.as_bytes();
-    let a_bytes = alt_allele.as_bytes();
+/// Zero allocation. Returns slices borrowing directly from the inputs.
+/// VCF alleles are ASCII so byte-index slicing is always valid UTF-8.
+pub fn parsimony_normalize<'a>(ref_allele: &'a str, alt_allele: &'a str, pos: i32) -> (&'a str, &'a str, i32) {
+    let r = ref_allele.as_bytes();
+    let a = alt_allele.as_bytes();
+    let rlen = r.len();
+    let alen = a.len();
 
-    // Edge case: empty or identical alleles — return as-is
-    if r_bytes.is_empty() || a_bytes.is_empty() || ref_allele == alt_allele {
-        return (ref_allele.to_string(), alt_allele.to_string(), pos);
+    if rlen == 0 || alen == 0 || ref_allele == alt_allele || (rlen == 1 && alen == 1) {
+        return (ref_allele, alt_allele, pos);
     }
 
-    // SNV fast path: single base each, no trimming possible
-    if r_bytes.len() == 1 && a_bytes.len() == 1 {
-        return (ref_allele.to_string(), alt_allele.to_string(), pos);
+    // Step 1: right-trim matching suffix, keep at least 1 base
+    let max_suffix = rlen.min(alen) - 1;
+    let mut suffix = 0;
+    while suffix < max_suffix && r[rlen - 1 - suffix] == a[alen - 1 - suffix] {
+        suffix += 1;
     }
 
-    let rlen = r_bytes.len();
-    let alen = a_bytes.len();
-
-    // Step 1: Right-trim — count matching suffix bases
-    // Keep at least 1 base in each allele
-    let max_suffix = (rlen.min(alen)) - 1; // leave at least 1 base
-    let mut suffix_trim = 0;
-    while suffix_trim < max_suffix
-        && r_bytes[rlen - 1 - suffix_trim] == a_bytes[alen - 1 - suffix_trim]
-    {
-        suffix_trim += 1;
+    // Step 2: left-trim matching prefix after suffix removal
+    let max_prefix = (rlen - suffix).min(alen - suffix) - 1;
+    let mut prefix = 0;
+    while prefix < max_prefix && r[prefix] == a[prefix] {
+        prefix += 1;
     }
 
-    // Step 2: Left-trim — count matching prefix bases (after suffix removal)
-    // Keep at least 1 base in each allele after both trims
-    let r_after_suffix = rlen - suffix_trim;
-    let a_after_suffix = alen - suffix_trim;
-    let max_prefix = (r_after_suffix.min(a_after_suffix)) - 1;
-    let mut prefix_trim = 0;
-    while prefix_trim < max_prefix && r_bytes[prefix_trim] == a_bytes[prefix_trim] {
-        prefix_trim += 1;
+    (&ref_allele[prefix..rlen - suffix], &alt_allele[prefix..alen - suffix], pos + prefix as i32)
+}
+
+/// Uppercase ASCII into a reusable buffer. clear + push reuses the
+/// existing heap allocation so the hot loop never calls the allocator.
+#[inline]
+fn ascii_uppercase_into(src: &str, buf: &mut String) {
+    buf.clear();
+    for &b in src.as_bytes() {
+        buf.push(b.to_ascii_uppercase() as char);
     }
-
-    let norm_ref = &r_bytes[prefix_trim..rlen - suffix_trim];
-    let norm_alt = &a_bytes[prefix_trim..alen - suffix_trim];
-    let norm_pos = pos + prefix_trim as i32;
-
-    (
-        String::from_utf8_lossy(norm_ref).to_string(),
-        String::from_utf8_lossy(norm_alt).to_string(),
-        norm_pos,
-    )
 }
 
 /// Ingest result stats.
@@ -316,6 +307,8 @@ pub fn ingest_vcfs(
     let mut filtered_contigs: u64 = 0;
     let mut multiallelic_split: u64 = 0;
     let mut gw = geno_writer;
+    let mut ref_buf = String::with_capacity(256);
+    let mut alt_buf = String::with_capacity(256);
 
     for (file_idx, input_path) in input_paths.iter().enumerate() {
         if input_paths.len() > 1 {
@@ -356,6 +349,8 @@ pub fn ingest_vcfs(
 
             process_record(
                 &record,
+                &mut ref_buf,
+                &mut alt_buf,
                 &mut writers,
                 vs_writer,
                 gw.as_deref_mut(),
@@ -428,11 +423,14 @@ fn get_or_create_writer<'a>(
     }
 }
 
-/// Process a single VCF record — split multi-allelics, normalize, route to per-chrom writer.
-/// When `geno_writer` is Some, dosages are extracted in the same pass.
+/// Process one VCF record. Zero per-record heap allocations: ref/alt
+/// uppercased into caller-owned buffers, parsimony_normalize borrows
+/// from those buffers, filter/samples borrowed from the noodles Record.
 #[allow(clippy::too_many_arguments)]
 fn process_record(
     record: &noodles_vcf::Record,
+    ref_buf: &mut String,
+    alt_buf: &mut String,
     writers: &mut HashMap<&'static str, ChromWriter>,
     vs_writer: &VariantSetWriter,
     mut geno_writer: Option<&mut GenotypeWriter>,
@@ -444,25 +442,19 @@ fn process_record(
     multiallelic_split: &mut u64,
     output: &dyn Output,
 ) -> Result<(), CohortError> {
-    let raw_chrom = record.reference_sequence_name();
-    let chrom = match normalize_chrom(raw_chrom) {
+    let chrom = match normalize_chrom(record.reference_sequence_name()) {
         Some(c) => c,
-        None => {
-            *filtered_contigs += 1;
-            return Ok(());
-        }
+        None => { *filtered_contigs += 1; return Ok(()); }
     };
-
     let pos = match record.variant_start() {
         Some(Ok(p)) => p.get() as i32,
         _ => return Ok(()),
     };
 
-    let ref_allele = record.reference_bases().to_uppercase();
+    ascii_uppercase_into(record.reference_bases(), ref_buf);
 
     let alt_bases = record.alternate_bases();
     let alt_str: &str = alt_bases.as_ref();
-    let alts: Vec<&str> = alt_str.split(',').collect();
 
     let ids_wrapper = record.ids();
     let ids_str: &str = ids_wrapper.as_ref();
@@ -479,48 +471,37 @@ fn process_record(
 
     let filters_wrapper = record.filters();
     let filter_raw: &str = filters_wrapper.as_ref();
-    let filter_str = if filter_raw.is_empty() || filter_raw == "." {
+    let filter_str: Option<&str> = if filter_raw.is_empty() || filter_raw == "." {
         None
     } else {
-        Some(filter_raw.to_string())
+        Some(filter_raw)
     };
 
-    if alts.len() > 1 {
-        *multiallelic_split += alts.len() as u64 - 1;
+    let alt_count = if alt_str.is_empty() { 0 } else { alt_str.matches(',').count() + 1 };
+    if alt_count > 1 {
+        *multiallelic_split += alt_count as u64 - 1;
     }
 
-    let samples_str = if geno_writer.is_some() {
-        let s = record.samples();
-        let raw: &str = s.as_ref();
-        Some(raw.to_string())
+    let samples_raw;
+    let samples_str: &str = if geno_writer.is_some() {
+        samples_raw = record.samples();
+        samples_raw.as_ref()
     } else {
-        None
+        ""
     };
 
-    for (alt_idx, alt) in alts.iter().enumerate() {
-        let alt_upper = alt.trim().to_uppercase();
-        if alt_upper == "*"
-            || alt_upper == "."
-            || alt_upper.is_empty()
-            || alt_upper.starts_with('<')
-        {
+    for (alt_idx, alt) in alt_str.split(',').enumerate() {
+        ascii_uppercase_into(alt.trim(), alt_buf);
+        if alt_buf == "*" || alt_buf == "." || alt_buf.is_empty() || alt_buf.starts_with('<') {
             continue;
         }
 
-        let (norm_ref, norm_alt, norm_pos) = parsimony_normalize(&ref_allele, &alt_upper, pos);
+        let (nr, na, np) = parsimony_normalize(ref_buf, alt_buf, pos);
 
         let cw =
             get_or_create_writer(chrom, writers, vs_writer, schema, props, batch_size, output)?;
 
-        cw.batch.push(
-            chrom,
-            norm_pos,
-            &norm_ref,
-            &norm_alt,
-            rsid,
-            qual_str.as_deref(),
-            filter_str.as_deref(),
-        );
+        cw.batch.push(chrom, np, nr, na, rsid, qual_str.as_deref(), filter_str);
         cw.count += 1;
         *variant_count += 1;
 
@@ -532,15 +513,7 @@ fn process_record(
         }
 
         if let Some(ref mut gw) = geno_writer {
-            gw.push(
-                chrom,
-                norm_pos,
-                &norm_ref,
-                &norm_alt,
-                samples_str.as_deref().unwrap_or(""),
-                (alt_idx + 1) as u8,
-                output,
-            )?;
+            gw.push(chrom, np, nr, na, samples_str, (alt_idx + 1) as u8, output)?;
         }
     }
     Ok(())
@@ -551,76 +524,28 @@ mod tests {
     use super::parsimony_normalize;
 
     #[test]
-    fn snv() {
-        assert_eq!(
-            parsimony_normalize("G", "A", 100),
-            ("G".into(), "A".into(), 100)
-        );
-    }
+    fn snv() { assert_eq!(parsimony_normalize("G", "A", 100), ("G", "A", 100)); }
+    #[test]
+    fn insertion() { assert_eq!(parsimony_normalize("A", "ACGT", 100), ("A", "ACGT", 100)); }
+    #[test]
+    fn deletion() { assert_eq!(parsimony_normalize("ACGT", "A", 100), ("ACGT", "A", 100)); }
+    #[test]
+    fn suffix_trim() { assert_eq!(parsimony_normalize("ACGTG", "AG", 100), ("ACGT", "A", 100)); }
+    #[test]
+    fn prefix_and_suffix() { assert_eq!(parsimony_normalize("AACG", "AATG", 100), ("C", "T", 102)); }
+    #[test]
+    fn mnv_no_trim() { assert_eq!(parsimony_normalize("ACG", "TCA", 100), ("ACG", "TCA", 100)); }
+    #[test]
+    fn identical() { assert_eq!(parsimony_normalize("A", "A", 100), ("A", "A", 100)); }
+    #[test]
+    fn single_base_ins() { assert_eq!(parsimony_normalize("T", "TC", 100), ("T", "TC", 100)); }
 
     #[test]
-    fn insertion_with_anchor() {
-        // VCF: REF=A, ALT=ACGT — insertion of CGT after pos 100
-        assert_eq!(
-            parsimony_normalize("A", "ACGT", 100),
-            ("A".into(), "ACGT".into(), 100)
-        );
-    }
-
-    #[test]
-    fn deletion_with_anchor() {
-        // VCF: REF=ACGT, ALT=A — deletion of CGT at pos 101-103
-        assert_eq!(
-            parsimony_normalize("ACGT", "A", 100),
-            ("ACGT".into(), "A".into(), 100)
-        );
-    }
-
-    #[test]
-    fn redundant_padding_right() {
-        // REF=ACGTG, ALT=AG — common suffix G, then common prefix A
-        // After right-trim: ACGT, A; left-trim: CGT→""? No, keep 1 base.
-        // Right-trim G: ACGT, A (suffix=1, but A is len 1 so max_suffix=0)
-        // Actually: rlen=5, alen=2, max_suffix=min(5,2)-1=1. G==G → suffix_trim=1.
-        // After: ACGT (4 bytes), A (1 byte). max_prefix=min(4,1)-1=0. No prefix trim.
-        assert_eq!(
-            parsimony_normalize("ACGTG", "AG", 100),
-            ("ACGT".into(), "A".into(), 100)
-        );
-    }
-
-    #[test]
-    fn redundant_prefix_and_suffix() {
-        // REF=AACG, ALT=AATG — common prefix AA, common suffix G
-        // Right-trim: AAC, AAT (suffix=1). Left-trim: C, T (prefix=2, pos+2)
-        assert_eq!(
-            parsimony_normalize("AACG", "AATG", 100),
-            ("C".into(), "T".into(), 102)
-        );
-    }
-
-    #[test]
-    fn complex_mnv_no_trim() {
-        assert_eq!(
-            parsimony_normalize("ACG", "TCA", 100),
-            ("ACG".into(), "TCA".into(), 100)
-        );
-    }
-
-    #[test]
-    fn identical_alleles() {
-        assert_eq!(
-            parsimony_normalize("A", "A", 100),
-            ("A".into(), "A".into(), 100)
-        );
-    }
-
-    #[test]
-    fn single_base_insertion() {
-        // REF=T, ALT=TC
-        assert_eq!(
-            parsimony_normalize("T", "TC", 100),
-            ("T".into(), "TC".into(), 100)
-        );
+    fn borrows_input_directly() {
+        let r = "AACG";
+        let a = "AATG";
+        let (nr, na, _) = parsimony_normalize(r, a, 100);
+        assert!(std::ptr::eq(nr.as_ptr(), r[2..3].as_ptr()));
+        assert!(std::ptr::eq(na.as_ptr(), a[2..3].as_ptr()));
     }
 }
