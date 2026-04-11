@@ -20,7 +20,7 @@
 
 ---
 
-> **Pre-1.0 software.** Interfaces, resource profiles, and on-disk layouts may change between releases.
+> **Pre-1.0.** Commands and interfaces may change between releases.
 
 ## Install
 
@@ -82,7 +82,7 @@ FAVOR CLI uses two separate storage areas:
     ...
 ```
 
-**Project store** (`.cohort/` in your working directory) holds per-project cohort data:
+**Project store** (`.cohort/` in your working directory) holds per-project data:
 
 ```
 my_study/
@@ -104,7 +104,7 @@ See [Setup guide](docs/setup.md) for detailed configuration, pack selection, HPC
 
 ## Resource requirements
 
-Tested on UKB exome chr22 (~200K samples, ~400K variants, ~17K rare) with 64 GB. Full genome not yet tested. Memory scales with sample count, not variant count.
+Tested on UKB exome chr22 (~200K samples, ~400K variants, ~17K rare) with 64 GB. Full genome not yet tested.
 
 ```text
 samples    RAM       notes
@@ -149,6 +149,8 @@ FAVOR CLI implements the [STAAR](https://github.com/xihaoli/STAARpipeline) frame
 > Li X\*, Li Z\*, Zhou H, et al. **Dynamic incorporation of multiple in silico functional annotations empowers rare variant association analysis of large whole-genome sequencing studies at scale.** *Nature Genetics*, 52(9), 969-983 (2020). [DOI: 10.1038/s41588-020-0676-4](https://doi.org/10.1038/s41588-020-0676-4)
 
 > Zhou H, Verma V, Li X, et al. **FAVOR 2.0: A reengineered functional annotation of variants online resource for interpreting genomic variation.** *Nucleic Acids Research*, 54(D1), D1405-D1414 (2026). [DOI: 10.1093/nar/gkaf1217](https://doi.org/10.1093/nar/gkaf1217)
+
+> Zhou H, Arapoglou T, Li X, et al. **FAVOR: functional annotation of variants online resource and annotator for variation across the human genome.** *Nucleic Acids Research*, 51(D1), D1300-D1311 (2023). [DOI: 10.1093/nar/gkac966](https://doi.org/10.1093/nar/gkac966)
 
 > Li TC, Zhou H, Verma V, et al. **FAVOR-GPT: a generative natural language interface to whole genome variant functional annotations.** *Bioinformatics Advances*, 4(1), vbae143 (2024). [DOI: 10.1093/bioadv/vbae143](https://doi.org/10.1093/bioadv/vbae143)
 
