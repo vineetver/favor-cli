@@ -26,12 +26,31 @@ pub fn build_config(
     masks: Vec<String>,
     maf_cutoff: f64,
     window_size: u32,
+    known_loci: Option<PathBuf>,
+    conditional_model: crate::cli::ConditionalModel,
     output_path: Option<PathBuf>,
 ) -> Result<MetaStaarConfig, CohortError> {
     if studies.is_empty() {
         return Err(CohortError::Input(
             "--studies is required. Provide comma-separated paths to MetaSTAAR summary stat directories.".into(),
         ));
+    }
+
+    if let Some(ref loci) = known_loci {
+        if !loci.exists() {
+            return Err(CohortError::Input(format!(
+                "Known loci file not found: {}",
+                loci.display()
+            )));
+        }
+        if matches!(conditional_model, crate::cli::ConditionalModel::Heterogeneous) {
+            return Err(CohortError::Input(
+                "--conditional-model heterogeneous requires per-study U vectors \
+                 which --emit-sumstats does not yet persist. Use --conditional-model \
+                 homogeneous for now."
+                    .into(),
+            ));
+        }
     }
 
     let mask_categories = crate::commands::parse_mask_categories(&masks)?;
@@ -42,6 +61,8 @@ pub fn build_config(
         mask_categories,
         maf_cutoff,
         window_size,
+        known_loci,
+        conditional_model,
         output_dir,
     })
 }
@@ -85,7 +106,16 @@ pub fn run_meta_staar(
         ))
     })?;
 
-    let results = run_all_chromosomes(&studies, config, df, out)?;
+    let known_loci = match config.known_loci.as_ref() {
+        Some(path) => {
+            let loci = staar::meta::parse_known_loci_file(path)?;
+            out.status(&format!("  Conditional: {} known loci loaded", loci.len()));
+            loci
+        }
+        None => Vec::new(),
+    };
+
+    let results = run_all_chromosomes(&studies, config, &known_loci, df, out)?;
     write_meta_results(&results, &config.output_dir, out)?;
     generate_summary(&studies, &results, config, out);
 
@@ -138,10 +168,16 @@ fn meta_staar_runtime_seconds(n_studies: usize, total_samples: usize, threads: u
 fn run_all_chromosomes(
     studies: &[staar::meta::StudyHandle],
     config: &MetaStaarConfig,
+    known_loci: &[(String, u32, String, String)],
     engine: &DfEngine,
     out: &dyn Output,
 ) -> Result<Vec<(MaskType, Vec<GeneResult>)>, CohortError> {
     let k = studies.len();
+    let conditional = !known_loci.is_empty();
+    let heterogeneous = matches!(
+        config.conditional_model,
+        crate::cli::ConditionalModel::Heterogeneous
+    );
     let chromosomes = discover_chromosomes(&studies[0].path);
     let mut all_results: Vec<(MaskType, Vec<GeneResult>)> = Vec::new();
 
@@ -158,6 +194,19 @@ fn run_all_chromosomes(
         }
         out.status(&format!("    {} merged variants", meta_variants.len()));
 
+        // Find known-loci indices for this chromosome.
+        let cond_indices: Vec<usize> = if conditional {
+            find_known_loci_indices(&meta_variants, known_loci, chrom)
+        } else {
+            Vec::new()
+        };
+        if conditional && !cond_indices.is_empty() {
+            out.status(&format!(
+                "    conditional: {} known loci matched on chr{chrom}",
+                cond_indices.len()
+            ));
+        }
+
         let annotated: Vec<crate::types::AnnotatedVariant> =
             meta_variants.iter().map(|mv| mv.variant.clone()).collect();
         let chrom_indices: Vec<usize> = (0..annotated.len()).collect();
@@ -170,12 +219,23 @@ fn run_all_chromosomes(
             let results: Vec<GeneResult> = groups
                 .par_iter()
                 .filter_map(|group| {
-                    staar::meta::meta_score_gene(
-                        group,
-                        &meta_variants,
-                        studies,
-                        &segment_cache,
-                    )
+                    if cond_indices.is_empty() {
+                        staar::meta::meta_score_gene(
+                            group,
+                            &meta_variants,
+                            studies,
+                            &segment_cache,
+                        )
+                    } else {
+                        staar::meta::meta_score_gene_conditional(
+                            group,
+                            &meta_variants,
+                            studies,
+                            &segment_cache,
+                            &cond_indices,
+                            heterogeneous,
+                        )
+                    }
                 })
                 .collect();
 
@@ -251,6 +311,38 @@ fn load_segment_cache(
         }
     }
     cache
+}
+
+/// Find indices in `meta_variants` that correspond to known loci on this chromosome.
+fn find_known_loci_indices(
+    meta_variants: &[crate::types::MetaVariant],
+    known_loci: &[(String, u32, String, String)],
+    chrom: &str,
+) -> Vec<usize> {
+    let chrom_loci: Vec<&(String, u32, String, String)> = known_loci
+        .iter()
+        .filter(|(c, _, _, _)| c == chrom)
+        .collect();
+    if chrom_loci.is_empty() {
+        return Vec::new();
+    }
+
+    let mut indices = Vec::new();
+    for (i, mv) in meta_variants.iter().enumerate() {
+        for locus in &chrom_loci {
+            if mv.variant.position == locus.1 {
+                // Wildcard ref/alt match (chr:pos only) or exact match.
+                if locus.2 == "*"
+                    || (&*mv.variant.ref_allele == locus.2.as_str()
+                        && &*mv.variant.alt_allele == locus.3.as_str())
+                {
+                    indices.push(i);
+                    break;
+                }
+            }
+        }
+    }
+    indices
 }
 
 fn discover_chromosomes(study_dir: &std::path::Path) -> Vec<String> {

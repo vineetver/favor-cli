@@ -1,5 +1,6 @@
 //! Derived caches keyed by cohort id. Today: per-phenotype score cache.
 
+pub mod null_model_cache;
 pub mod score_cache;
 
 use std::path::PathBuf;
@@ -23,22 +24,26 @@ impl<'a> CacheStore<'a> {
         self.layout.score_cache_dir(cohort, key)
     }
 
+    pub fn null_model_cache_dir(&self, cohort: &CohortId, key: &CacheKey) -> PathBuf {
+        self.layout.null_model_cache_dir(cohort, key)
+    }
+
     /// Delete the score-cache directory owned by `cohort`. Called when
     /// `--rebuild-store` flips the content fingerprint and the existing
     /// cache no longer matches.
     pub fn prune_cohort(&self, cohort: &CohortId) -> Result<PruneSummary, CohortError> {
         let mut summary = PruneSummary::default();
-        for sub in ["score_cache", "lookups"] {
+        for sub in ["score_cache", "lookups", "null_model"] {
             let dir = self.layout.cache_root().join(sub).join(cohort.as_str());
             if dir.is_dir() {
                 summary.bytes_freed += dir_size(&dir);
                 std::fs::remove_dir_all(&dir).map_err(|e| {
                     CohortError::Resource(format!("rm {}: {e}", dir.display()))
                 })?;
-                if sub == "score_cache" {
-                    summary.removed_score_caches += 1;
-                } else {
-                    summary.removed_lookup_indexes += 1;
+                match sub {
+                    "score_cache" => summary.removed_score_caches += 1,
+                    "null_model" => summary.removed_null_models += 1,
+                    _ => summary.removed_lookup_indexes += 1,
                 }
             }
         }
@@ -51,7 +56,7 @@ impl<'a> CacheStore<'a> {
         let mut summary = PruneSummary::default();
         let alive: std::collections::HashSet<&str> =
             live.iter().map(|c| c.as_str()).collect();
-        for sub in ["score_cache", "lookups"] {
+        for sub in ["score_cache", "lookups", "null_model"] {
             let parent = self.layout.cache_root().join(sub);
             if !parent.is_dir() {
                 continue;
@@ -77,10 +82,10 @@ impl<'a> CacheStore<'a> {
                 std::fs::remove_dir_all(&p).map_err(|e| {
                     CohortError::Resource(format!("rm {}: {e}", p.display()))
                 })?;
-                if sub == "score_cache" {
-                    summary.removed_score_caches += 1;
-                } else {
-                    summary.removed_lookup_indexes += 1;
+                match sub {
+                    "score_cache" => summary.removed_score_caches += 1,
+                    "null_model" => summary.removed_null_models += 1,
+                    _ => summary.removed_lookup_indexes += 1,
                 }
             }
         }
@@ -92,6 +97,7 @@ impl<'a> CacheStore<'a> {
 pub struct PruneSummary {
     pub removed_score_caches: usize,
     pub removed_lookup_indexes: usize,
+    pub removed_null_models: usize,
     pub bytes_freed: u64,
 }
 

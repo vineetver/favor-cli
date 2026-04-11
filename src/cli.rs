@@ -4,6 +4,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::output::Format;
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ConditionalModel {
+    Homogeneous,
+    Heterogeneous,
+}
+
 #[derive(Debug, Clone, ValueEnum)]
 pub enum GenomeBuild {
     Hg38,
@@ -181,10 +187,12 @@ pub enum Command {
 
     /// STAAR rare variant association testing
     Staar {
-        /// Multi-sample VCF with genotypes (.vcf or .vcf.gz). Required unless
-        /// `--cohort <id>` is given to load a pre-built cohort store.
-        #[arg(long)]
-        genotypes: Option<PathBuf>,
+        /// Multi-sample VCF(s) with genotypes (.vcf or .vcf.gz). Accepts
+        /// multiple files, globs, or a directory of per-chromosome VCFs.
+        /// Required unless `--cohort <id>` is given to load a pre-built
+        /// cohort store.
+        #[arg(long, num_args = 1..)]
+        genotypes: Vec<PathBuf>,
 
         /// Pre-built cohort id (from `favor ingest <vcf> --annotations ... --cohort-id <id>`).
         /// Skips probe + rebuild — trusts the manifest at `.cohort/cohorts/<id>/`.
@@ -313,6 +321,15 @@ pub enum Command {
         /// Sliding window size in bp [default: 2000]
         #[arg(long, default_value = "2000")]
         window_size: u32,
+
+        /// Known loci for conditional analysis (one chr:pos:ref:alt per line)
+        #[arg(long)]
+        known_loci: Option<PathBuf>,
+
+        /// Conditional model: homogeneous (shared effects across studies) or
+        /// heterogeneous (study-specific effects)
+        #[arg(long, default_value = "homogeneous")]
+        conditional_model: ConditionalModel,
 
         /// Output directory
         #[arg(short, long)]

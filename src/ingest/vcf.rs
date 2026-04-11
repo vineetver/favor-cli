@@ -19,6 +19,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
+use crate::staar::genotype::GenotypeWriter;
 use crate::store::list::VariantSetWriter;
 use crate::error::CohortError;
 use crate::output::Output;
@@ -271,6 +272,8 @@ pub struct VcfIngestResult {
     pub variant_count: u64,
     pub filtered_contigs: u64,
     pub multiallelic_split: u64,
+    /// When single-pass ingest is active, the number of genotype variants written.
+    pub genotype_variants: u64,
 }
 
 /// Per-chromosome writer state: batch + parquet writer + variant count.
@@ -284,9 +287,13 @@ struct ChromWriter {
 /// All files share the same set of per-chromosome writers, so blocks from
 /// different files (e.g., UKB b0-b22) merge into the correct chromosome output.
 /// Bounded memory: 25 chromosome writers max, each with adaptive batch size.
+///
+/// When `geno_writer` is `Some`, genotype dosages are extracted in the same
+/// pass and written to the GenotypeWriter (single-pass ingest).
 pub fn ingest_vcfs(
     input_paths: &[PathBuf],
     vs_writer: &mut VariantSetWriter,
+    geno_writer: Option<&mut GenotypeWriter>,
     memory_budget: u64,
     threads: usize,
     output: &dyn Output,
@@ -308,6 +315,7 @@ pub fn ingest_vcfs(
     let mut variant_count: u64 = 0;
     let mut filtered_contigs: u64 = 0;
     let mut multiallelic_split: u64 = 0;
+    let mut gw = geno_writer;
 
     for (file_idx, input_path) in input_paths.iter().enumerate() {
         if input_paths.len() > 1 {
@@ -350,6 +358,7 @@ pub fn ingest_vcfs(
                 &record,
                 &mut writers,
                 vs_writer,
+                gw.as_deref_mut(),
                 &schema,
                 &props,
                 batch_size,
@@ -362,6 +371,8 @@ pub fn ingest_vcfs(
         }
         pb.finish(&format!("{variant_count} variants ingested"));
     }
+
+    let genotype_variants = gw.as_ref().map_or(0, |g| g.variant_count());
 
     // Flush and close all writers
     vs_writer.set_columns(schema.fields().iter().map(|f| f.name().clone()).collect());
@@ -384,6 +395,7 @@ pub fn ingest_vcfs(
         variant_count,
         filtered_contigs,
         multiallelic_split,
+        genotype_variants,
     })
 }
 
@@ -417,11 +429,13 @@ fn get_or_create_writer<'a>(
 }
 
 /// Process a single VCF record — split multi-allelics, normalize, route to per-chrom writer.
+/// When `geno_writer` is Some, dosages are extracted in the same pass.
 #[allow(clippy::too_many_arguments)]
 fn process_record(
     record: &noodles_vcf::Record,
     writers: &mut HashMap<&'static str, ChromWriter>,
     vs_writer: &VariantSetWriter,
+    mut geno_writer: Option<&mut GenotypeWriter>,
     schema: &Arc<Schema>,
     props: &WriterProperties,
     batch_size: usize,
@@ -475,9 +489,16 @@ fn process_record(
         *multiallelic_split += alts.len() as u64 - 1;
     }
 
-    for alt in &alts {
+    let samples_str = if geno_writer.is_some() {
+        let s = record.samples();
+        let raw: &str = s.as_ref();
+        Some(raw.to_string())
+    } else {
+        None
+    };
+
+    for (alt_idx, alt) in alts.iter().enumerate() {
         let alt_upper = alt.trim().to_uppercase();
-        // Skip missing, spanning deletion, and symbolic alleles (<DEL>, <INS>, etc.)
         if alt_upper == "*"
             || alt_upper == "."
             || alt_upper.is_empty()
@@ -508,6 +529,18 @@ fn process_record(
             cw.writer
                 .write(&rb)
                 .map_err(|e| CohortError::Resource(format!("Parquet write error: {e}")))?;
+        }
+
+        if let Some(ref mut gw) = geno_writer {
+            gw.push(
+                chrom,
+                norm_pos,
+                &norm_ref,
+                &norm_alt,
+                samples_str.as_deref().unwrap_or(""),
+                (alt_idx + 1) as u8,
+                output,
+            )?;
         }
     }
     Ok(())

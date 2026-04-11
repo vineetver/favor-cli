@@ -18,7 +18,7 @@ use crate::store::list::VariantSet;
 const GB: u64 = 1024 * 1024 * 1024;
 
 pub struct StaarArgs {
-    pub genotypes: Option<PathBuf>,
+    pub genotypes: Vec<PathBuf>,
     pub cohort: Option<String>,
     pub phenotype: PathBuf,
     pub trait_names: Vec<String>,
@@ -127,7 +127,7 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
     let cohort_name = blank_to_none(args.cohort.clone());
     let (cohort_source, cohort_id, output_dir) = match cohort_name {
         Some(id) => {
-            if args.genotypes.is_some() {
+            if !args.genotypes.is_empty() {
                 return Err(CohortError::Input(
                     "Pass either --cohort <id> (load pre-built) or --genotypes <vcf> \
                      (probe/build), not both."
@@ -142,18 +142,13 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
             (CohortSource::Existing, cohort_id, output_dir)
         }
         None => {
-            let genotypes = args.genotypes.clone().ok_or_else(|| {
-                CohortError::Input(
+            if args.genotypes.is_empty() {
+                return Err(CohortError::Input(
                     "STAAR needs either --cohort <id> (pre-built cohort) or --genotypes <vcf>."
                         .into(),
-                )
-            })?;
-            if !genotypes.exists() {
-                return Err(CohortError::Input(format!(
-                    "Genotype VCF not found: '{}'. Check the path to your multi-sample VCF.",
-                    genotypes.display()
-                )));
+                ));
             }
+            let genotypes = crate::commands::ingest::resolve_inputs(args.genotypes)?;
             let annotations = args.annotations.clone().ok_or_else(|| {
                 CohortError::Input(
                     "Without --cohort, STAAR requires --annotations <path> from \
@@ -177,12 +172,12 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
             ann_vs.require_annotated()?;
             let cohort_id = CohortId::new(
                 blank_to_none(args.cohort_id.clone())
-                    .unwrap_or_else(|| derive_cohort_id(&genotypes)),
+                    .unwrap_or_else(|| derive_cohort_id(&genotypes[0])),
             );
             let output_dir = args
                 .output_path
                 .clone()
-                .unwrap_or_else(|| default_output_dir(&genotypes));
+                .unwrap_or_else(|| default_output_dir(&genotypes[0]));
             (
                 CohortSource::Fresh {
                     genotypes,
@@ -340,7 +335,7 @@ fn emit_dry_run(
                 )
             }
             (Some(genotypes), Some(annotations)) => {
-                let sample_names = staar::genotype::read_sample_names(genotypes)?;
+                let sample_names = staar::genotype::read_sample_names(&genotypes[0])?;
                 let n_samples = sample_names.len();
                 let ann_rows = parquet_row_count(annotations).unwrap_or_else(|e| {
                     out.warn(&format!(
@@ -368,9 +363,12 @@ fn emit_dry_run(
                     ),
                     None => ("miss", json!(null), recommended.max(8 * GB)),
                 };
+                let geno_files: Vec<String> = genotypes.iter()
+                    .map(|p| p.to_string_lossy().into())
+                    .collect();
                 let inputs = json!({
-                    "genotypes": genotypes.to_string_lossy(),
-                    "genotype_size": commands::file_size(genotypes),
+                    "genotypes": geno_files,
+                    "genotype_file_count": genotypes.len(),
                     "annotations": annotations.to_string_lossy(),
                     "annotation_rows": ann_rows,
                     "n_samples": n_samples,
@@ -544,7 +542,7 @@ mod tests {
     /// runs before the cohort branch, which is what we want to exercise.
     fn multi_trait_args(pheno_path: PathBuf, traits: &[&str]) -> StaarArgs {
         StaarArgs {
-            genotypes: None,
+            genotypes: Vec::new(),
             cohort: Some("dummy".into()),
             phenotype: pheno_path,
             trait_names: traits.iter().map(|s| (*s).into()).collect(),

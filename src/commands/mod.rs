@@ -89,6 +89,8 @@ pub struct MetaStaarConfig {
     pub mask_categories: Vec<MaskCategory>,
     pub maf_cutoff: f64,
     pub window_size: u32,
+    pub known_loci: Option<PathBuf>,
+    pub conditional_model: crate::cli::ConditionalModel,
     pub output_dir: PathBuf,
 }
 
@@ -155,10 +157,6 @@ fn human_seconds(s: u64) -> String {
 
 pub fn emit(plan: &DryRunPlan, out: &dyn Output) {
     out.result_json(&serde_json::to_value(plan).unwrap_or_default());
-}
-
-pub fn file_size(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
 /// Default output path for a command that transforms an input file in

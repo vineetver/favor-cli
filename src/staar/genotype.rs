@@ -30,7 +30,7 @@ pub struct GenotypeMeta {
     pub version: u32,
     pub n_samples: usize,
     pub chromosomes: Vec<String>,
-    pub source_vcf: String,
+    pub source_vcfs: Vec<String>,
 }
 
 pub struct GenotypeResult {
@@ -39,13 +39,17 @@ pub struct GenotypeResult {
 }
 
 pub fn extract_genotypes(
-    vcf_path: &Path,
+    vcf_paths: &[PathBuf],
     output_dir: &Path,
     available_memory: u64,
     threads: usize,
     output: &dyn Output,
 ) -> Result<GenotypeResult, CohortError> {
-    let reader = open_vcf(vcf_path, threads)?;
+    if vcf_paths.is_empty() {
+        return Err(CohortError::Input("No VCF files provided.".into()));
+    }
+
+    let reader = open_vcf(&vcf_paths[0], threads)?;
     let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
     let header = vcf_reader
         .read_header()
@@ -62,146 +66,278 @@ pub fn extract_genotypes(
             "VCF has no samples. STAAR requires a multi-sample VCF.".into(),
         ));
     }
+    drop(vcf_reader);
 
     output.status(&format!(
-        "Extracting genotypes: {} samples, {} decompression threads, {:.1}G memory",
+        "Extracting genotypes: {} samples, {} file(s), {} threads, {:.1}G memory",
         n_samples,
+        vcf_paths.len(),
         threads,
         available_memory as f64 / (1024.0 * 1024.0 * 1024.0)
     ));
 
-    let bytes_per_variant = (n_samples as u64) * 4 + 200;
-    let batch_size = ((available_memory / 4) / bytes_per_variant).clamp(1000, 100_000) as usize;
-
-    // Schema: 5 metadata columns + 1 packed dosage list
-    let schema = Arc::new(packed_schema(n_samples));
     let geno_dir = output_dir.join("genotypes");
-    std::fs::create_dir_all(&geno_dir).map_err(|e| {
-        CohortError::Resource(format!("Cannot create '{}': {e}", geno_dir.display()))
-    })?;
+    let mut gw = GenotypeWriter::new(n_samples, &geno_dir, available_memory)?;
 
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
-        .set_max_row_group_row_count(Some(batch_size))
-        .build();
-
-    let mut state = ExtractState {
-        current_chrom: None,
-        writer: None,
-        batch: PackedBatchBuilder::new(n_samples, batch_size),
-        total_variants: 0,
-        chromosomes: Vec::new(),
-        dosages: vec![f32::NAN; n_samples],
-    };
-
+    let mut finished_chroms: std::collections::HashSet<String> = std::collections::HashSet::new();
     let pb = output.progress(0, "extracting genotypes");
-    for result in vcf_reader.records() {
-        let record = result.map_err(|e| {
-            CohortError::Analysis(format!("VCF parse error in '{}': {e}", vcf_path.display()))
-        })?;
-        process_record(
-            &record, n_samples, &mut state, &schema, &props, &geno_dir, output,
-        )?;
-        pb.inc(1);
+
+    for (file_idx, vcf_path) in vcf_paths.iter().enumerate() {
+        let reader = open_vcf(vcf_path, threads)?;
+        let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
+        let file_header = vcf_reader
+            .read_header()
+            .map_err(|e| CohortError::Input(format!("VCF header in '{}': {e}", vcf_path.display())))?;
+
+        if file_idx > 0 {
+            let file_samples: Vec<String> = file_header
+                .sample_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            if file_samples != sample_names {
+                return Err(CohortError::Input(format!(
+                    "Sample mismatch: '{}' has {} samples but '{}' has {}. \
+                     All VCF files must have identical samples in the same order.",
+                    vcf_paths[0].display(),
+                    sample_names.len(),
+                    vcf_path.display(),
+                    file_samples.len()
+                )));
+            }
+        }
+
+        for result in vcf_reader.records() {
+            let record = result.map_err(|e| {
+                CohortError::Analysis(format!("VCF parse error in '{}': {e}", vcf_path.display()))
+            })?;
+
+            let raw_chrom = record.reference_sequence_name();
+            if let Some(chrom) = normalize_chrom(raw_chrom) {
+                if gw.current_chrom.as_deref() != Some(chrom) && finished_chroms.contains(chrom) {
+                    return Err(CohortError::Input(format!(
+                        "Chromosome {chrom} appears in '{}' but its writer was already \
+                         closed after processing an earlier file. Sort VCF files by \
+                         chromosome or use one file per chromosome.",
+                        vcf_path.display()
+                    )));
+                }
+            }
+
+            process_record_geno(&record, &mut gw, output)?;
+            pb.inc(1);
+        }
+
+        if let Some(ref current) = gw.current_chrom {
+            for c in &gw.chromosomes {
+                if c != current {
+                    finished_chroms.insert(c.clone());
+                }
+            }
+        }
     }
-    pb.finish(&format!("{} variants extracted", state.total_variants));
+    pb.finish(&format!("{} variants extracted", gw.variant_count()));
 
-    flush(&mut state, &schema)?;
-    if let Some(w) = state.writer.take() {
-        w.close()
-            .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
-    }
-
-    // Write sample names sidecar (order matters for unpacking dosages)
-    let sidecar = geno_dir.join("samples.txt");
-    std::fs::write(&sidecar, sample_names.join("\n"))
-        .map_err(|e| CohortError::Resource(format!("Cannot write '{}': {e}", sidecar.display())))?;
-
-    // Write metadata — this is the last step so partial extractions are detectable
-    let meta = GenotypeMeta {
-        version: 1,
-        n_samples,
-        chromosomes: state.chromosomes.clone(),
-        source_vcf: vcf_path.display().to_string(),
-    };
-    let meta_path = geno_dir.join("genotypes.json");
-    std::fs::write(
-        &meta_path,
-        serde_json::to_string_pretty(&meta)
-            .map_err(|e| CohortError::Resource(format!("JSON serialize: {e}")))?,
-    )
-    .map_err(|e| CohortError::Resource(format!("Cannot write '{}': {e}", meta_path.display())))?;
+    let total_variants = gw.variant_count();
+    let source_vcfs = vcf_paths.iter().map(|p| p.display().to_string()).collect();
+    let result = gw.finish(&sample_names, source_vcfs)?;
 
     output.success(&format!(
-        "Extracted {} variants × {} samples → packed dosage lists",
-        state.total_variants, n_samples,
+        "Extracted {total_variants} variants × {n_samples} samples from {} file(s)",
+        vcf_paths.len(),
     ));
 
-    Ok(GenotypeResult {
-        sample_names,
-        output_dir: geno_dir,
-    })
+    Ok(result)
 }
 
-struct ExtractState {
+/// Reusable genotype writer. Accepts already-normalized variants and raw
+/// VCF sample text, writes per-chromosome dosage parquets. Used both by
+/// the standalone `extract_genotypes` path and by the single-pass ingest
+/// path in `ingest/vcf.rs`.
+pub struct GenotypeWriter {
     current_chrom: Option<String>,
     writer: Option<ArrowWriter<File>>,
     batch: PackedBatchBuilder,
     total_variants: u64,
     chromosomes: Vec<String>,
-    /// Reusable per-variant dosage buffer. Cleared between records so the
-    /// hot path never allocates.
     dosages: Vec<f32>,
-}
-
-fn flush(state: &mut ExtractState, schema: &Arc<Schema>) -> Result<(), CohortError> {
-    if state.batch.count > 0 {
-        if let Some(w) = state.writer.as_mut() {
-            let rb = state.batch.finish(schema)?;
-            w.write(&rb)
-                .map_err(|e| CohortError::Resource(format!("Parquet write: {e}")))?;
-        }
-    }
-    Ok(())
-}
-
-fn switch_chrom(
-    chrom: &str,
-    state: &mut ExtractState,
-    schema: &Arc<Schema>,
-    props: &WriterProperties,
-    geno_dir: &Path,
-    output: &dyn Output,
-) -> Result<(), CohortError> {
-    flush(state, schema)?;
-    if let Some(w) = state.writer.take() {
-        w.close()
-            .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
-    }
-    let chr_dir = geno_dir.join(format!("chromosome={chrom}"));
-    std::fs::create_dir_all(&chr_dir)
-        .map_err(|e| CohortError::Resource(format!("Cannot create '{}': {e}", chr_dir.display())))?;
-    let parquet_path = chr_dir.join("data.parquet");
-    let f = File::create(&parquet_path).map_err(|e| {
-        CohortError::Resource(format!("Cannot create '{}': {e}", parquet_path.display()))
-    })?;
-    state.writer = Some(
-        ArrowWriter::try_new(f, schema.clone(), Some(props.clone()))
-            .map_err(|e| CohortError::Resource(format!("Writer init: {e}")))?,
-    );
-    state.current_chrom = Some(chrom.to_string());
-    state.chromosomes.push(chrom.to_string());
-    output.status(&format!("  chr{chrom}..."));
-    Ok(())
-}
-
-fn process_record(
-    record: &noodles_vcf::Record,
     n_samples: usize,
-    state: &mut ExtractState,
-    schema: &Arc<Schema>,
-    props: &WriterProperties,
-    geno_dir: &Path,
+    schema: Arc<Schema>,
+    props: WriterProperties,
+    geno_dir: PathBuf,
+}
+
+impl GenotypeWriter {
+    pub fn new(
+        n_samples: usize,
+        output_dir: &Path,
+        available_memory: u64,
+    ) -> Result<Self, CohortError> {
+        let bytes_per_variant = (n_samples as u64) * 4 + 200;
+        let batch_size =
+            ((available_memory / 4) / bytes_per_variant).clamp(1000, 100_000) as usize;
+
+        let geno_dir = output_dir.to_path_buf();
+        std::fs::create_dir_all(&geno_dir).map_err(|e| {
+            CohortError::Resource(format!("Cannot create '{}': {e}", geno_dir.display()))
+        })?;
+
+        let schema = Arc::new(packed_schema(n_samples));
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_max_row_group_row_count(Some(batch_size))
+            .build();
+
+        Ok(Self {
+            current_chrom: None,
+            writer: None,
+            batch: PackedBatchBuilder::new(n_samples, batch_size),
+            total_variants: 0,
+            chromosomes: Vec::new(),
+            dosages: vec![f32::NAN; n_samples],
+            n_samples,
+            schema,
+            props,
+            geno_dir,
+        })
+    }
+
+    /// Push one biallelic variant with dosages extracted from raw VCF sample text.
+    /// `chrom` and `pos/ref/alt` must already be normalized.
+    /// `alt_idx` is the 1-based index of this alt allele in the original record.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push(
+        &mut self,
+        chrom: &str,
+        pos: i32,
+        ref_allele: &str,
+        alt_allele: &str,
+        samples_str: &str,
+        alt_idx: u8,
+        output: &dyn Output,
+    ) -> Result<(), CohortError> {
+        if self.current_chrom.as_deref() != Some(chrom) {
+            self.switch_chrom(chrom, output)?;
+        }
+
+        for d in self.dosages.iter_mut() {
+            *d = f32::NAN;
+        }
+        let mut ac: f64 = 0.0;
+        let mut an: f64 = 0.0;
+
+        if !samples_str.is_empty() && samples_str != "." {
+            for (i, sf) in samples_str.split('\t').enumerate().take(self.n_samples) {
+                let gt = extract_gt_field(sf, 0);
+                let dose = gt_to_dosage(gt.as_bytes(), alt_idx);
+                self.dosages[i] = dose;
+                if dose.is_finite() {
+                    ac += dose as f64;
+                    an += 2.0;
+                }
+            }
+        }
+
+        let af = if an > 0.0 { ac / an } else { 0.0 };
+        let maf = af.min(1.0 - af) as f32;
+
+        let dosages: &[f32] = &self.dosages;
+        self.batch
+            .push(chrom, pos, ref_allele, alt_allele, maf, dosages);
+        self.total_variants += 1;
+
+        if self.batch.is_full() {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn variant_count(&self) -> u64 {
+        self.total_variants
+    }
+
+    /// Finalize: flush remaining batches, close writers, write samples sidecar
+    /// and metadata. Returns the output directory path and chromosome list.
+    pub fn finish(
+        mut self,
+        sample_names: &[String],
+        source_vcfs: Vec<String>,
+    ) -> Result<GenotypeResult, CohortError> {
+        self.flush()?;
+        if let Some(w) = self.writer.take() {
+            w.close()
+                .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
+        }
+
+        let sidecar = self.geno_dir.join("samples.txt");
+        std::fs::write(&sidecar, sample_names.join("\n"))
+            .map_err(|e| {
+                CohortError::Resource(format!("Cannot write '{}': {e}", sidecar.display()))
+            })?;
+
+        let meta = GenotypeMeta {
+            version: 1,
+            n_samples: self.n_samples,
+            chromosomes: self.chromosomes.clone(),
+            source_vcfs,
+        };
+        let meta_path = self.geno_dir.join("genotypes.json");
+        std::fs::write(
+            &meta_path,
+            serde_json::to_string_pretty(&meta)
+                .map_err(|e| CohortError::Resource(format!("JSON serialize: {e}")))?,
+        )
+        .map_err(|e| {
+            CohortError::Resource(format!("Cannot write '{}': {e}", meta_path.display()))
+        })?;
+
+        Ok(GenotypeResult {
+            sample_names: sample_names.to_vec(),
+            output_dir: self.geno_dir,
+        })
+    }
+
+    fn flush(&mut self) -> Result<(), CohortError> {
+        if self.batch.count > 0 {
+            if let Some(w) = self.writer.as_mut() {
+                let rb = self.batch.finish(&self.schema)?;
+                w.write(&rb)
+                    .map_err(|e| CohortError::Resource(format!("Parquet write: {e}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn switch_chrom(&mut self, chrom: &str, output: &dyn Output) -> Result<(), CohortError> {
+        self.flush()?;
+        if let Some(w) = self.writer.take() {
+            w.close()
+                .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
+        }
+        let chr_dir = self.geno_dir.join(format!("chromosome={chrom}"));
+        std::fs::create_dir_all(&chr_dir).map_err(|e| {
+            CohortError::Resource(format!("Cannot create '{}': {e}", chr_dir.display()))
+        })?;
+        let parquet_path = chr_dir.join("data.parquet");
+        let f = File::create(&parquet_path).map_err(|e| {
+            CohortError::Resource(format!("Cannot create '{}': {e}", parquet_path.display()))
+        })?;
+        self.writer = Some(
+            ArrowWriter::try_new(f, self.schema.clone(), Some(self.props.clone()))
+                .map_err(|e| CohortError::Resource(format!("Writer init: {e}")))?,
+        );
+        self.current_chrom = Some(chrom.to_string());
+        self.chromosomes.push(chrom.to_string());
+        output.status(&format!("  chr{chrom} (genotypes)..."));
+        Ok(())
+    }
+}
+
+/// Process a single VCF record through the GenotypeWriter. Used by the
+/// standalone `extract_genotypes` path.
+fn process_record_geno(
+    record: &noodles_vcf::Record,
+    gw: &mut GenotypeWriter,
     output: &dyn Output,
 ) -> Result<(), CohortError> {
     let raw_chrom = record.reference_sequence_name();
@@ -209,10 +345,6 @@ fn process_record(
         Some(c) => c,
         None => return Ok(()),
     };
-
-    if state.current_chrom.as_deref() != Some(chrom) {
-        switch_chrom(chrom, state, schema, props, geno_dir, output)?;
-    }
 
     let pos = match record.variant_start() {
         Some(Ok(p)) => p.get() as i32,
@@ -226,7 +358,6 @@ fn process_record(
 
     let samples_raw = record.samples();
     let samples_str: &str = samples_raw.as_ref();
-    let gt_index = 0; // GT is first FORMAT field by VCF spec
 
     for (alt_idx, alt) in alts.iter().enumerate() {
         let alt_upper = alt.trim().to_uppercase();
@@ -235,43 +366,15 @@ fn process_record(
         }
 
         let (norm_ref, norm_alt, norm_pos) = parsimony_normalize(&ref_allele, &alt_upper, pos);
-
-        // Reuse the per-variant dosage buffer; reset to NaN per call so any
-        // VCF row with fewer than n_samples sample fields is treated as
-        // missing for the unset positions.
-        for d in state.dosages.iter_mut() {
-            *d = f32::NAN;
-        }
-        let mut ac: f64 = 0.0;
-        let mut an: f64 = 0.0;
-
-        if !samples_str.is_empty() && samples_str != "." {
-            for (i, sf) in samples_str.split('\t').enumerate().take(n_samples) {
-                let gt = extract_gt_field(sf, gt_index);
-                let dose = gt_to_dosage(gt.as_bytes(), (alt_idx + 1) as u8);
-                state.dosages[i] = dose;
-                if dose.is_finite() {
-                    ac += dose as f64;
-                    an += 2.0;
-                }
-            }
-        }
-
-        let af = if an > 0.0 { ac / an } else { 0.0 };
-        let maf = af.min(1.0 - af) as f32;
-
-        // Disjoint-field borrow: batch and dosages are independent fields
-        // of state, but the call expression `state.batch.push(..., &state.dosages)`
-        // confuses the borrow checker, so split it explicitly.
-        let dosages: &[f32] = &state.dosages;
-        state
-            .batch
-            .push(chrom, norm_pos, &norm_ref, &norm_alt, maf, dosages);
-        state.total_variants += 1;
-
-        if state.batch.is_full() {
-            flush(state, schema)?;
-        }
+        gw.push(
+            chrom,
+            norm_pos,
+            &norm_ref,
+            &norm_alt,
+            samples_str,
+            (alt_idx + 1) as u8,
+            output,
+        )?;
     }
 
     Ok(())

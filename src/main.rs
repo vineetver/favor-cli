@@ -200,6 +200,8 @@ fn run(
             masks,
             maf_cutoff,
             window_size,
+            known_loci,
+            conditional_model,
             output: output_path,
         } => {
             let engine = runtime::Engine::open(store_path)?;
@@ -208,6 +210,8 @@ fn run(
                 masks,
                 maf_cutoff,
                 window_size,
+                known_loci,
+                conditional_model,
                 output_path,
             )?;
             commands::meta_staar::run_meta_staar(&engine, &config, out, dry_run)

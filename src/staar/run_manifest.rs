@@ -246,7 +246,7 @@ pub fn now_unix() -> u64 {
 /// Borrowed view of the `StaarConfig` fields that determine results.
 /// Lives here so the hashing logic doesn't have to import `StaarConfig`.
 pub struct ConfigHashInputs<'a> {
-    pub genotypes: &'a Path,
+    pub genotypes: Vec<PathBuf>,
     pub annotations: &'a Path,
     pub phenotype: &'a Path,
     pub trait_names: &'a [String],
@@ -263,7 +263,10 @@ pub struct ConfigHashInputs<'a> {
 pub fn compute_config_hash(inputs: &ConfigHashInputs<'_>) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(inputs.genotypes.to_string_lossy().as_bytes());
+    for g in &inputs.genotypes {
+        h.update(g.to_string_lossy().as_bytes());
+        h.update(b",");
+    }
     h.update(b"|");
     h.update(inputs.annotations.to_string_lossy().as_bytes());
     h.update(b"|");
@@ -557,7 +560,7 @@ mod tests {
         let covs = vec!["age".to_string(), "sex".to_string()];
         let kinship: Vec<PathBuf> = Vec::new();
         let inputs = ConfigHashInputs {
-            genotypes: Path::new("/tmp/g.vcf.gz"),
+            genotypes: vec![PathBuf::from("/tmp/g.vcf.gz")],
             annotations: Path::new("/tmp/a"),
             phenotype: Path::new("/tmp/p.tsv"),
             trait_names: &trait_names,
@@ -571,17 +574,14 @@ mod tests {
 
         let inputs2 = ConfigHashInputs {
             maf_cutoff: 0.05,
-            ..ConfigHashInputs {
-                genotypes: Path::new("/tmp/g.vcf.gz"),
-                annotations: Path::new("/tmp/a"),
-                phenotype: Path::new("/tmp/p.tsv"),
-                trait_names: &trait_names,
-                covariates: &covs,
-                maf_cutoff: 0.01,
-                run_mode: RunMode::Analyze,
-                kinship: &kinship,
-                kinship_groups: None,
-            }
+            genotypes: vec![PathBuf::from("/tmp/g.vcf.gz")],
+            annotations: Path::new("/tmp/a"),
+            phenotype: Path::new("/tmp/p.tsv"),
+            trait_names: &trait_names,
+            covariates: &covs,
+            run_mode: RunMode::Analyze,
+            kinship: &kinship,
+            kinship_groups: None,
         };
         let h2 = compute_config_hash(&inputs2);
         assert_ne!(h1, h2);
@@ -590,17 +590,14 @@ mod tests {
         let covs_reversed = vec!["sex".to_string(), "age".to_string()];
         let inputs3 = ConfigHashInputs {
             covariates: &covs_reversed,
-            ..ConfigHashInputs {
-                genotypes: Path::new("/tmp/g.vcf.gz"),
-                annotations: Path::new("/tmp/a"),
-                phenotype: Path::new("/tmp/p.tsv"),
-                trait_names: &trait_names,
-                covariates: &covs,
-                maf_cutoff: 0.01,
-                run_mode: RunMode::Analyze,
-                kinship: &kinship,
-                kinship_groups: None,
-            }
+            genotypes: vec![PathBuf::from("/tmp/g.vcf.gz")],
+            annotations: Path::new("/tmp/a"),
+            phenotype: Path::new("/tmp/p.tsv"),
+            trait_names: &trait_names,
+            maf_cutoff: 0.01,
+            run_mode: RunMode::Analyze,
+            kinship: &kinship,
+            kinship_groups: None,
         };
         assert_eq!(h1, compute_config_hash(&inputs3));
     }

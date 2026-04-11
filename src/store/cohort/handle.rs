@@ -25,7 +25,7 @@ use super::{
 };
 
 pub struct CohortSources<'a> {
-    pub genotypes: &'a Path,
+    pub genotypes: &'a [PathBuf],
     pub annotations: &'a Path,
 }
 
@@ -72,7 +72,7 @@ impl<'a> CohortHandle<'a> {
 
     /// Probe + (re)build path for the cohort. Wraps the existing free
     /// functions so the pipeline never reaches into raw `cohort::probe`.
-    pub fn probe(&self, genotypes: &std::path::Path, annotations: &std::path::Path) -> StoreProbe {
+    pub fn probe(&self, genotypes: &[PathBuf], annotations: &std::path::Path) -> StoreProbe {
         cohort_probe(&self.dir, genotypes, annotations)
     }
 
@@ -181,7 +181,10 @@ impl<'a> CohortHandle<'a> {
         out.status(&why);
         out.status("Building genotype store...");
 
-        out.status("  Extracting genotypes from VCF...");
+        out.status(&format!(
+            "  Extracting genotypes from {} VCF file(s)...",
+            genotypes.len()
+        ));
         let geno = crate::staar::genotype::extract_genotypes(
             genotypes,
             staging_dir,
@@ -213,9 +216,9 @@ impl<'a> CohortHandle<'a> {
 
         if n_all == 0 {
             return Err(CohortError::Analysis(format!(
-                "No variants found after joining genotypes ({}) with annotations ({}). \
+                "No variants found after joining genotypes ({} file(s)) with annotations ({}). \
                  Check that both use the same genome build and allele normalization.",
-                genotypes.display(),
+                genotypes.len(),
                 annotations.display(),
             )));
         }

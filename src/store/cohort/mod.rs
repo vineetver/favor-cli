@@ -96,15 +96,17 @@ fn dir_fingerprint(path: &Path) -> Result<Vec<u8>, CohortError> {
     Ok(hasher.finalize().to_vec())
 }
 
-pub fn compute_key(vcf_path: &Path, annotations_path: &Path) -> Result<String, CohortError> {
-    let vcf_fp = file_content_fingerprint(vcf_path)?;
+pub fn compute_key(vcf_paths: &[PathBuf], annotations_path: &Path) -> Result<String, CohortError> {
+    let mut hasher = Sha256::new();
+    for vcf_path in vcf_paths {
+        let vcf_fp = file_content_fingerprint(vcf_path)?;
+        hasher.update(&vcf_fp);
+    }
     let ann_fp = if annotations_path.is_dir() {
         dir_fingerprint(annotations_path)?
     } else {
         file_content_fingerprint(annotations_path)?
     };
-    let mut hasher = Sha256::new();
-    hasher.update(&vcf_fp);
     hasher.update(&ann_fp);
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -126,7 +128,7 @@ pub struct StoreProbe {
     pub miss_reason: Option<ProbeReason>,
 }
 
-pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> StoreProbe {
+pub fn probe(store_dir: &Path, vcf_paths: &[PathBuf], annotations_path: &Path) -> StoreProbe {
     let store_dir = store_dir.to_path_buf();
     let miss = |reason: ProbeReason| StoreProbe {
         store_dir: store_dir.clone(),
@@ -144,7 +146,7 @@ pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> Stor
     let Ok(manifest) = serde_json::from_str::<CohortManifest>(&s) else {
         return miss(ProbeReason::UnreadableManifest);
     };
-    let Ok(key) = compute_key(vcf_path, annotations_path) else {
+    let Ok(key) = compute_key(vcf_paths, annotations_path) else {
         return miss(ProbeReason::FingerprintFailed);
     };
 
@@ -316,7 +318,7 @@ pub fn build(
     engine: &DfEngine,
     geno_result: &crate::staar::genotype::GenotypeResult,
     store_dir: &Path,
-    vcf_path: &Path,
+    vcf_paths: &[PathBuf],
     annotations_path: &Path,
     out: &dyn Output,
 ) -> Result<CohortManifest, CohortError> {
@@ -331,7 +333,7 @@ pub fn build(
     // next to staging so it survives the rename of `store_dir`.
     let _lock = BuildLock::acquire(&staging.with_extension("lock"))?;
 
-    let key = compute_key(vcf_path, annotations_path)?;
+    let key = compute_key(vcf_paths, annotations_path)?;
     let n_samples = geno_result.sample_names.len();
 
     let samples_path = staging.join("samples.txt");
@@ -545,7 +547,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bogus_vcf = dir.path().join("does-not-exist.vcf.gz");
         let bogus_ann = dir.path().join("does-not-exist.annotated");
-        let p = probe(dir.path(), &bogus_vcf, &bogus_ann);
+        let p = probe(dir.path(), &[bogus_vcf], &bogus_ann);
         assert!(p.manifest.is_none());
         assert_eq!(p.miss_reason, Some(ProbeReason::NoManifest));
     }
@@ -556,7 +558,7 @@ mod tests {
         std::fs::write(dir.path().join("manifest.json"), "{ not valid json").unwrap();
         let bogus_vcf = dir.path().join("does-not-exist.vcf.gz");
         let bogus_ann = dir.path().join("does-not-exist.annotated");
-        let p = probe(dir.path(), &bogus_vcf, &bogus_ann);
+        let p = probe(dir.path(), &[bogus_vcf], &bogus_ann);
         assert!(p.manifest.is_none());
         assert_eq!(p.miss_reason, Some(ProbeReason::UnreadableManifest));
     }

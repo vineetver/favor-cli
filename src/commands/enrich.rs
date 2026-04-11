@@ -208,15 +208,27 @@ fn run_enrichment(
 
     engine.execute("CREATE TABLE _input_vids AS SELECT DISTINCT vid FROM _input")?;
 
+    // Chromosome pruning: only scan tissue chromosomes that have query variants.
+    let query_chroms = annotated.chromosomes();
+    let query_chrom_set: std::collections::HashSet<&str> =
+        query_chroms.iter().copied().collect();
+
     let mut tables_written: Vec<(String, i64)> = Vec::new();
 
     for &table in tissue_db.available_tables() {
         let table_path = tissue_db.table_path(table);
         let table_name = format!("_enrich_{}", table.display_name());
-        if engine
-            .register_parquet_dir(&table_name, &table_path)
-            .is_err()
-        {
+
+        // Register only chromosome subdirectories that overlap with query
+        // variants instead of the full directory.
+        let registered = register_pruned_tissue(
+            engine,
+            &table_path,
+            &table_name,
+            &query_chrom_set,
+            out,
+        )?;
+        if !registered {
             continue;
         }
 
@@ -265,5 +277,66 @@ fn run_enrichment(
     }
 
     Ok(tables_written)
+}
+
+/// Register only the chromosome subdirectories of a tissue table that overlap
+/// with the query variant set. Returns false if no matching chromosomes found.
+fn register_pruned_tissue(
+    engine: &DfEngine,
+    table_path: &std::path::Path,
+    table_name: &str,
+    query_chroms: &std::collections::HashSet<&str>,
+    out: &dyn Output,
+) -> Result<bool, CohortError> {
+    // Discover available chromosome directories in the tissue table.
+    let entries = match std::fs::read_dir(table_path) {
+        Ok(e) => e,
+        Err(_) => return Ok(false),
+    };
+
+    let mut parts: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut skipped = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(chrom) = name.strip_prefix("chromosome=") {
+            if query_chroms.contains(chrom) {
+                let parquet = entry.path().join("sorted.parquet");
+                if parquet.exists() {
+                    parts.push((chrom.to_string(), parquet));
+                }
+            } else {
+                skipped += 1;
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return Ok(false);
+    }
+
+    if skipped > 0 {
+        out.status(&format!(
+            "  {}: scanning {} chromosome(s) (skipped {skipped})",
+            table_name.strip_prefix("_enrich_").unwrap_or(table_name),
+            parts.len()
+        ));
+    }
+
+    if parts.len() == 1 {
+        engine.register_parquet_file(table_name, &parts[0].1)?;
+    } else {
+        for (i, (_, path)) in parts.iter().enumerate() {
+            engine.register_parquet_file(&format!("{table_name}_p{i}"), path)?;
+        }
+        let union_parts: Vec<String> = (0..parts.len())
+            .map(|i| format!("SELECT * FROM {table_name}_p{i}"))
+            .collect();
+        engine.execute(&format!(
+            "CREATE VIEW {table_name} AS {}",
+            union_parts.join(" UNION ALL "),
+        ))?;
+    }
+
+    Ok(true)
 }
 

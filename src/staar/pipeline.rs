@@ -23,7 +23,7 @@ use crate::staar::scoring::{self, MultiScoringRequest, ResultSet, ScoringRequest
 use crate::staar::{
     self, ancestry::AncestryInfo, MaskCategory, NullModelKind, RunMode, ScoringMode, TraitType,
 };
-use crate::store::cache::score_cache;
+use crate::store::cache::{null_model_cache, score_cache};
 use crate::store::cohort::{
     self, CohortHandle, CohortId, CohortManifest, GenoStoreResult, STAAR_ANNOTATION_COLUMNS,
 };
@@ -33,7 +33,7 @@ use crate::types::{AnnotatedVariant, Chromosome};
 pub enum CohortSource {
     Existing,
     Fresh {
-        genotypes: PathBuf,
+        genotypes: Vec<PathBuf>,
         annotations: PathBuf,
     },
 }
@@ -63,9 +63,9 @@ pub struct StaarConfig {
 }
 
 impl StaarConfig {
-    pub fn genotypes(&self) -> Option<&Path> {
+    pub fn genotypes(&self) -> Option<&[PathBuf]> {
         match &self.cohort_source {
-            CohortSource::Fresh { genotypes, .. } => Some(genotypes.as_path()),
+            CohortSource::Fresh { genotypes, .. } => Some(genotypes.as_slice()),
             CohortSource::Existing => None,
         }
     }
@@ -128,15 +128,15 @@ impl StaarConfig {
         &'a self,
         existing_cohort_manifest: Option<&'a Path>,
     ) -> ConfigHashInputs<'a> {
-        let (genotypes, annotations): (&Path, &Path) = match &self.cohort_source {
+        let (genotypes, annotations): (Vec<PathBuf>, &Path) = match &self.cohort_source {
             CohortSource::Fresh {
                 genotypes,
                 annotations,
-            } => (genotypes, annotations),
+            } => (genotypes.clone(), annotations),
             CohortSource::Existing => {
                 let p = existing_cohort_manifest
                     .expect("existing cohort config hash requires a resolved manifest path");
-                (p, p)
+                (vec![p.to_path_buf()], p)
             }
         };
         ConfigHashInputs {
@@ -607,23 +607,66 @@ impl<'a> StaarPipeline<'a> {
         pheno: &PhenoStageOut,
         store: &GenoStoreResult,
     ) -> Result<NullModel, CohortError> {
+        let has_kinship = self.config.has_kinship();
+
+        // Cache lookup (skip for kinship models — KinshipState contains
+        // sparse Cholesky factors that are not serializable in v1).
+        let cache_dir = if !has_kinship {
+            let key_str = null_model_cache::cache_key(
+                &store.manifest.key,
+                &self.config.trait_names[0],
+                &self.config.covariates,
+                self.config.known_loci.as_deref(),
+                &self.config.kinship,
+                self.config.kinship_groups.as_deref(),
+            );
+            let dir = self
+                .engine
+                .store()
+                .cache()
+                .null_model_cache_dir(
+                    &self.config.cohort_id,
+                    &crate::store::ids::CacheKey::new(&key_str),
+                );
+            if null_model_cache::probe(&dir) {
+                self.out.status("Null model cache: hit");
+                self.manifest.outputs.cache_decisions.push(CacheDecision {
+                    artifact: ArtifactKind::GenotypeStore,
+                    outcome: CacheOutcome::Hit,
+                    reason: "null model cache hit".into(),
+                });
+                let nm = null_model_cache::load(&dir)?;
+                self.out.status(&format!("  sigma2 = {:.4}", nm.sigma2));
+                return Ok(nm);
+            }
+            Some(dir)
+        } else {
+            self.out
+                .status("  Null model cache: skipped (kinship models not cached in v1)");
+            None
+        };
+
         self.out.status("Fitting null model...");
 
-        match self.config.null_model_kind(pheno.trait_type) {
-            NullModelKind::Glm => {
-                let nm = staar::model::fit_glm(&pheno.y, &pheno.x);
-                self.out.status(&format!("  sigma2 = {:.4}", nm.sigma2));
-                Ok(nm)
-            }
-            NullModelKind::Logistic => {
-                let nm = staar::model::fit_logistic(&pheno.y, &pheno.x, 25);
-                self.out.status(&format!("  sigma2 = {:.4}", nm.sigma2));
-                Ok(nm)
-            }
+        let nm = match self.config.null_model_kind(pheno.trait_type) {
+            NullModelKind::Glm => staar::model::fit_glm(&pheno.y, &pheno.x),
+            NullModelKind::Logistic => staar::model::fit_logistic(&pheno.y, &pheno.x, 25),
             kind @ (NullModelKind::KinshipReml | NullModelKind::KinshipPql) => {
-                self.fit_kinship_null_model(kind, pheno, store)
+                self.fit_kinship_null_model(kind, pheno, store)?
+            }
+        };
+        self.out.status(&format!("  sigma2 = {:.4}", nm.sigma2));
+
+        if let Some(ref dir) = cache_dir {
+            if let Err(e) = null_model_cache::save(dir, &nm) {
+                self.out
+                    .warn(&format!("  Null model cache: save failed ({e})"));
+            } else {
+                self.out.status("  Null model: fitted and cached");
             }
         }
+
+        Ok(nm)
     }
 
     /// Kinship-aware null model: load kinship matrices, build the group
@@ -990,7 +1033,7 @@ mod tests {
     fn dummy_config() -> StaarConfig {
         StaarConfig {
             cohort_source: CohortSource::Fresh {
-                genotypes: PathBuf::from("/tmp/g.vcf.gz"),
+                genotypes: vec![PathBuf::from("/tmp/g.vcf.gz")],
                 annotations: PathBuf::from("/tmp/a.annotated"),
             },
             phenotype: PathBuf::from("/tmp/p.tsv"),

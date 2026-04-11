@@ -14,7 +14,7 @@ use crate::staar::genotype::read_sample_names;
 use crate::store::cohort::{BuildOpts, CohortId, CohortSources, ProbeReason, StoreProbe};
 use crate::store::list::{VariantSet, VariantSetKind, VariantSetWriter};
 
-fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, CohortError> {
+pub(crate) fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, CohortError> {
     let mut resolved = Vec::new();
     for p in raw {
         if !p.exists() {
@@ -120,13 +120,16 @@ pub fn run_ingest(
     }
 
     if analysis.format == InputFormat::Vcf {
-        if config.inputs.len() == 1 {
+        // Multi-sample VCF with --annotations: build cohort store.
+        if config.annotations.is_some() {
             let n_samples = read_sample_names(first)?.len();
             if n_samples > 0 {
                 return run_cohort_build(engine, config, n_samples, out);
             }
         }
-        return ingest_vcf(engine, config, out);
+        // Check if VCF has samples for single-pass dual-write.
+        let n_samples = read_sample_names(first)?.len();
+        return ingest_vcf(engine, config, n_samples, out);
     }
     if config.emit_sql || analysis.needs_intervention() {
         return emit_sql_script(config, &analysis, out);
@@ -181,7 +184,7 @@ fn run_cohort_build(
             miss_reason: Some(ProbeReason::NoManifest),
         }
     } else {
-        cohort.probe(vcf_path, annotations_path)
+        cohort.probe(&config.inputs, annotations_path)
     };
 
     let staging_dir = {
@@ -212,7 +215,7 @@ fn run_cohort_build(
 
     let result = cohort.build_or_load(
         CohortSources {
-            genotypes: vcf_path,
+            genotypes: &config.inputs,
             annotations: annotations_path,
         },
         BuildOpts {
@@ -297,6 +300,7 @@ fn validate_all_same_format(
 fn ingest_vcf(
     engine: &Engine,
     config: &IngestConfig,
+    n_samples: usize,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
     let first = &config.inputs[0];
@@ -313,12 +317,24 @@ fn ingest_vcf(
     }
 
     let resources = engine.resources();
-    out.status(&format!(
-        "Ingesting {} VCF file(s) ({}, {} threads)",
-        config.inputs.len(),
-        resources.memory_human(),
-        resources.threads
-    ));
+    let dual_write = n_samples > 0;
+
+    if dual_write {
+        out.status(&format!(
+            "Ingesting {} VCF file(s) + extracting genotypes ({} samples, {}, {} threads)",
+            config.inputs.len(),
+            n_samples,
+            resources.memory_human(),
+            resources.threads
+        ));
+    } else {
+        out.status(&format!(
+            "Ingesting {} VCF file(s) ({}, {} threads)",
+            config.inputs.len(),
+            resources.memory_human(),
+            resources.threads
+        ));
+    }
 
     let source_str = if config.inputs.len() == 1 {
         first.display().to_string()
@@ -329,16 +345,41 @@ fn ingest_vcf(
         VariantSetWriter::new(&config.output, ingest::JoinKey::ChromPosRefAlt, &source_str)?;
     vs_writer.set_kind(VariantSetKind::Ingested);
 
+    let geno_dir = config.output.with_extension("genotypes");
+    let mut geno_writer = if dual_write {
+        Some(crate::staar::genotype::GenotypeWriter::new(
+            n_samples,
+            &geno_dir,
+            resources.memory_bytes / 2,
+        )?)
+    } else {
+        None
+    };
+
     bail_if_cancelled(out)?;
     let result = ingest::vcf::ingest_vcfs(
         &config.inputs,
         &mut vs_writer,
+        geno_writer.as_mut(),
         resources.memory_bytes,
         resources.threads,
         out,
     )?;
     bail_if_cancelled(out)?;
     let vs = vs_writer.finish()?;
+
+    // Finalize genotype writer if active.
+    if let Some(gw) = geno_writer {
+        let sample_names = read_sample_names(first)?;
+        let source_vcfs = config.inputs.iter().map(|p| p.display().to_string()).collect();
+        let geno_result = gw.finish(&sample_names, source_vcfs)?;
+        out.success(&format!(
+            "  Genotypes: {} variants × {} samples -> {}",
+            result.genotype_variants,
+            n_samples,
+            geno_result.output_dir.display()
+        ));
+    }
 
     out.success(&format!(
         "Ingested {} variants from {} file(s) -> {}",
@@ -359,13 +400,19 @@ fn ingest_vcf(
         ));
     }
 
-    out.result_json(&json!({
+    let mut result_json = json!({
         "status": "ok",
         "output": vs.root().to_string_lossy(),
         "variant_count": result.variant_count,
         "file_count": config.inputs.len(),
         "join_key": "chrom_pos_ref_alt",
-    }));
+    });
+    if dual_write {
+        result_json["genotype_dir"] = json!(geno_dir.to_string_lossy());
+        result_json["genotype_variants"] = json!(result.genotype_variants);
+        result_json["n_samples"] = json!(n_samples);
+    }
+    out.result_json(&result_json);
 
     Ok(())
 }
