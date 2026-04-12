@@ -67,7 +67,7 @@ impl Progress {
 }
 
 /// All commands use this trait for output — never write stdout directly.
-pub trait Output {
+pub trait Output: Send + Sync {
     fn status(&self, msg: &str);
     fn success(&self, msg: &str);
     fn warn(&self, msg: &str);

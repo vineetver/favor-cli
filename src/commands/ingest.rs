@@ -120,15 +120,10 @@ pub fn run_ingest(
     }
 
     if analysis.format == InputFormat::Vcf {
-        // Multi-sample VCF with --annotations: build cohort store.
-        if config.annotations.is_some() {
-            let n_samples = read_sample_names(first)?.len();
-            if n_samples > 0 {
-                return run_cohort_build(engine, config, n_samples, out);
-            }
-        }
-        // Check if VCF has samples for single-pass dual-write.
         let n_samples = read_sample_names(first)?.len();
+        if config.annotations.is_some() && n_samples > 0 {
+            return run_cohort_build(engine, config, n_samples, out);
+        }
         return ingest_vcf(engine, config, n_samples, out);
     }
     if config.emit_sql || analysis.needs_intervention() {
@@ -336,50 +331,91 @@ fn ingest_vcf(
         ));
     }
 
-    let source_str = if config.inputs.len() == 1 {
-        first.display().to_string()
-    } else {
-        format!("{} files", config.inputs.len())
-    };
-    let mut vs_writer =
-        VariantSetWriter::new(&config.output, ingest::JoinKey::ChromPosRefAlt, &source_str)?;
-    vs_writer.set_kind(VariantSetKind::Ingested);
-
     let geno_dir = config.output.with_extension("genotypes");
-    let mut geno_writer = if dual_write {
-        Some(crate::staar::genotype::GenotypeWriter::new(
+
+    bail_if_cancelled(out)?;
+
+    let (result, vs) = if config.inputs.len() > 1 {
+        // Parallel path: each file gets its own worker.
+        let result = ingest::vcf::ingest_vcfs_parallel(
+            &config.inputs,
+            &config.output,
+            if dual_write { Some(geno_dir.as_path()) } else { None },
             n_samples,
-            &geno_dir,
-            resources.memory_bytes / 2,
-        )?)
+            resources.memory_bytes,
+            resources.threads,
+            out,
+        )?;
+
+        let source_str = format!("{} files", config.inputs.len());
+        let mut vs_writer =
+            VariantSetWriter::new(&config.output, ingest::JoinKey::ChromPosRefAlt, &source_str)?;
+        vs_writer.set_kind(VariantSetKind::Ingested);
+        vs_writer.scan_and_register()?;
+        let vs = vs_writer.finish()?;
+
+        if dual_write {
+            let sample_names = read_sample_names(first)?;
+            let source_vcfs: Vec<String> = config.inputs.iter().map(|p| p.display().to_string()).collect();
+            let meta = crate::staar::genotype::GenotypeMeta {
+                version: 1,
+                n_samples,
+                chromosomes: vs.chromosomes().iter().map(|c| c.to_string()).collect(),
+                source_vcfs,
+            };
+            let meta_path = geno_dir.join("genotypes.json");
+            std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)
+                .map_err(|e| CohortError::Resource(format!("JSON: {e}")))?
+            ).map_err(|e| CohortError::Resource(format!("Cannot write '{}': {e}", meta_path.display())))?;
+            let sidecar = geno_dir.join("samples.txt");
+            std::fs::write(&sidecar, sample_names.join("\n"))
+                .map_err(|e| CohortError::Resource(format!("Cannot write '{}': {e}", sidecar.display())))?;
+            out.success(&format!(
+                "  Genotypes: {} variants x {} samples -> {}",
+                result.genotype_variants, n_samples, geno_dir.display()
+            ));
+        }
+
+        (result, vs)
     } else {
-        None
+        // Sequential path: single file, zero overhead.
+        let source_str = first.display().to_string();
+        let mut vs_writer =
+            VariantSetWriter::new(&config.output, ingest::JoinKey::ChromPosRefAlt, &source_str)?;
+        vs_writer.set_kind(VariantSetKind::Ingested);
+
+        let mut geno_writer = if dual_write {
+            Some(crate::staar::genotype::GenotypeWriter::new(
+                n_samples, &geno_dir, resources.memory_bytes,
+            )?)
+        } else {
+            None
+        };
+
+        let result = ingest::vcf::ingest_vcfs(
+            &config.inputs,
+            &mut vs_writer,
+            geno_writer.as_mut(),
+            resources.memory_bytes,
+            resources.threads,
+            out,
+        )?;
+        let vs = vs_writer.finish()?;
+
+        if let Some(gw) = geno_writer {
+            let sample_names = read_sample_names(first)?;
+            let source_vcfs = config.inputs.iter().map(|p| p.display().to_string()).collect();
+            let geno_result = gw.finish(&sample_names, source_vcfs)?;
+            out.success(&format!(
+                "  Genotypes: {} variants x {} samples -> {}",
+                result.genotype_variants, n_samples, geno_result.output_dir.display()
+            ));
+        }
+
+        (result, vs)
     };
 
     bail_if_cancelled(out)?;
-    let result = ingest::vcf::ingest_vcfs(
-        &config.inputs,
-        &mut vs_writer,
-        geno_writer.as_mut(),
-        resources.memory_bytes,
-        resources.threads,
-        out,
-    )?;
-    bail_if_cancelled(out)?;
-    let vs = vs_writer.finish()?;
-
-    // Finalize genotype writer if active.
-    if let Some(gw) = geno_writer {
-        let sample_names = read_sample_names(first)?;
-        let source_vcfs = config.inputs.iter().map(|p| p.display().to_string()).collect();
-        let geno_result = gw.finish(&sample_names, source_vcfs)?;
-        out.success(&format!(
-            "  Genotypes: {} variants × {} samples -> {}",
-            result.genotype_variants,
-            n_samples,
-            geno_result.output_dir.display()
-        ));
-    }
 
     out.success(&format!(
         "Ingested {} variants from {} file(s) -> {}",
