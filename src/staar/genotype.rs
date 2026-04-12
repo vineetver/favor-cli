@@ -22,7 +22,7 @@ use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 
 use crate::error::CohortError;
-use crate::ingest::vcf::{normalize_chrom, open_vcf, parsimony_normalize};
+use crate::ingest::vcf::{ascii_uppercase_into, normalize_chrom, open_vcf, parsimony_normalize};
 use crate::output::Output;
 
 #[derive(Serialize, Deserialize)]
@@ -167,6 +167,7 @@ pub struct GenotypeWriter {
     schema: Arc<Schema>,
     props: WriterProperties,
     geno_dir: PathBuf,
+    part_id: Option<usize>,
 }
 
 impl GenotypeWriter {
@@ -175,6 +176,18 @@ impl GenotypeWriter {
         output_dir: &Path,
         available_memory: u64,
     ) -> Result<Self, CohortError> {
+        Self::with_part_id(n_samples, output_dir, available_memory, None)
+    }
+
+    pub fn with_part_id(
+        n_samples: usize,
+        output_dir: &Path,
+        available_memory: u64,
+        part_id: Option<usize>,
+    ) -> Result<Self, CohortError> {
+        // FixedSizeListBuilder holds batch_size * n_samples * 4 bytes.
+        // Arrow's finish() temporarily doubles this creating new arrays.
+        // Use 1/4 of budget for the batch to leave room for the copy + overhead.
         let bytes_per_variant = (n_samples as u64) * 4 + 200;
         let batch_size =
             ((available_memory / 4) / bytes_per_variant).clamp(1000, 100_000) as usize;
@@ -201,6 +214,7 @@ impl GenotypeWriter {
             schema,
             props,
             geno_dir,
+            part_id,
         })
     }
 
@@ -227,14 +241,30 @@ impl GenotypeWriter {
         let mut an: f64 = 0.0;
 
         if !samples_str.is_empty() && samples_str != "." {
-            for (i, sf) in samples_str.split('\t').enumerate().take(self.n_samples) {
-                let gt = extract_gt_field(sf, 0);
-                let dose = gt_to_dosage(gt.as_bytes(), alt_idx);
-                self.dosages[i] = dose;
-                if dose.is_finite() {
-                    ac += dose as f64;
-                    an += 2.0;
-                }
+            let bytes = samples_str.as_bytes();
+            let n = self.n_samples;
+            let mut sample_idx: usize = 0;
+            let mut start: usize = 0;
+
+            // memchr uses AVX2/SSE4.2 to find tabs at 32 bytes/cycle.
+            // For 200K-sample lines (~7MB), this replaces the dominant cost
+            // of byte-by-byte split('\t').
+            for tab_pos in memchr::memchr_iter(b'\t', bytes) {
+                if sample_idx >= n { break; }
+                let gt_len = gt_prefix_len(&bytes[start..tab_pos]);
+                let dose = gt_to_dosage(&bytes[start..start + gt_len], alt_idx);
+                unsafe { *self.dosages.get_unchecked_mut(sample_idx) = dose; }
+                let finite = dose.is_finite();
+                ac += (finite as u8 as f64) * (dose as f64);
+                an += (finite as u8 as f64) * 2.0;
+                sample_idx += 1;
+                start = tab_pos + 1;
+            }
+            if sample_idx < n && start < bytes.len() {
+                let gt_len = gt_prefix_len(&bytes[start..]);
+                let dose = gt_to_dosage(&bytes[start..start + gt_len], alt_idx);
+                self.dosages[sample_idx] = dose;
+                if dose.is_finite() { ac += dose as f64; an += 2.0; }
             }
         }
 
@@ -297,6 +327,18 @@ impl GenotypeWriter {
         })
     }
 
+    /// Flush remaining batches and close the writer. Does NOT write sidecar
+    /// files (samples.txt, genotypes.json). Used by parallel workers where the
+    /// orchestrator handles sidecars after all workers join.
+    pub fn flush_all(&mut self) -> Result<(), CohortError> {
+        self.flush()?;
+        if let Some(w) = self.writer.take() {
+            w.close()
+                .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<(), CohortError> {
         if self.batch.count > 0 {
             if let Some(w) = self.writer.as_mut() {
@@ -318,7 +360,10 @@ impl GenotypeWriter {
         std::fs::create_dir_all(&chr_dir).map_err(|e| {
             CohortError::Resource(format!("Cannot create '{}': {e}", chr_dir.display()))
         })?;
-        let parquet_path = chr_dir.join("data.parquet");
+        let parquet_path = match self.part_id {
+            Some(id) => chr_dir.join(format!("part_{id}.parquet")),
+            None => chr_dir.join("data.parquet"),
+        };
         let f = File::create(&parquet_path).map_err(|e| {
             CohortError::Resource(format!("Cannot create '{}': {e}", parquet_path.display()))
         })?;
@@ -365,13 +410,6 @@ fn process_record_geno(
         gw.push(chrom, np, nr, na, samples_str, (alt_idx + 1) as u8, output)?;
     }
     Ok(())
-}
-
-fn ascii_uppercase_into(src: &str, buf: &mut String) {
-    buf.clear();
-    for &b in src.as_bytes() {
-        buf.push(b.to_ascii_uppercase() as char);
-    }
 }
 
 fn packed_schema(n_samples: usize) -> Schema {
@@ -460,27 +498,17 @@ impl PackedBatchBuilder {
     }
 }
 
-/// Extract GT field from a colon-delimited sample field. Zero allocation.
+/// Length of the GT prefix in a sample field byte slice.
+/// GT is FORMAT field 0, so it ends at the first ':' (or the whole slice).
+/// For the common 3-byte case (0/0, 0/1, ./.) with a colon at byte 3,
+/// the branch hits immediately and memchr is never called.
 #[inline]
-pub fn extract_gt_field(sample_field: &str, gt_index: usize) -> &str {
-    let mut start = 0;
-    let mut field_idx = 0;
-    let bytes = sample_field.as_bytes();
-    for i in 0..bytes.len() {
-        if bytes[i] == b':' {
-            if field_idx == gt_index {
-                return &sample_field[start..i];
-            }
-            field_idx += 1;
-            start = i + 1;
-        }
-    }
-    if field_idx == gt_index {
-        &sample_field[start..]
-    } else {
-        "."
-    }
+fn gt_prefix_len(seg: &[u8]) -> usize {
+    if seg.len() >= 4 && seg[3] == b':' { return 3; }
+    memchr::memchr(b':', seg).unwrap_or(seg.len())
 }
+
+
 
 /// Parse GT bytes to dosage. Branchless for common cases, no allocation.
 /// "0/0" → 0.0, "0/1" → 1.0, "1/1" → 2.0, "./." → NaN

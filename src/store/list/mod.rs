@@ -146,11 +146,23 @@ impl VariantSetWriter {
         })
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn chrom_path(&self, chrom: &str) -> Result<PathBuf, CohortError> {
         let dir = self.root.join(format!("chromosome={chrom}"));
         std::fs::create_dir_all(&dir)
             .map_err(|e| CohortError::Resource(format!("Cannot create {}: {e}", dir.display())))?;
         Ok(dir.join("data.parquet"))
+    }
+
+    #[allow(dead_code)]
+    pub fn chrom_part_path(&self, chrom: &str, part_id: usize) -> Result<PathBuf, CohortError> {
+        let dir = self.root.join(format!("chromosome={chrom}"));
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| CohortError::Resource(format!("Cannot create {}: {e}", dir.display())))?;
+        Ok(dir.join(format!("part_{part_id}.parquet")))
     }
 
     pub fn register_chrom(&mut self, chrom: &str, variant_count: u64, size_bytes: u64) {

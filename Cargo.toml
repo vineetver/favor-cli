@@ -27,6 +27,7 @@ faer = "0.22"
 statrs = "0.18"
 rayon = "1.10"
 walkdir = "2"
+memchr = "2"
 
 # VCF → parquet: streaming parser + columnar writer
 noodles-vcf = "0.73"

@@ -1738,6 +1738,7 @@ dependencies = [
  "futures",
  "indicatif",
  "libc",
+ "memchr",
  "memmap2",
  "noodles-bgzf 0.14.0",
  "noodles-vcf",
