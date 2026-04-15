@@ -213,7 +213,6 @@ noncoding        upstream, downstream, UTR, promoter_CAGE, promoter_   region_ty
                  DHS, enhancer_CAGE, enhancer_DHS, ncRNA                flags
 sliding-window   fixed-width chunks (default 2 kb, step 2 kb)          positional
 scang            variable-width chunks, L ∈ [lmin, lmax] variants      positional (data-adaptive)
-custom           user BED (not yet wired)                              user-supplied
 ```
 
 ### Speed

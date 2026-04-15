@@ -78,7 +78,6 @@ pub enum MaskCategory {
     Noncoding,
     SlidingWindow,
     Scang,
-    Custom,
 }
 
 impl std::str::FromStr for MaskCategory {
@@ -89,7 +88,6 @@ impl std::str::FromStr for MaskCategory {
             "noncoding" => Ok(Self::Noncoding),
             "sliding-window" | "window" => Ok(Self::SlidingWindow),
             "scang" => Ok(Self::Scang),
-            "custom" => Ok(Self::Custom),
             _ => Err(format!("unknown mask: {s}")),
         }
     }

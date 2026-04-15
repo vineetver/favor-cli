@@ -23,7 +23,7 @@ pub fn parse_mask_categories(masks: &[String]) -> Result<Vec<MaskCategory>, Coho
         .map(|s| {
             s.parse::<MaskCategory>().map_err(|_| {
                 CohortError::Input(format!(
-                    "Unknown mask '{s}'. Available: coding, noncoding, sliding-window, scang, custom"
+                    "Unknown mask '{s}'. Available: coding, noncoding, sliding-window, scang"
                 ))
             })
         })

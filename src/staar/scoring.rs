@@ -72,7 +72,7 @@ struct MaskPlan {
 }
 
 impl MaskPlan {
-    fn build(categories: &[MaskCategory], out: &dyn Output) -> Self {
+    fn build(categories: &[MaskCategory]) -> Self {
         let mut gene_predicates: Vec<(MaskType, MaskPredicate)> = Vec::new();
         let mut want_windows = false;
         let mut want_scang = false;
@@ -85,7 +85,6 @@ impl MaskPlan {
                 }
                 MaskCategory::SlidingWindow => want_windows = true,
                 MaskCategory::Scang => want_scang = true,
-                MaskCategory::Custom => out.warn("Custom BED: not yet implemented"),
             }
         }
 
@@ -158,7 +157,7 @@ pub fn run_score_tests(
 ) -> Result<(ResultSet, Vec<crate::staar::output::IndividualRow>), CohortError> {
     out.status("Running score tests (carrier-indexed sparse)...");
 
-    let mut plan = MaskPlan::build(request.mask_categories, out);
+    let mut plan = MaskPlan::build(request.mask_categories);
     let mut individual_rows: Vec<crate::staar::output::IndividualRow> = Vec::new();
 
     // `score_one_window` always takes the cached-U/K path; SPA on windows
@@ -756,7 +755,7 @@ pub fn run_multi_score_tests(
     debug_assert_eq!(vcf_to_pheno.iter().filter(|p| p.is_some()).count(), null.n_samples);
     let n_pheno = null.n_samples;
 
-    let mut plan = MaskPlan::build(request.mask_categories, out);
+    let mut plan = MaskPlan::build(request.mask_categories);
 
     for ci in &manifest.chromosomes {
         let chrom: Chromosome = ci.name.parse().map_err(|e: String| CohortError::Input(e))?;
