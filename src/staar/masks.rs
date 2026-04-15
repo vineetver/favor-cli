@@ -20,6 +20,7 @@ pub const CODING_MASKS: &[MaskDef] = &[
     (MaskType::Synonymous, is_synonymous),
     (MaskType::Ptv, is_ptv),
     (MaskType::PtvDs, is_ptv_ds),
+    (MaskType::CodingInclPtv, is_coding_incl_ptv),
 ];
 
 pub const NONCODING_MASKS: &[MaskDef] = &[
@@ -59,6 +60,13 @@ fn is_ptv(v: &AnnotatedVariant) -> bool {
 
 fn is_ptv_ds(v: &AnnotatedVariant) -> bool {
     is_ptv(v) || (is_splice(v) && v.annotation.cadd_phred > 20.0)
+}
+
+// Mirrors STAARpipeline's coding_incl_ptv: a single coding-region mask that
+// unions pLoF, missense, synonymous, and PTV. Used when the downstream test
+// wants one consolidated coding p-value per gene instead of per-consequence.
+fn is_coding_incl_ptv(v: &AnnotatedVariant) -> bool {
+    is_plof(v) || is_missense(v) || is_synonymous(v) || is_ptv(v)
 }
 
 fn is_splice(v: &AnnotatedVariant) -> bool {
@@ -531,6 +539,7 @@ mod tests {
         assert!(!is_synonymous(&var));
         assert!(!is_ptv(&var));
         assert!(!is_ptv_ds(&var));
+        assert!(!is_coding_incl_ptv(&var));
         assert!(!is_upstream(&var));
         assert!(!is_downstream(&var));
         assert!(!is_utr(&var));
@@ -539,6 +548,24 @@ mod tests {
         assert!(!is_enhancer_cage(&var));
         assert!(!is_enhancer_dhs(&var));
         assert!(!is_ncrna(&var));
+    }
+
+    #[test]
+    fn coding_incl_ptv_unions_coding_categories() {
+        let stopgain = v("exonic", "stopgain", 30.0, 0.0, false, false, false, false);
+        let frameshift = v("exonic", "frameshift deletion", 25.0, 0.0, false, false, false, false);
+        let missense = v("exonic", "nonsynonymous SNV", 20.0, 0.0, false, false, false, false);
+        let synonymous = v("exonic", "synonymous SNV", 6.4, 0.0, false, false, false, false);
+        let splice = v("splicing", "", 25.1, 0.0, false, false, false, false);
+        let intergenic = v("intergenic", "", 5.0, 0.0, false, false, false, false);
+
+        assert!(is_coding_incl_ptv(&stopgain));
+        assert!(is_coding_incl_ptv(&frameshift));
+        assert!(is_coding_incl_ptv(&missense));
+        assert!(is_coding_incl_ptv(&synonymous));
+        // `is_plof` folds splicing in; `coding_incl_ptv` inherits that.
+        assert!(is_coding_incl_ptv(&splice));
+        assert!(!is_coding_incl_ptv(&intergenic));
     }
 
     #[test]

@@ -171,7 +171,7 @@ Categories:
 category         predicates expanded                                    how variants chosen
 ──────────────   ──────────────────────────────────────────────────    ──────────────────────
 coding           pLoF, missense, disruptive_missense, pLoF_missense,   consequence + CADD + REVEL
-                 synonymous, ptv, ptv_ds
+                 synonymous, ptv, ptv_ds, coding_incl_ptv
 noncoding        upstream, downstream, UTR, promoter_CAGE, promoter_   region_type + regulatory
                  DHS, enhancer_CAGE, enhancer_DHS, ncRNA                flags
 sliding-window   fixed-width chunks (default 2 kb, step 2 kb)          positional
