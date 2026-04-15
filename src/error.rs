@@ -32,6 +32,21 @@ impl CohortError {
             Self::Cancelled => "cancelled",
         }
     }
+
+    /// Prepend a context label to the error message while preserving the
+    /// variant (and therefore the exit code). Used at parallel-worker
+    /// boundaries where we want to attach `(worker_id, file path)` to an
+    /// otherwise opaque error without losing its classification.
+    pub fn with_context(self, ctx: impl std::fmt::Display) -> Self {
+        match self {
+            Self::Input(m) => Self::Input(format!("{ctx}: {m}")),
+            Self::DataMissing(m) => Self::DataMissing(format!("{ctx}: {m}")),
+            Self::Resource(m) => Self::Resource(format!("{ctx}: {m}")),
+            Self::Analysis(m) => Self::Analysis(format!("{ctx}: {m}")),
+            Self::Internal(e) => Self::Internal(e.context(ctx.to_string())),
+            Self::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 impl fmt::Display for CohortError {

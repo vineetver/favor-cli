@@ -185,12 +185,8 @@ impl GenotypeWriter {
         available_memory: u64,
         part_id: Option<usize>,
     ) -> Result<Self, CohortError> {
-        // FixedSizeListBuilder holds batch_size * n_samples * 4 bytes.
-        // Arrow's finish() temporarily doubles this creating new arrays.
-        // Use 1/4 of budget for the batch to leave room for the copy + overhead.
-        let bytes_per_variant = (n_samples as u64) * 4 + 200;
         let batch_size =
-            ((available_memory / 4) / bytes_per_variant).clamp(1000, 100_000) as usize;
+            raw_batch_size(n_samples, available_memory).clamp(1000, 100_000) as usize;
 
         let geno_dir = output_dir.to_path_buf();
         std::fs::create_dir_all(&geno_dir).map_err(|e| {
@@ -321,9 +317,11 @@ impl GenotypeWriter {
             CohortError::Resource(format!("Cannot write '{}': {e}", meta_path.display()))
         })?;
 
+        // `Drop` is implemented on `Self`, so fields can't be partial-moved;
+        // swap `geno_dir` out with a default instead.
         Ok(GenotypeResult {
             sample_names: sample_names.to_vec(),
-            output_dir: self.geno_dir,
+            output_dir: std::mem::take(&mut self.geno_dir),
         })
     }
 
@@ -378,6 +376,17 @@ impl GenotypeWriter {
     }
 }
 
+// Close parquet footer on unwind so a panicking rayon worker can't leave a
+// truncated, unreadable parquet behind. Normal paths (`flush_all`, `finish`,
+// `switch_chrom`) already `take` the writer, so this only fires during panic.
+impl Drop for GenotypeWriter {
+    fn drop(&mut self) {
+        if let Some(w) = self.writer.take() {
+            let _ = w.close();
+        }
+    }
+}
+
 fn process_record_geno(
     record: &noodles_vcf::Record,
     gw: &mut GenotypeWriter,
@@ -410,6 +419,18 @@ fn process_record_geno(
         gw.push(chrom, np, nr, na, samples_str, (alt_idx + 1) as u8, output)?;
     }
     Ok(())
+}
+
+/// Row-group capacity the GenotypeWriter would allocate under `available_memory`,
+/// before the 1k..100k clamp. Shared with the ingest preflight so it can reject
+/// configurations whose raw capacity would force flush-per-variant throughput.
+///
+/// The `/ 4` factor matches the writer's internal reservation: the
+/// FixedSizeListBuilder holds `batch_size * n_samples * 4` bytes, Arrow's
+/// `finish()` briefly doubles that during copy-out.
+pub fn raw_batch_size(n_samples: usize, available_memory: u64) -> u64 {
+    let bytes_per_variant = (n_samples as u64) * 4 + 200;
+    (available_memory / 4) / bytes_per_variant
 }
 
 fn packed_schema(n_samples: usize) -> Schema {
@@ -622,4 +643,53 @@ pub fn load(
     }
     let _ = engine.execute("DROP TABLE IF EXISTS _geno_load");
     Ok(flat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{self, AssertUnwindSafe};
+
+    struct SilentOutput;
+    impl crate::output::Output for SilentOutput {
+        fn status(&self, _msg: &str) {}
+        fn success(&self, _msg: &str) {}
+        fn warn(&self, _msg: &str) {}
+        fn error(&self, _err: &CohortError) {}
+        fn result_json(&self, _data: &serde_json::Value) {}
+        fn table(&self, _headers: &[&str], _rows: &[Vec<String>]) {}
+        fn progress(&self, _total: u64, _label: &str) -> crate::output::Progress {
+            crate::output::Progress::noop()
+        }
+    }
+
+    #[test]
+    fn raw_batch_size_matches_expected_formula() {
+        // 1 MiB budget, 256 samples -> (1 MiB / 4) / (256*4+200) = ~217
+        let got = raw_batch_size(256, 1 << 20);
+        assert!(got > 200 && got < 230, "got {got}");
+        // Zero samples => overhead-only denominator (200 bytes).
+        assert_eq!(raw_batch_size(0, 800), 1);
+    }
+
+    #[test]
+    fn drop_closes_parquet_footer_on_panic() {
+        // Panicking inside a rayon worker must not leave a truncated, unreadable
+        // parquet: the Drop impl writes the footer during unwind.
+        let tmp = tempfile::tempdir().unwrap();
+        let out = SilentOutput;
+        let caught = panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut gw = GenotypeWriter::new(2, tmp.path(), 64 << 20).unwrap();
+            // One biallelic SNV, two samples. GT field = "0/0\t0/1".
+            gw.push("22", 15_000_000, "A", "G", "0/0\t0/1", 1, &out).unwrap();
+            panic!("simulated worker panic before flush_all");
+        }));
+        assert!(caught.is_err(), "expected panic to propagate");
+
+        let parquet_path = tmp.path().join("chromosome=22").join("data.parquet");
+        assert!(parquet_path.exists(), "parquet missing at {}", parquet_path.display());
+        let f = std::fs::File::open(&parquet_path).unwrap();
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(f);
+        assert!(reader.is_ok(), "parquet footer missing: {:?}", reader.err());
+    }
 }
