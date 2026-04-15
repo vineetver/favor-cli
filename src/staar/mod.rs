@@ -3,6 +3,8 @@ pub mod carrier;
 pub mod genotype;
 #[cfg(test)]
 mod ground_truth_test;
+#[cfg(test)]
+mod invariance_test;
 pub mod kinship;
 pub mod masks;
 pub mod meta;
