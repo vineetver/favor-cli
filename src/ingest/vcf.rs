@@ -640,6 +640,11 @@ pub fn ingest_vcfs_parallel(
 ) -> Result<VcfIngestResult, CohortError> {
     use rayon::prelude::*;
 
+    let threads = preflight(
+        input_paths, output_dir, geno_dir, n_samples,
+        memory_budget, threads, output,
+    )?;
+
     if n_samples > 0 {
         output.status("  Validating sample consistency across files...");
         validate_headers_parallel(input_paths, n_samples)?;
@@ -670,23 +675,18 @@ pub fn ingest_vcfs_parallel(
     let results: Vec<VcfIngestResult> = chunks
         .into_par_iter()
         .enumerate()
-        .map(|(worker_id, file_chunk)| -> Result<VcfIngestResult, CohortError> {
-            let mut gw = match geno_dir {
-                Some(gd) => Some(GenotypeWriter::with_part_id(
-                    n_samples, gd, memory_per_worker, Some(worker_id),
-                )?),
-                None => None,
-            };
-            let mut ctx = RecordContext::new(
-                gw.as_mut(), memory_per_worker,
-                output_dir.to_path_buf(), Some(worker_id),
-            );
-            ctx.ingest_files(&file_chunk, 1, output)?;
-            let result = ctx.flush()?;
-            if let Some(mut g) = gw {
-                g.flush_all()?;
-            }
-            Ok(result)
+        .map(|(worker_id, file_chunk)| {
+            run_worker(
+                worker_id, &file_chunk, output_dir, geno_dir,
+                n_samples, memory_per_worker, output,
+            )
+            .map_err(|e| e.with_context(format!(
+                "worker {worker_id} ({})",
+                file_chunk.iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -703,9 +703,171 @@ pub fn ingest_vcfs_parallel(
     Ok(total)
 }
 
+/// One rayon worker: own a `GenotypeWriter` and a `RecordContext`, ingest the
+/// file chunk sequentially, close both cleanly. Extracted so the caller can
+/// attach `(worker_id, file paths)` to any error via `with_context`.
+fn run_worker(
+    worker_id: usize,
+    file_chunk: &[&PathBuf],
+    output_dir: &Path,
+    geno_dir: Option<&Path>,
+    n_samples: usize,
+    memory_per_worker: u64,
+    output: &dyn Output,
+) -> Result<VcfIngestResult, CohortError> {
+    let mut gw = match geno_dir {
+        Some(gd) => Some(GenotypeWriter::with_part_id(
+            n_samples, gd, memory_per_worker, Some(worker_id),
+        )?),
+        None => None,
+    };
+    let mut ctx = RecordContext::new(
+        gw.as_mut(), memory_per_worker,
+        output_dir.to_path_buf(), Some(worker_id),
+    );
+    ctx.ingest_files(file_chunk, 1, output)?;
+    let result = ctx.flush()?;
+    if let Some(mut g) = gw {
+        g.flush_all()?;
+    }
+    Ok(result)
+}
+
+/// Pre-flight checks for parallel VCF ingest. Catches duplicate input paths,
+/// stale part files from a prior failed run, insufficient fd headroom, and
+/// memory budgets that would starve the genotype writer. Returns the
+/// (possibly reduced) worker count that is safe to spawn.
+fn preflight(
+    input_paths: &[PathBuf],
+    output_dir: &Path,
+    geno_dir: Option<&Path>,
+    n_samples: usize,
+    memory_budget: u64,
+    requested_threads: usize,
+    output: &dyn Output,
+) -> Result<usize, CohortError> {
+    dedup_canonical(input_paths)?;
+    let mut roots: Vec<&Path> = vec![output_dir];
+    if let Some(gd) = geno_dir { roots.push(gd); }
+    clean_stale_parts(&roots, output)?;
+    let threads = cap_threads_for_fds(requested_threads, output)?;
+    let threads = cap_threads_for_batch_size(
+        n_samples, memory_budget, threads, geno_dir.is_some(),
+    )?;
+    Ok(threads)
+}
+
+fn dedup_canonical(paths: &[PathBuf]) -> Result<(), CohortError> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::with_capacity(paths.len());
+    for p in paths {
+        let canon = std::fs::canonicalize(p).map_err(|e| {
+            CohortError::Input(format!("cannot open '{}': {e}", p.display()))
+        })?;
+        if !seen.insert(canon) {
+            return Err(CohortError::Input(format!(
+                "duplicate VCF input: '{}' (each file must appear at most once)",
+                p.display(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn clean_stale_parts(roots: &[&Path], output: &dyn Output) -> Result<(), CohortError> {
+    let mut removed = 0usize;
+    for root in roots {
+        if !root.exists() { continue; }
+        // Parts live at root/chromosome=<chr>/part_<id>.parquet (depth 2).
+        for entry in walkdir::WalkDir::new(root).min_depth(2).max_depth(2) {
+            let entry = entry.map_err(|e| CohortError::Resource(format!(
+                "cannot scan '{}': {e}", root.display(),
+            )))?;
+            let name = entry.file_name().to_string_lossy();
+            if name.starts_with("part_") && name.ends_with(".parquet") {
+                std::fs::remove_file(entry.path()).map_err(|e| CohortError::Resource(format!(
+                    "cannot remove stale part '{}': {e}", entry.path().display(),
+                )))?;
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        output.status(&format!("  Preflight: cleaned {removed} stale part file(s)"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn fd_soft_limit() -> Option<u64> {
+    let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: `rlim` is a valid local; RLIMIT_NOFILE is the standard descriptor resource.
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+    if rc == 0 { Some(rlim.rlim_cur) } else { None }
+}
+#[cfg(not(unix))]
+fn fd_soft_limit() -> Option<u64> { None }
+
+// Per-worker fd cost: ~24 chromosome parquet writers + bgzf reader +
+// genotype writer + slack. Baseline covers stdio, mmap handles, etc.
+// Usable fraction is 80% of the soft limit — leaves headroom for lib internals.
+fn fd_safe_workers(limit: u64) -> usize {
+    const FDS_PER_WORKER: u64 = 30;
+    const BASELINE_FDS: u64 = 64;
+    // `limit / 10 * 8` avoids overflow at the u64::MAX edge cases exercised by tests.
+    let budget = (limit / 10 * 8).saturating_sub(BASELINE_FDS);
+    (budget / FDS_PER_WORKER) as usize
+}
+
+fn cap_threads_for_fds(threads: usize, output: &dyn Output) -> Result<usize, CohortError> {
+    let Some(limit) = fd_soft_limit() else { return Ok(threads); };
+    let safe = fd_safe_workers(limit);
+    if safe == 0 {
+        return Err(CohortError::Resource(format!(
+            "fd soft limit {limit} too low for parallel ingest; \
+             raise with `ulimit -n 4096` and retry",
+        )));
+    }
+    if threads <= safe { return Ok(threads); }
+    output.status(&format!(
+        "  Preflight: capping workers {threads} -> {safe} (fd soft limit {limit})",
+    ));
+    Ok(safe)
+}
+
+fn cap_threads_for_batch_size(
+    n_samples: usize,
+    memory_budget: u64,
+    threads: usize,
+    writes_genotypes: bool,
+) -> Result<usize, CohortError> {
+    // Viability floor for the GenotypeWriter row-group. Below this the writer
+    // flushes per variant, killing throughput.
+    const MIN_VIABLE_BATCH: u64 = 500;
+    if !writes_genotypes || n_samples == 0 { return Ok(threads); }
+    // Find the largest worker count where per-worker raw capacity still clears MIN.
+    let mut t = threads.max(1);
+    while t > 1 && crate::staar::genotype::raw_batch_size(n_samples, memory_budget / t as u64)
+        < MIN_VIABLE_BATCH
+    {
+        t -= 1;
+    }
+    if crate::staar::genotype::raw_batch_size(n_samples, memory_budget / t as u64)
+        < MIN_VIABLE_BATCH
+    {
+        return Err(CohortError::Resource(format!(
+            "memory budget {:.1}G too small for {n_samples} samples \
+             (even 1 worker can't batch {MIN_VIABLE_BATCH} variants); \
+             raise --memory or reduce sample count",
+            memory_budget as f64 / (1u64 << 30) as f64,
+        )));
+    }
+    Ok(t)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parsimony_normalize;
+    use super::*;
 
     #[test]
     fn snv() { assert_eq!(parsimony_normalize("G", "A", 100), ("G", "A", 100)); }
@@ -731,5 +893,126 @@ mod tests {
         let (nr, na, _) = parsimony_normalize(r, a, 100);
         assert!(std::ptr::eq(nr.as_ptr(), r[2..3].as_ptr()));
         assert!(std::ptr::eq(na.as_ptr(), a[2..3].as_ptr()));
+    }
+
+    struct SilentOutput;
+    impl crate::output::Output for SilentOutput {
+        fn status(&self, _msg: &str) {}
+        fn success(&self, _msg: &str) {}
+        fn warn(&self, _msg: &str) {}
+        fn error(&self, _err: &CohortError) {}
+        fn result_json(&self, _data: &serde_json::Value) {}
+        fn table(&self, _headers: &[&str], _rows: &[Vec<String>]) {}
+        fn progress(&self, _total: u64, _label: &str) -> crate::output::Progress {
+            crate::output::Progress::noop()
+        }
+    }
+
+    fn touch(path: &Path) {
+        std::fs::write(path, b"").unwrap();
+    }
+
+    #[test]
+    fn dedup_canonical_rejects_same_file_twice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("a.vcf.gz");
+        touch(&p);
+        let err = dedup_canonical(&[p.clone(), p.clone()]).unwrap_err();
+        assert!(matches!(err, CohortError::Input(ref m) if m.contains("duplicate")), "got {err:?}");
+    }
+
+    #[test]
+    fn dedup_canonical_accepts_distinct_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.vcf.gz");
+        let b = tmp.path().join("b.vcf.gz");
+        touch(&a);
+        touch(&b);
+        assert!(dedup_canonical(&[a, b]).is_ok());
+    }
+
+    #[test]
+    fn dedup_canonical_resolves_symlinks_to_same_target() {
+        // Two distinct paths both pointing at the same file should be flagged.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real.vcf.gz");
+        let link = tmp.path().join("link.vcf.gz");
+        touch(&real);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(not(unix))]
+        touch(&link); // can't symlink without privileges; plain touch still makes two distinct paths
+        let err = dedup_canonical(&[real, link]);
+        #[cfg(unix)]
+        assert!(matches!(err, Err(CohortError::Input(_))));
+        #[cfg(not(unix))]
+        assert!(err.is_ok()); // distinct files, not actually the same
+    }
+
+    #[test]
+    fn clean_stale_parts_removes_parts_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let chr_dir = tmp.path().join("chromosome=22");
+        std::fs::create_dir_all(&chr_dir).unwrap();
+        touch(&chr_dir.join("part_0.parquet"));
+        touch(&chr_dir.join("part_1.parquet"));
+        touch(&chr_dir.join("data.parquet"));       // not a part file
+        touch(&chr_dir.join("other.txt"));          // unrelated
+        clean_stale_parts(&[tmp.path()], &SilentOutput).unwrap();
+        assert!(!chr_dir.join("part_0.parquet").exists());
+        assert!(!chr_dir.join("part_1.parquet").exists());
+        assert!(chr_dir.join("data.parquet").exists());
+        assert!(chr_dir.join("other.txt").exists());
+    }
+
+    #[test]
+    fn clean_stale_parts_missing_root_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert!(clean_stale_parts(&[&missing], &SilentOutput).is_ok());
+    }
+
+    #[test]
+    fn fd_safe_workers_scales_with_limit() {
+        assert_eq!(fd_safe_workers(64), 0);         // below baseline
+        assert!(fd_safe_workers(1024) >= 20);       // default ulimit gives many workers
+        assert!(fd_safe_workers(4096) > fd_safe_workers(1024));
+        assert!(fd_safe_workers(u64::MAX) > 0);     // no overflow
+    }
+
+    #[test]
+    fn cap_threads_for_batch_size_no_genotypes_passthrough() {
+        // No genotype writer => no viability check, threads unchanged.
+        let got = cap_threads_for_batch_size(0, 1 << 20, 16, false).unwrap();
+        assert_eq!(got, 16);
+    }
+
+    #[test]
+    fn cap_threads_for_batch_size_reduces_when_memory_low() {
+        // 200k samples, 16 GiB budget — enough for a handful of workers, not 64.
+        let capped = cap_threads_for_batch_size(200_000, 16u64 << 30, 64, true).unwrap();
+        assert!((1..64).contains(&capped), "expected cap, got {capped}");
+    }
+
+    #[test]
+    fn cap_threads_for_batch_size_errors_on_starved_single_worker() {
+        // 1 MiB for 200k samples — even 1 worker can't batch 500 variants.
+        let err = cap_threads_for_batch_size(200_000, 1 << 20, 1, true).unwrap_err();
+        assert!(matches!(err, CohortError::Resource(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn cap_threads_for_batch_size_passes_when_memory_ample() {
+        // 64 GiB, 10k samples, 8 workers — all fit comfortably.
+        let got = cap_threads_for_batch_size(10_000, 64u64 << 30, 8, true).unwrap();
+        assert_eq!(got, 8);
+    }
+
+    #[test]
+    fn error_with_context_preserves_variant() {
+        let e = CohortError::Input("bad".into()).with_context("worker 3");
+        assert!(matches!(e, CohortError::Input(ref m) if m == "worker 3: bad"));
+        let e = CohortError::Resource("hm".into()).with_context("worker 3");
+        assert!(matches!(e, CohortError::Resource(ref m) if m == "worker 3: hm"));
     }
 }
