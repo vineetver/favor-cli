@@ -115,6 +115,30 @@ impl VariantSet {
         }
         Ok(tier)
     }
+
+    /// Fail loud if the variant set's schema is missing any of the 11 STAAR
+    /// weight channels. The tier check in `supports` only verifies metadata;
+    /// this check verifies the parquet actually has each column by name.
+    /// Catches partial writes, renamed columns, or out-of-band regeneration.
+    pub fn require_staar_weight_catalog(&self) -> Result<(), CohortError> {
+        let have = self.columns();
+        let missing: Vec<&str> = crate::column::STAAR_WEIGHTS
+            .iter()
+            .map(|c| c.as_str())
+            .filter(|name| !have.iter().any(|h| h == name))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(CohortError::DataMissing(format!(
+            "Annotation set at {} is missing {} of the 11 STAAR weight channels:\n  {}\n\
+             The channel catalog is fixed — all 11 must be present for STAAR-O to match R.\n\
+             Re-run: `favor annotate --full` against a full-tier FAVOR source.",
+            self.root.display(),
+            missing.len(),
+            missing.join(", "),
+        )))
+    }
 }
 
 pub struct VariantSetWriter {
@@ -317,5 +341,62 @@ pub fn parquet_column_names(path: &Path) -> Result<Vec<String>, CohortError> {
         .iter()
         .map(|f| f.name().to_string())
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vs_with_columns(cols: Vec<String>) -> VariantSet {
+        VariantSet {
+            root: PathBuf::from("/tmp/not-a-real-set"),
+            meta: VariantMeta {
+                version: 1,
+                join_key: JoinKey::ChromPosRefAlt,
+                variant_count: 0,
+                per_chrom: HashMap::new(),
+                columns: cols,
+                source: "test".into(),
+                kind: Some(VariantSetKind::Annotated { tier: Tier::Full }),
+            },
+        }
+    }
+
+    #[test]
+    fn catalog_passes_when_all_11_weights_present() {
+        let cols: Vec<String> = crate::column::STAAR_WEIGHTS
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect();
+        let vs = vs_with_columns(cols);
+        assert!(vs.require_staar_weight_catalog().is_ok());
+    }
+
+    #[test]
+    fn catalog_errors_on_missing_channel() {
+        // Drop one weight and a non-weight column; only the weight should be flagged.
+        let cols: Vec<String> = crate::column::STAAR_WEIGHTS
+            .iter()
+            .skip(1)
+            .map(|c| c.as_str().to_string())
+            .chain(["position".into(), "ref".into()])
+            .collect();
+        let err = vs_with_columns(cols).require_staar_weight_catalog().unwrap_err();
+        let msg = err.to_string();
+        let missing_name = crate::column::STAAR_WEIGHTS[0].as_str();
+        assert!(msg.contains(missing_name), "missing name should appear: {msg}");
+    }
+
+    #[test]
+    fn catalog_accepts_extras() {
+        // Extras beyond the 11 weights are allowed — downstream reads by name,
+        // so ordering or extras don't shift anything.
+        let mut cols: Vec<String> = crate::column::STAAR_WEIGHTS
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect();
+        cols.push("w_future_channel".into());
+        assert!(vs_with_columns(cols).require_staar_weight_catalog().is_ok());
+    }
 }
 

@@ -120,6 +120,32 @@ Reading `U`, `K`: think signal and noise. `U[v]` = how much variant `v`
 lines up with the residuals. Big `|U|` = suspicious. `K` = how much `U`
 could wiggle by chance given the covariates already used.
 
+### Annotation channel catalog
+
+The eleven channels are fixed. Changing names, dropping one, or reordering
+silently changes STAAR-O; `favor staar` validates the annotation parquet
+against this catalog at startup and errors loud if any channel is missing.
+
+```text
+order   column name              source
+─────   ──────────────────────   ────────────────────────────────
+  1     w_cadd                   CADD-Phred (main annotation)
+  2     w_linsight               LINSIGHT
+  3     w_fathmm_xf              fathmm-XF
+  4     w_apc_epi_active         aPC epigenetics, active mark
+  5     w_apc_epi_repressed      aPC epigenetics, repressed mark
+  6     w_apc_epi_transcription  aPC epigenetics, transcription
+  7     w_apc_conservation       aPC conservation (v2)
+  8     w_apc_protein_function   aPC protein function (v3)
+  9     w_apc_local_nd           aPC local nucleotide diversity (v3)
+ 10     w_apc_mutation_density   aPC mutation density
+ 11     w_apc_tf                 aPC transcription-factor binding
+```
+
+Extra `w_*` columns are allowed — reads happen by name, so added channels
+don't shift any existing index. Missing columns fail the preflight with
+the column names called out.
+
 ### Test battery
 
 Three test shapes × two β-weight shapes = six base tests. Each runs against

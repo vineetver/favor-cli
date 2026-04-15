@@ -446,10 +446,14 @@ impl<'a> StaarPipeline<'a> {
 
         // Typed tier check: STAAR needs all 11 annotation weight columns.
         // `supports` errors if the set is not annotated, or if any weight
-        // column is missing for the tier it was annotated against.
+        // column is missing for the tier it was annotated against. The
+        // `require_staar_weight_catalog` call below additionally confirms
+        // the parquet actually has each column by name — catches partial
+        // writes and out-of-band regeneration the tier metadata misses.
         let ann_vs = VariantSet::open(annotations)?;
         let weight_cols: Vec<crate::column::Col> = STAAR_WEIGHTS.to_vec();
         ann_vs.supports(&weight_cols)?;
+        ann_vs.require_staar_weight_catalog()?;
 
         // Raw annotation column contract.
         let contract = ColumnContract {
