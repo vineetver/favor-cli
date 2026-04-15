@@ -1,0 +1,42 @@
+{
+  "burden_1_25": "3fda972daf11185a",
+  "burden_1_1": "3fd97a9dbf38ec82",
+  "skat_1_25": "3fda5de1b4cef4a6",
+  "skat_1_1": "3fdd12d8dee4bc0c",
+  "acat_v_1_25": "3fe7f6e0aa8cb822",
+  "acat_v_1_1": "3fe9b81d457747d2",
+  "per_annotation": [
+    [
+      "3fdeb9cfab767db0",
+      "3fdd5614dc720b7e",
+      "3fdc250a234e8da8",
+      "3fdeb18e73abb334",
+      "3fe8be946e9770d3",
+      "3fea414ef75b41a4"
+    ],
+    [
+      "3fd4c720033ff639",
+      "3fd3616d7b507853",
+      "3fd575deacd3dec8",
+      "3fd7c6363663cb54",
+      "3fe1cb6026f4b0eb",
+      "3fe4adb80ef965c3"
+    ],
+    [
+      "3fdd8f03404ea657",
+      "3fdc3f6db4124c64",
+      "3fda08be6ca55cf8",
+      "3fdcbda9e83cb488",
+      "3fe81a9a2e453872",
+      "3fe9c5a547a0251a"
+    ]
+  ],
+  "staar_b_1_25": "3fdaadb3e5f77a7d",
+  "staar_b_1_1": "3fd94ffc9fbd6e6a",
+  "staar_s_1_25": "3fd96343db926c4a",
+  "staar_s_1_1": "3fdbfdb4e8de7295",
+  "staar_a_1_25": "3fe719dd1fec2f13",
+  "staar_a_1_1": "3fe90a1f407835ac",
+  "acat_o": "3fe24a2aaa97c3ce",
+  "staar_o": "3fe18d8594cf3871"
+}
