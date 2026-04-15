@@ -536,6 +536,104 @@ pub fn slice_sumstats_flat(
     Mat::from_fn(s, s, |i, j| k_flat[indices[i] * m + indices[j]])
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct IndividualScore {
+    pub score: f64,
+    pub score_se: f64,
+    pub est: f64,
+    pub est_se: f64,
+    pub pvalue: f64,
+    pub mac: u32,
+    pub alt_af: f64,
+}
+
+/// Score-test one variant under a gaussian, unrelated, single-trait null.
+/// Mirrors R STAARpipeline `Individual_Score_Test_denseGRM.cpp`. GMMAT's
+/// projection absorbs 1/σ², so `Score` and `Cov` here are the scaled
+/// forms R returns, not the raw `G'r`. Binary / kinship / multi paths are
+/// gated out by the caller and live in follow-up issues.
+pub fn individual_score_test(
+    carriers: &CarrierList,
+    analysis: &AnalysisVectors,
+) -> IndividualScore {
+    debug_assert!(analysis.kinship.is_none(), "kinship path not wired");
+    debug_assert!(
+        analysis.working_weights.is_empty(),
+        "binary path not wired",
+    );
+    let k = analysis.k;
+
+    let mut score_raw = 0.0f64;
+    let mut gtg = 0.0f64;
+    let mut gtx = vec![0.0f64; k];
+    let mut total_dosage = 0.0f64;
+    let mut mac: u32 = 0;
+
+    for &CarrierEntry { sample_idx, dosage } in &carriers.entries {
+        if dosage == 255 {
+            continue;
+        }
+        let Some(pi) = analysis.vcf_to_pheno[sample_idx as usize] else {
+            continue;
+        };
+        let pi = pi as usize;
+        let d = dosage as f64;
+        score_raw += d * analysis.residuals[pi];
+        gtg += d * d;
+        total_dosage += d;
+        mac = mac.saturating_add(dosage as u32);
+        let row = &analysis.x_row_major[pi * k..(pi + 1) * k];
+        for c in 0..k {
+            gtx[c] += d * row[c];
+        }
+    }
+
+    let mut correction = 0.0f64;
+    for i in 0..k {
+        let row = &analysis.xtx_inv[i * k..(i + 1) * k];
+        let mut inner = 0.0f64;
+        for j in 0..k {
+            inner += row[j] * gtx[j];
+        }
+        correction += gtx[i] * inner;
+    }
+    let k_jj = gtg - correction;
+    let sigma2 = analysis.sigma2;
+    let cov = k_jj / sigma2;
+
+    let (score, score_se, est, est_se, pvalue) = if cov.is_finite() && cov > 0.0 {
+        let score_r = score_raw / sigma2;
+        let se = cov.sqrt();
+        let t = score_r * score_r / cov;
+        (
+            score_r,
+            se,
+            score_raw / k_jj,
+            1.0 / se,
+            crate::staar::score::chisq1_pvalue(t),
+        )
+    } else {
+        // R sets all output fields to zero when Cov[i,i] == 0.
+        (0.0, 0.0, 0.0, 0.0, 1.0)
+    };
+
+    let alt_af = if analysis.n_pheno > 0 {
+        total_dosage / (2.0 * analysis.n_pheno as f64)
+    } else {
+        0.0
+    };
+
+    IndividualScore {
+        score,
+        score_se,
+        est,
+        est_se,
+        pvalue,
+        mac,
+        alt_af,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,6 +707,46 @@ mod tests {
                 let expected = k_dense[(i, j)] * inv_s2;
                 let diff = (expected - k_sparse[(i, j)]).abs();
                 assert!(diff < 1e-10, "K[{i},{j}]: expected={expected} got={} diff={diff}", k_sparse[(i, j)]);
+            }
+        }
+
+        // Individual-variant test must match R STAARpipeline
+        // `Individual_Score_Test_denseGRM.cpp` convention:
+        //   Score    = G'r_raw / σ²
+        //   Cov[i,i] = K[i,i] / σ²
+        //   Score_se = sqrt(Cov[i,i])
+        //   Est      = G'r_raw / K
+        //   Est_se   = 1 / Score_se
+        for j in 0..m {
+            let got = individual_score_test(&carriers[j], &analysis);
+            let raw_score = u_dense[(j, 0)];
+            let k_j = k_dense[(j, j)];
+            let expected_score = raw_score / null.sigma2;
+            let expected_cov = k_j / null.sigma2;
+            assert!(
+                (got.score - expected_score).abs() < 1e-10,
+                "variant {j}: Score {} vs {}",
+                got.score, expected_score,
+            );
+            if expected_cov > 0.0 {
+                let expected_se = expected_cov.sqrt();
+                assert!(
+                    (got.score_se - expected_se).abs() < 1e-10,
+                    "variant {j}: Score_se {} vs {}",
+                    got.score_se, expected_se,
+                );
+                let expected_est = raw_score / k_j;
+                assert!(
+                    (got.est - expected_est).abs() < 1e-10,
+                    "variant {j}: Est {} vs {}",
+                    got.est, expected_est,
+                );
+                let expected_est_se = 1.0 / expected_se;
+                assert!(
+                    (got.est_se - expected_est_se).abs() < 1e-10,
+                    "variant {j}: Est_se {} vs {}",
+                    got.est_se, expected_est_se,
+                );
             }
         }
     }

@@ -233,7 +233,7 @@ pub enum Command {
         #[arg(long, default_value = "2000")]
         window_size: u32,
 
-        /// Run per-variant individual score tests (no-op; producer not yet wired).
+        /// Run per-variant individual score tests. Gaussian + unrelated samples only.
         #[arg(long)]
         individual: bool,
 

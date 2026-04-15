@@ -175,7 +175,7 @@ impl StaarConfig {
 
 pub struct ScoringOutput {
     pub results: ResultSet,
-    pub individual_pvals: Vec<(usize, f64)>,
+    pub individual: Vec<crate::staar::output::IndividualRow>,
 }
 
 struct PhenoStageOut {
@@ -327,13 +327,12 @@ impl<'a> StaarPipeline<'a> {
         // through the cohort handle. Hold the result in a local so the
         // WriteResults stage doesn't trigger a second walk.
         let cohort = self.cohort();
-        let variants = load_rare_variants(&cohort, &store.manifest, self.config.maf_cutoff)?;
-        let n_rare = variants.len() as i64;
+        let n_rare = load_rare_variants(&cohort, &store.manifest, self.config.maf_cutoff)?
+            .len() as i64;
 
         self.stage(Stage::WriteResults, |p| {
             p.stage_write_results(
                 &scoring,
-                &variants,
                 &null_model,
                 pheno.trait_type,
                 pheno.n,
@@ -768,7 +767,7 @@ impl<'a> StaarPipeline<'a> {
         )?;
         Ok(ScoringOutput {
             results,
-            individual_pvals: Vec::new(),
+            individual: Vec::new(),
         })
     }
 
@@ -926,8 +925,14 @@ impl<'a> StaarPipeline<'a> {
             cache_dir,
             ancestry,
             spa_active: self.config.spa && trait_type == TraitType::Binary,
+            // Single-trait gaussian no-kinship path only in this build.
+            // Binary / kinship / multi land in follow-ups.
+            individual: self.config.individual
+                && trait_type == TraitType::Continuous
+                && !self.config.has_kinship(),
+            individual_mac_cutoff: 20,
         };
-        let (results, individual_pvals) = scoring::run_score_tests(
+        let (results, individual) = scoring::run_score_tests(
             &self.cohort(),
             &store.manifest,
             &request,
@@ -936,14 +941,13 @@ impl<'a> StaarPipeline<'a> {
         )?;
         Ok(ScoringOutput {
             results,
-            individual_pvals,
+            individual,
         })
     }
 
     fn stage_write_results(
         &mut self,
         scoring: &ScoringOutput,
-        variants: &[AnnotatedVariant],
         null_model: &NullModel,
         trait_type: TraitType,
         n: usize,
@@ -957,8 +961,8 @@ impl<'a> StaarPipeline<'a> {
             ))
         })?;
 
-        if self.config.individual && !scoring.individual_pvals.is_empty() {
-            write_individual_results(&scoring.individual_pvals, variants, &results_dir, self.out)?;
+        if self.config.individual && !scoring.individual.is_empty() {
+            write_individual_results(&scoring.individual, &results_dir, self.out)?;
         }
 
         write_results(

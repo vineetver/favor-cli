@@ -48,6 +48,13 @@ pub struct ScoringRequest<'a> {
     pub cache_dir: &'a Path,
     pub ancestry: Option<&'a AncestryInfo>,
     pub spa_active: bool,
+    /// Emit per-variant score-test rows alongside mask/window results.
+    /// Matches R STAARpipeline's `Individual_Analysis` output (single-trait
+    /// gaussian no-kinship path only in this build).
+    pub individual: bool,
+    /// Minor-allele-count threshold for individual analysis. Matches R's
+    /// `mac_cutoff` (default 20 in `Individual_Analysis.R`).
+    pub individual_mac_cutoff: u32,
 }
 
 /// Compiled mask plan: gene predicates + window/scang flags + result-vector
@@ -141,17 +148,18 @@ impl<'v> ChromCtx<'v> {
 }
 
 /// Public entry point: score every chromosome in `manifest` and return
-/// per-mask gene/window result vectors plus individual p-values.
+/// per-mask gene/window result vectors plus per-variant individual rows.
 pub fn run_score_tests(
     cohort: &CohortHandle<'_>,
     manifest: &CohortManifest,
     request: &ScoringRequest<'_>,
     analysis: &AnalysisVectors,
     out: &dyn Output,
-) -> Result<(ResultSet, Vec<(usize, f64)>), CohortError> {
+) -> Result<(ResultSet, Vec<crate::staar::output::IndividualRow>), CohortError> {
     out.status("Running score tests (carrier-indexed sparse)...");
 
     let mut plan = MaskPlan::build(request.mask_categories, out);
+    let mut individual_rows: Vec<crate::staar::output::IndividualRow> = Vec::new();
 
     // `score_one_window` always takes the cached-U/K path; SPA on windows
     // isn't wired yet. Warn once so --spa users know their window p-values
@@ -184,10 +192,84 @@ pub fn run_score_tests(
         if plan.has_window_work() {
             score_chrom_windows(&chrom_ctx, request, analysis, &mut plan, out);
         }
+
+        if request.individual {
+            score_chrom_individual(&chrom_ctx, request, analysis, &mut individual_rows)?;
+        }
     }
 
-    // `--individual` producer not yet wired — see ScoringOutput.individual_pvals.
-    Ok((plan.results, Vec::new()))
+    Ok((plan.results, individual_rows))
+}
+
+/// Per-variant score test for every variant whose MAC clears `mac_cutoff`.
+/// Mirrors R STAARpipeline `Individual_Analysis` on the gaussian-unrelated
+/// path. Writer re-sorts by position to match R's final `order(results[,2])`.
+fn score_chrom_individual(
+    chrom_ctx: &ChromCtx<'_>,
+    request: &ScoringRequest<'_>,
+    analysis: &AnalysisVectors,
+    rows: &mut Vec<crate::staar::output::IndividualRow>,
+) -> Result<(), CohortError> {
+    use crate::store::cohort::types::VariantVcf;
+
+    let index = chrom_ctx.view.index()?;
+    let entries = index.all_entries();
+    let n_pheno = analysis.n_pheno as f64;
+    let mac_cutoff = request.individual_mac_cutoff;
+    let chrom_label = chrom_ctx.chrom.label();
+
+    // R `Individual_Analysis.R:324`: MAF > (mac_cutoff − 0.5) / (2 n).
+    let maf_floor = (mac_cutoff as f64 - 0.5) / (2.0 * n_pheno);
+
+    let mut passing: Vec<(u32, &crate::store::cohort::variants::VariantIndexEntry)> =
+        Vec::with_capacity(entries.len() / 100);
+    for (vcf, entry) in entries.iter().enumerate() {
+        if entry.maf > maf_floor {
+            passing.push((vcf as u32, entry));
+        }
+    }
+    if passing.is_empty() {
+        return Ok(());
+    }
+
+    // `all_entries` is vcf-ordered, so `passing` is already sorted as
+    // `carriers_batch` requires for a single sequential mmap walk.
+    let vcfs: Vec<VariantVcf> = passing.iter().map(|(v, _)| VariantVcf(*v)).collect();
+    let batch = chrom_ctx.view.carriers_batch(&vcfs)?;
+
+    let mut chrom_rows: Vec<crate::staar::output::IndividualRow> = passing
+        .par_iter()
+        .zip(batch.entries.par_iter())
+        .map(|(&(_vcf, entry), carriers)| {
+            let result = crate::staar::carrier::sparse_score::individual_score_test(
+                carriers, analysis,
+            );
+            let pvalue_log10 = if result.pvalue > 0.0 {
+                -result.pvalue.log10()
+            } else {
+                f64::INFINITY
+            };
+            crate::staar::output::IndividualRow {
+                chromosome: chrom_label.clone(),
+                position: entry.position,
+                ref_allele: entry.ref_allele.clone(),
+                alt_allele: entry.alt_allele.clone(),
+                maf: entry.maf,
+                alt_af: result.alt_af,
+                n: analysis.n_pheno as u32,
+                mac: result.mac,
+                pvalue: result.pvalue,
+                pvalue_log10,
+                score: result.score,
+                score_se: result.score_se,
+                est: result.est,
+                est_se: result.est_se,
+            }
+        })
+        .collect();
+
+    rows.append(&mut chrom_rows);
+    Ok(())
 }
 
 /// All quantities a single gene needs for mask scoring, in a single

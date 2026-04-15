@@ -265,7 +265,7 @@ fn acat_v(
 /// t ≈ 2700. Past that we floor at the smallest positive double so the
 /// downstream Cauchy combination sees a strictly positive p-value instead
 /// of poisoning the omnibus with an exact zero.
-fn chisq1_pvalue(t: f64) -> f64 {
+pub(crate) fn chisq1_pvalue(t: f64) -> f64 {
     if t <= 0.0 || !t.is_finite() {
         return 1.0;
     }

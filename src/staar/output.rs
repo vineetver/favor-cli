@@ -23,8 +23,6 @@ use crate::column::{Col, STAAR_WEIGHTS};
 use crate::error::CohortError;
 use crate::output::Output;
 use crate::store::manifest::{fsync_parent, tmp_path, write_atomic};
-use crate::types::AnnotatedVariant;
-
 use super::multi::MultiNullContinuous;
 use super::{GeneResult, MaskType, TraitType};
 
@@ -77,41 +75,66 @@ where
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct IndividualRow {
+    pub chromosome: String,
+    pub position: u32,
+    pub ref_allele: Box<str>,
+    pub alt_allele: Box<str>,
+    pub maf: f64,
+    pub alt_af: f64,
+    pub n: u32,
+    pub mac: u32,
+    pub pvalue: f64,
+    pub pvalue_log10: f64,
+    pub score: f64,
+    pub score_se: f64,
+    pub est: f64,
+    pub est_se: f64,
+}
+
 pub fn write_individual_results(
-    pvals: &[(usize, f64)],
-    variants: &[AnnotatedVariant],
+    rows: &[IndividualRow],
     output_dir: &Path,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
     let out_path = output_dir.join("individual.parquet");
-    let n = pvals.len();
+    let n = rows.len();
 
-    let mut sorted: Vec<(usize, f64)> = pvals.to_vec();
-    sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // R orders by POS ascending before returning (Individual_Analysis.R:450).
+    let mut sorted: Vec<IndividualRow> = rows.to_vec();
+    sorted.sort_by_key(|r| r.position);
 
     let mut b_chrom = StringBuilder::with_capacity(n, n * 2);
     let mut b_pos = Int32Builder::with_capacity(n);
     let mut b_ref = StringBuilder::with_capacity(n, n * 4);
     let mut b_alt = StringBuilder::with_capacity(n, n * 4);
+    let mut b_alt_af = Float64Builder::with_capacity(n);
     let mut b_maf = Float64Builder::with_capacity(n);
-    let mut b_gene = StringBuilder::with_capacity(n, n * 8);
-    let mut b_region = StringBuilder::with_capacity(n, n * 8);
-    let mut b_consequence = StringBuilder::with_capacity(n, n * 8);
-    let mut b_cadd = Float64Builder::with_capacity(n);
+    let mut b_n = UInt32Builder::with_capacity(n);
+    let mut b_mac = UInt32Builder::with_capacity(n);
     let mut b_pvalue = Float64Builder::with_capacity(n);
+    let mut b_pvalue_log10 = Float64Builder::with_capacity(n);
+    let mut b_score = Float64Builder::with_capacity(n);
+    let mut b_score_se = Float64Builder::with_capacity(n);
+    let mut b_est = Float64Builder::with_capacity(n);
+    let mut b_est_se = Float64Builder::with_capacity(n);
 
-    for &(idx, pval) in &sorted {
-        let v = &variants[idx];
-        b_chrom.append_value(v.chromosome.label());
-        b_pos.append_value(v.position as i32);
-        b_ref.append_value(&v.ref_allele);
-        b_alt.append_value(&v.alt_allele);
-        b_maf.append_value(v.maf);
-        b_gene.append_value(&v.gene_name);
-        b_region.append_value(v.annotation.region_type.as_str());
-        b_consequence.append_value(v.annotation.consequence.as_str());
-        b_cadd.append_value(v.annotation.cadd_phred);
-        b_pvalue.append_value(pval);
+    for row in &sorted {
+        b_chrom.append_value(&row.chromosome);
+        b_pos.append_value(row.position as i32);
+        b_ref.append_value(&row.ref_allele);
+        b_alt.append_value(&row.alt_allele);
+        b_alt_af.append_value(row.alt_af);
+        b_maf.append_value(row.maf);
+        b_n.append_value(row.n);
+        b_mac.append_value(row.mac);
+        b_pvalue.append_value(row.pvalue);
+        b_pvalue_log10.append_value(row.pvalue_log10);
+        b_score.append_value(row.score);
+        b_score_se.append_value(row.score_se);
+        b_est.append_value(row.est);
+        b_est_se.append_value(row.est_se);
     }
 
     let schema = Arc::new(Schema::new(vec![
@@ -119,24 +142,32 @@ pub fn write_individual_results(
         Field::new(Col::Position.as_str(), DataType::Int32, false),
         Field::new(Col::RefAllele.as_str(), DataType::Utf8, false),
         Field::new(Col::AltAllele.as_str(), DataType::Utf8, false),
+        Field::new("ALT_AF", DataType::Float64, false),
         Field::new(Col::Maf.as_str(), DataType::Float64, false),
-        Field::new(Col::GeneName.as_str(), DataType::Utf8, false),
-        Field::new(Col::RegionType.as_str(), DataType::Utf8, false),
-        Field::new(Col::Consequence.as_str(), DataType::Utf8, false),
-        Field::new(Col::CaddPhred.as_str(), DataType::Float64, false),
+        Field::new("N", DataType::UInt32, false),
+        Field::new("MAC", DataType::UInt32, false),
         Field::new("pvalue", DataType::Float64, false),
+        Field::new("pvalue_log10", DataType::Float64, false),
+        Field::new("Score", DataType::Float64, false),
+        Field::new("Score_se", DataType::Float64, false),
+        Field::new("Est", DataType::Float64, false),
+        Field::new("Est_se", DataType::Float64, false),
     ]));
     let columns: Vec<ArrayRef> = vec![
         Arc::new(b_chrom.finish()),
         Arc::new(b_pos.finish()),
         Arc::new(b_ref.finish()),
         Arc::new(b_alt.finish()),
+        Arc::new(b_alt_af.finish()),
         Arc::new(b_maf.finish()),
-        Arc::new(b_gene.finish()),
-        Arc::new(b_region.finish()),
-        Arc::new(b_consequence.finish()),
-        Arc::new(b_cadd.finish()),
+        Arc::new(b_n.finish()),
+        Arc::new(b_mac.finish()),
         Arc::new(b_pvalue.finish()),
+        Arc::new(b_pvalue_log10.finish()),
+        Arc::new(b_score.finish()),
+        Arc::new(b_score_se.finish()),
+        Arc::new(b_est.finish()),
+        Arc::new(b_est_se.finish()),
     ];
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
@@ -156,11 +187,11 @@ pub fn write_individual_results(
         Ok(())
     })?;
 
-    let n_sig = pvals.iter().filter(|(_, p)| *p < 5e-8).count();
+    let n_sig = rows.iter().filter(|r| r.pvalue < 5e-8).count();
     out.success(&format!(
         "  individual -> {} variants, {} genome-wide significant",
-        pvals.len(),
-        n_sig
+        rows.len(),
+        n_sig,
     ));
     Ok(())
 }
