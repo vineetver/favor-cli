@@ -124,6 +124,7 @@ TMPDIR                 scratch space
 ## Docs
 
 - **[Setup guide](docs/setup.md)** - installation, configuration, data management, HPC best practices
+- [Ingest](docs/ingest.md) - VCF ingest patterns, preflight, throughput
 - [Genotype store](docs/storage.md) - sparse genotype store for rare-variant analysis
 - [STAAR](docs/staar.md) - null model, score test, masks, outputs, meta-analysis
 - [Validation](docs/validation.md) - statistical accuracy vs R reference
