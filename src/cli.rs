@@ -137,6 +137,12 @@ pub enum Command {
         /// Force rebuild of the cohort store even if a valid one exists
         #[arg(long)]
         rebuild: bool,
+
+        /// Restrict ingest to these chromosomes. Accepts `22`, `1,2,3`,
+        /// `1-22`, or combinations like `1-22,X,Y,MT`. Default: all standard
+        /// chromosomes.
+        #[arg(long, value_name = "SPEC")]
+        chromosome: Option<crate::types::ChromosomeSet>,
     },
 
     /// Annotate variants against FAVOR base or full tier

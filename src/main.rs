@@ -92,6 +92,7 @@ fn run(
             annotations,
             cohort_id,
             rebuild,
+            chromosome,
         } => {
             let engine = runtime::Engine::open_unconfigured(store_path)?;
             let config = commands::ingest::build_config(
@@ -102,6 +103,7 @@ fn run(
                 annotations,
                 cohort_id,
                 rebuild,
+                chromosome,
             )?;
             commands::ingest::run_ingest(&engine, &config, out, dry_run)
         }

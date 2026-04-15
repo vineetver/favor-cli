@@ -62,6 +62,7 @@ pub(crate) fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, CohortEr
     Ok(resolved)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_config(
     raw_inputs: Vec<PathBuf>,
     output: Option<PathBuf>,
@@ -70,6 +71,7 @@ pub fn build_config(
     annotations: Option<PathBuf>,
     cohort_id: Option<String>,
     rebuild: bool,
+    chromosome_filter: Option<crate::types::ChromosomeSet>,
 ) -> Result<IngestConfig, CohortError> {
     let inputs = resolve_inputs(raw_inputs)?;
 
@@ -100,6 +102,7 @@ pub fn build_config(
         annotations,
         cohort_id,
         rebuild,
+        chromosome_filter,
     })
 }
 
@@ -344,6 +347,7 @@ fn ingest_vcf(
             n_samples,
             resources.memory_bytes,
             resources.threads,
+            config.chromosome_filter.as_ref(),
             out,
         )?;
 
@@ -398,6 +402,7 @@ fn ingest_vcf(
             geno_writer.as_mut(),
             resources.memory_bytes,
             resources.threads,
+            config.chromosome_filter.as_ref(),
             out,
         )?;
         let vs = vs_writer.finish()?;

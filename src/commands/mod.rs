@@ -38,6 +38,7 @@ pub struct IngestConfig {
     pub annotations: Option<PathBuf>,
     pub cohort_id: Option<String>,
     pub rebuild: bool,
+    pub chromosome_filter: Option<crate::types::ChromosomeSet>,
 }
 
 pub fn derive_cohort_id(genotypes: &Path) -> String {

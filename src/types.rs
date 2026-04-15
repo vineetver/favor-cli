@@ -94,6 +94,80 @@ impl<'de> Deserialize<'de> for Chromosome {
     }
 }
 
+/// Filterable subset of the 25 canonical chromosomes (1-22, X, Y, MT).
+/// Parsed from CLI specs like `"22"`, `"1,2,3"`, `"1-22"`, `"1-22,X,Y,MT"`.
+/// Named chromosomes (X, Y, MT) may only appear as single tokens, never in
+/// a range — `"X-Y"` is an error.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct ChromosomeSet {
+    bits: [bool; 25],
+}
+
+impl ChromosomeSet {
+    fn index(c: Chromosome) -> usize {
+        match c {
+            Chromosome::Autosome(n) => (n - 1) as usize,
+            Chromosome::X => 22,
+            Chromosome::Y => 23,
+            Chromosome::MT => 24,
+        }
+    }
+
+    pub fn insert(&mut self, c: Chromosome) {
+        self.bits[Self::index(c)] = true;
+    }
+
+    /// Fast membership check against the canonical strings that
+    /// `ingest::vcf::normalize_chrom` emits (`"1"`..`"22"`, `"X"`, `"Y"`, `"MT"`).
+    pub fn contains_canonical(&self, s: &str) -> bool {
+        match s {
+            "X" => self.bits[22],
+            "Y" => self.bits[23],
+            "MT" => self.bits[24],
+            _ => s.parse::<u8>().ok()
+                .filter(|n| (1..=22).contains(n))
+                .map(|n| self.bits[(n - 1) as usize])
+                .unwrap_or(false),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.bits.iter().any(|b| *b)
+    }
+}
+
+impl FromStr for ChromosomeSet {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut set = ChromosomeSet::default();
+        for token in s.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            if let Some((a, b)) = token.split_once('-') {
+                let start: u8 = a.trim().parse()
+                    .map_err(|_| format!("range must use autosomes 1-22: '{token}'"))?;
+                let end: u8 = b.trim().parse()
+                    .map_err(|_| format!("range must use autosomes 1-22: '{token}'"))?;
+                if !(1..=22).contains(&start) || !(1..=22).contains(&end) {
+                    return Err(format!("range {token} outside autosomes 1-22"));
+                }
+                if start > end {
+                    return Err(format!("reversed range: '{token}'"));
+                }
+                for n in start..=end {
+                    set.insert(Chromosome::Autosome(n));
+                }
+            } else {
+                let c: Chromosome = token.parse()?;
+                set.insert(c);
+            }
+        }
+        if set.is_empty() {
+            return Err("no chromosomes specified".into());
+        }
+        Ok(set)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct AnnotationWeights(pub [f64; 11]);
 
@@ -502,6 +576,84 @@ mod tests {
         assert_eq!(json, "\"chr7\"");
         let back: Chromosome = serde_json::from_str(&json).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn chromset_single_token() {
+        let s: ChromosomeSet = "22".parse().unwrap();
+        assert!(s.contains_canonical("22"));
+        assert!(!s.contains_canonical("21"));
+        assert!(!s.contains_canonical("X"));
+    }
+
+    #[test]
+    fn chromset_comma_list() {
+        let s: ChromosomeSet = "1,3,X,MT".parse().unwrap();
+        for c in ["1", "3", "X", "MT"] {
+            assert!(s.contains_canonical(c), "missing {c}");
+        }
+        assert!(!s.contains_canonical("2"));
+        assert!(!s.contains_canonical("Y"));
+    }
+
+    #[test]
+    fn chromset_range_expands() {
+        let s: ChromosomeSet = "1-5".parse().unwrap();
+        for n in 1..=5u8 {
+            assert!(s.contains_canonical(&n.to_string()), "missing {n}");
+        }
+        assert!(!s.contains_canonical("6"));
+    }
+
+    #[test]
+    fn chromset_mixed() {
+        let s: ChromosomeSet = "1-3,22,X,Y".parse().unwrap();
+        for c in ["1", "2", "3", "22", "X", "Y"] {
+            assert!(s.contains_canonical(c), "missing {c}");
+        }
+        assert!(!s.contains_canonical("4"));
+        assert!(!s.contains_canonical("MT"));
+    }
+
+    #[test]
+    fn chromset_contains_canonical() {
+        let s: ChromosomeSet = "1-22,X,Y,MT".parse().unwrap();
+        // Every canonical string normalize_chrom emits should hit.
+        for n in 1..=22u8 {
+            assert!(s.contains_canonical(&n.to_string()), "missing {n}");
+        }
+        for c in ["X", "Y", "MT"] {
+            assert!(s.contains_canonical(c), "missing {c}");
+        }
+        // Uncanonical inputs don't match.
+        assert!(!s.contains_canonical("chr1"));
+        assert!(!s.contains_canonical("banana"));
+        assert!(!s.contains_canonical("23"));
+    }
+
+    #[test]
+    fn chromset_empty_spec_is_error() {
+        assert!("".parse::<ChromosomeSet>().is_err());
+        assert!(",".parse::<ChromosomeSet>().is_err());
+    }
+
+    #[test]
+    fn chromset_reversed_range_is_error() {
+        let e = "10-5".parse::<ChromosomeSet>().unwrap_err();
+        assert!(e.contains("reversed"), "got: {e}");
+    }
+
+    #[test]
+    fn chromset_named_in_range_is_error() {
+        assert!("X-Y".parse::<ChromosomeSet>().is_err());
+        assert!("1-X".parse::<ChromosomeSet>().is_err());
+    }
+
+    #[test]
+    fn chromset_out_of_range_is_error() {
+        assert!("0-5".parse::<ChromosomeSet>().is_err());
+        assert!("20-25".parse::<ChromosomeSet>().is_err());
+        assert!("99".parse::<ChromosomeSet>().is_err());
     }
 
     #[test]

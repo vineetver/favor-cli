@@ -286,6 +286,7 @@ struct RecordContext<'a> {
     batch_size: usize,
     output_dir: PathBuf,
     part_id: Option<usize>,
+    chromosome_filter: Option<crate::types::ChromosomeSet>,
     variant_count: u64,
     filtered_contigs: u64,
     multiallelic_split: u64,
@@ -297,6 +298,7 @@ impl<'a> RecordContext<'a> {
         memory_budget: u64,
         output_dir: PathBuf,
         part_id: Option<usize>,
+        chromosome_filter: Option<crate::types::ChromosomeSet>,
     ) -> Self {
         let batch_size = derive_batch_size(memory_budget);
         let schema = Arc::new(vcf_schema());
@@ -315,6 +317,7 @@ impl<'a> RecordContext<'a> {
             batch_size,
             output_dir,
             part_id,
+            chromosome_filter,
             variant_count: 0,
             filtered_contigs: 0,
             multiallelic_split: 0,
@@ -341,6 +344,12 @@ impl<'a> RecordContext<'a> {
             Some(c) => c,
             None => { self.filtered_contigs += 1; return Ok(()); }
         };
+        if let Some(filt) = &self.chromosome_filter {
+            if !filt.contains_canonical(chrom) {
+                self.filtered_contigs += 1;
+                return Ok(());
+            }
+        }
         let pos = match record.variant_start() {
             Some(Ok(p)) => p.get() as i32,
             _ => return Ok(()),
@@ -571,17 +580,20 @@ impl<'a> RecordContext<'a> {
 }
 
 /// Stream one or more VCF files to per-chromosome parquet files (sequential).
+#[allow(clippy::too_many_arguments)]
 pub fn ingest_vcfs(
     input_paths: &[PathBuf],
     vs_writer: &mut VariantSetWriter,
     geno_writer: Option<&mut GenotypeWriter>,
     memory_budget: u64,
     threads: usize,
+    chromosome_filter: Option<&crate::types::ChromosomeSet>,
     output: &dyn Output,
 ) -> Result<VcfIngestResult, CohortError> {
     let mut ctx = RecordContext::new(
         geno_writer, memory_budget,
         vs_writer.root().to_path_buf(), None,
+        chromosome_filter.cloned(),
     );
     output.status(&format!(
         "  Batch size: {} variants/chrom ({:.1}G memory)",
@@ -629,6 +641,7 @@ fn validate_headers_parallel(
 /// Parallel multi-file VCF ingest. Files are chunked across N workers,
 /// each worker processes its chunk sequentially with a single RecordContext.
 /// N is bounded by thread count. Validates headers before spawning.
+#[allow(clippy::too_many_arguments)]
 pub fn ingest_vcfs_parallel(
     input_paths: &[PathBuf],
     output_dir: &Path,
@@ -636,6 +649,7 @@ pub fn ingest_vcfs_parallel(
     n_samples: usize,
     memory_budget: u64,
     threads: usize,
+    chromosome_filter: Option<&crate::types::ChromosomeSet>,
     output: &dyn Output,
 ) -> Result<VcfIngestResult, CohortError> {
     use rayon::prelude::*;
@@ -678,7 +692,9 @@ pub fn ingest_vcfs_parallel(
         .map(|(worker_id, file_chunk)| {
             run_worker(
                 worker_id, &file_chunk, output_dir, geno_dir,
-                n_samples, memory_per_worker, output,
+                n_samples, memory_per_worker,
+                chromosome_filter.cloned(),
+                output,
             )
             .map_err(|e| e.with_context(format!(
                 "worker {worker_id} ({})",
@@ -706,6 +722,7 @@ pub fn ingest_vcfs_parallel(
 /// One rayon worker: own a `GenotypeWriter` and a `RecordContext`, ingest the
 /// file chunk sequentially, close both cleanly. Extracted so the caller can
 /// attach `(worker_id, file paths)` to any error via `with_context`.
+#[allow(clippy::too_many_arguments)]
 fn run_worker(
     worker_id: usize,
     file_chunk: &[&PathBuf],
@@ -713,6 +730,7 @@ fn run_worker(
     geno_dir: Option<&Path>,
     n_samples: usize,
     memory_per_worker: u64,
+    chromosome_filter: Option<crate::types::ChromosomeSet>,
     output: &dyn Output,
 ) -> Result<VcfIngestResult, CohortError> {
     let mut gw = match geno_dir {
@@ -724,6 +742,7 @@ fn run_worker(
     let mut ctx = RecordContext::new(
         gw.as_mut(), memory_per_worker,
         output_dir.to_path_buf(), Some(worker_id),
+        chromosome_filter,
     );
     ctx.ingest_files(file_chunk, 1, output)?;
     let result = ctx.flush()?;
