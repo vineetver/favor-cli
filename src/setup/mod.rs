@@ -201,7 +201,7 @@ SELECT vid, gencode.genes[1] AS gene, main.cadd.phred
 FROM 'annotated.parquet' WHERE main.cadd.phred > 20;
 
 -- Significant genes
-SELECT * FROM 'staar_results/coding_pLoF_missense.parquet'
+SELECT * FROM 'staar_results/coding_plof_ds.parquet'
 WHERE "STAAR-O" < 2.5e-6 ORDER BY "STAAR-O";
 
 -- Tissue enrichment

@@ -1,5 +1,5 @@
 use super::MaskType;
-use crate::types::{AnnotatedVariant, Chromosome, Consequence};
+use crate::types::{AnnotatedVariant, Chromosome, Consequence, MetaSvmPred};
 
 type MaskDef = (MaskType, fn(&AnnotatedVariant) -> bool);
 
@@ -16,7 +16,7 @@ pub const CODING_MASKS: &[MaskDef] = &[
     (MaskType::PLof, is_plof),
     (MaskType::Missense, is_missense),
     (MaskType::DisruptiveMissense, is_disruptive_missense),
-    (MaskType::PLofMissense, is_plof_or_missense),
+    (MaskType::PLofDs, is_plof_ds),
     (MaskType::Synonymous, is_synonymous),
     (MaskType::Ptv, is_ptv),
     (MaskType::PtvDs, is_ptv_ds),
@@ -42,12 +42,15 @@ fn is_missense(v: &AnnotatedVariant) -> bool {
     v.annotation.consequence.is_missense()
 }
 
+// STAARpipeline/R/disruptive_missense.R:65:
+//   lof.in.ds <- ((GENCODE.EXONIC.Category=="nonsynonymous SNV")&(MetaSVM_pred=="D"))
 fn is_disruptive_missense(v: &AnnotatedVariant) -> bool {
-    is_missense(v) && (v.annotation.cadd_phred > 20.0 || v.annotation.revel > 0.5)
+    is_missense(v) && v.annotation.metasvm_pred == MetaSvmPred::Deleterious
 }
 
-fn is_plof_or_missense(v: &AnnotatedVariant) -> bool {
-    is_plof(v) || is_missense(v)
+// STAARpipeline/R/plof_ds.R: plof ∪ disruptive_missense.
+fn is_plof_ds(v: &AnnotatedVariant) -> bool {
+    is_plof(v) || is_disruptive_missense(v)
 }
 
 fn is_synonymous(v: &AnnotatedVariant) -> bool {
@@ -58,8 +61,13 @@ fn is_ptv(v: &AnnotatedVariant) -> bool {
     v.annotation.consequence.is_ptv()
 }
 
+// STAARpipeline/R/ptv_ds.R (variant_type=="variant"):
+//   stopgain | stoploss | splicing | exonic;splicing | frameshift {del,ins}
+//   | ((nonsynonymous SNV) & (MetaSVM_pred=="D"))
+// Our `is_ptv` covers stopgain + frameshifts; `is_splice` covers splicing;
+// `is_disruptive_missense` covers the MetaSVM-driven missense arm.
 fn is_ptv_ds(v: &AnnotatedVariant) -> bool {
-    is_ptv(v) || (is_splice(v) && v.annotation.cadd_phred > 20.0)
+    is_ptv(v) || is_splice(v) || is_disruptive_missense(v)
 }
 
 // Mirrors STAARpipeline's coding_incl_ptv: a single coding-region mask that
@@ -285,20 +293,16 @@ pub fn build_sliding_windows(
 }
 
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
 fn v(
     region_type: &str,
     consequence: &str,
-    cadd: f64,
-    revel: f64,
     cage_prom: bool,
     cage_enh: bool,
     ccre_prom: bool,
     ccre_enh: bool,
 ) -> AnnotatedVariant {
     use crate::types::{
-        AnnotationWeights, Chromosome, FunctionalAnnotation, MetaSvmPred, RegionType,
-        RegulatoryFlags,
+        AnnotationWeights, Chromosome, FunctionalAnnotation, RegionType, RegulatoryFlags,
     };
     AnnotatedVariant {
         chromosome: Chromosome::Autosome(22),
@@ -311,8 +315,8 @@ fn v(
         annotation: FunctionalAnnotation {
             region_type: RegionType::from_str_lossy(region_type),
             consequence: Consequence::from_str_lossy(consequence),
-            cadd_phred: cadd,
-            revel,
+            cadd_phred: 0.0,
+            revel: 0.0,
             metasvm_pred: MetaSvmPred::Unknown,
             weights: AnnotationWeights([0.0; 11]),
             regulatory: RegulatoryFlags {
@@ -326,39 +330,39 @@ fn v(
 }
 
 #[cfg(test)]
+fn v_ds(region_type: &str, consequence: &str) -> AnnotatedVariant {
+    let mut var = v(region_type, consequence, false, false, false, false);
+    var.annotation.metasvm_pred = MetaSvmPred::Deleterious;
+    var
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn stopgain_is_plof_and_ptv() {
-        let var = v("exonic", "stopgain", 23.7, 0.0, false, false, false, false);
+        let var = v("exonic", "stopgain", false, false, false, false);
         assert!(is_plof(&var));
         assert!(is_ptv(&var));
         assert!(is_ptv_ds(&var));
-        assert!(is_plof_or_missense(&var));
+        assert!(is_plof_ds(&var));
         assert!(!is_missense(&var));
         assert!(!is_synonymous(&var));
     }
 
     #[test]
     fn frameshift_is_plof_and_ptv() {
-        let var = v(
-            "exonic",
-            "frameshift deletion",
-            20.9,
-            0.0,
-            false,
-            false,
-            false,
-            false,
-        );
+        let var = v("exonic", "frameshift deletion", false, false, false, false);
         assert!(is_plof(&var));
         assert!(is_ptv(&var));
     }
 
     #[test]
-    fn splice_region_type_is_plof_not_ptv() {
-        let var = v("splicing", "", 25.1, 0.0, false, false, false, false);
+    fn splice_region_type_is_plof_and_ptv_ds() {
+        // STAARpipeline ptv_ds for variant_type="variant" includes splicing
+        // regardless of CADD; matches `lof.in.plof.snv` in ptv_ds.R.
+        let var = v("splicing", "", false, false, false, false);
         assert!(is_plof(&var));
         assert!(!is_ptv(&var));
         assert!(is_ptv_ds(&var));
@@ -366,74 +370,26 @@ mod tests {
     }
 
     #[test]
-    fn splice_low_cadd_not_ptv_ds() {
-        let var = v("splicing", "", 5.0, 0.0, false, false, false, false);
-        assert!(is_plof(&var));
-        assert!(!is_ptv(&var));
-        assert!(!is_ptv_ds(&var));
-    }
+    fn disruptive_missense_needs_metasvm_d() {
+        // MetaSVM_pred=="D" is the sole trigger; CADD/REVEL are no longer consulted.
+        let ds = v_ds("exonic", "nonsynonymous SNV");
+        assert!(is_missense(&ds));
+        assert!(is_disruptive_missense(&ds));
+        assert!(is_plof_ds(&ds));
+        assert!(!is_plof(&ds));
+        assert!(!is_ptv(&ds));
+        assert!(is_ptv_ds(&ds));
 
-    #[test]
-    fn missense_high_cadd_is_disruptive() {
-        let var = v(
-            "exonic",
-            "nonsynonymous SNV",
-            25.1,
-            0.3,
-            false,
-            false,
-            false,
-            false,
-        );
-        assert!(is_missense(&var));
-        assert!(is_disruptive_missense(&var));
-        assert!(!is_plof(&var));
-        assert!(!is_ptv(&var));
-    }
-
-    #[test]
-    fn missense_low_scores_not_disruptive() {
-        let var = v(
-            "exonic",
-            "nonsynonymous SNV",
-            10.0,
-            0.2,
-            false,
-            false,
-            false,
-            false,
-        );
-        assert!(is_missense(&var));
-        assert!(!is_disruptive_missense(&var));
-    }
-
-    #[test]
-    fn missense_high_revel_is_disruptive() {
-        let var = v(
-            "exonic",
-            "nonsynonymous SNV",
-            5.0,
-            0.6,
-            false,
-            false,
-            false,
-            false,
-        );
-        assert!(is_disruptive_missense(&var));
+        let tolerated = v("exonic", "nonsynonymous SNV", false, false, false, false);
+        assert!(is_missense(&tolerated));
+        assert!(!is_disruptive_missense(&tolerated));
+        assert!(!is_plof_ds(&tolerated));
+        assert!(!is_ptv_ds(&tolerated));
     }
 
     #[test]
     fn synonymous_matches() {
-        let var = v(
-            "exonic",
-            "synonymous SNV",
-            6.4,
-            0.0,
-            false,
-            false,
-            false,
-            false,
-        );
+        let var = v("exonic", "synonymous SNV", false, false, false, false);
         assert!(is_synonymous(&var));
         assert!(!is_plof(&var));
         assert!(!is_missense(&var));
@@ -441,50 +397,41 @@ mod tests {
 
     #[test]
     fn stoploss_is_plof_not_ptv() {
-        let var = v("exonic", "stoploss", 15.0, 0.0, false, false, false, false);
+        let var = v("exonic", "stoploss", false, false, false, false);
         assert!(is_plof(&var));
         assert!(!is_ptv(&var));
     }
 
     #[test]
     fn upstream_matches() {
-        let var = v("upstream", "", 5.6, 0.0, false, false, false, false);
+        let var = v("upstream", "", false, false, false, false);
         assert!(is_upstream(&var));
         assert!(!is_downstream(&var));
     }
 
     #[test]
     fn compound_upstream_downstream() {
-        let var = v(
-            "upstream;downstream",
-            "",
-            3.0,
-            0.0,
-            false,
-            false,
-            false,
-            false,
-        );
+        let var = v("upstream;downstream", "", false, false, false, false);
         assert!(is_upstream(&var));
         assert!(is_downstream(&var));
     }
 
     #[test]
     fn utr3_matches() {
-        let var = v("UTR3", "", 7.4, 0.0, false, false, false, false);
+        let var = v("UTR3", "", false, false, false, false);
         assert!(is_utr(&var));
         assert!(!is_upstream(&var));
     }
 
     #[test]
     fn utr5_utr3_compound() {
-        let var = v("UTR5;UTR3", "", 4.0, 0.0, false, false, false, false);
+        let var = v("UTR5;UTR3", "", false, false, false, false);
         assert!(is_utr(&var));
     }
 
     #[test]
     fn cage_promoter_flag() {
-        let var = v("intergenic", "", 12.3, 0.0, true, false, false, false);
+        let var = v("intergenic", "", true, false, false, false);
         assert!(is_promoter_cage(&var));
         assert!(!is_enhancer_cage(&var));
         assert!(!is_promoter_dhs(&var));
@@ -492,28 +439,28 @@ mod tests {
 
     #[test]
     fn cage_enhancer_flag() {
-        let var = v("intergenic", "", 8.1, 0.0, false, true, false, false);
+        let var = v("intergenic", "", false, true, false, false);
         assert!(is_enhancer_cage(&var));
         assert!(!is_promoter_cage(&var));
     }
 
     #[test]
     fn ccre_pls_is_promoter_dhs() {
-        let var = v("intergenic", "", 7.0, 0.0, false, false, true, false);
+        let var = v("intergenic", "", false, false, true, false);
         assert!(is_promoter_dhs(&var));
         assert!(!is_enhancer_dhs(&var));
     }
 
     #[test]
     fn ccre_els_is_enhancer_dhs() {
-        let var = v("intergenic", "", 8.7, 0.0, false, false, false, true);
+        let var = v("intergenic", "", false, false, false, true);
         assert!(is_enhancer_dhs(&var));
         assert!(!is_promoter_dhs(&var));
     }
 
     #[test]
     fn ncrna_exonic() {
-        let var = v("ncRNA_exonic", "", 9.9, 0.0, false, false, false, false);
+        let var = v("ncRNA_exonic", "", false, false, false, false);
         assert!(is_ncrna(&var));
         assert!(!is_plof(&var));
         assert!(!is_upstream(&var));
@@ -521,22 +468,13 @@ mod tests {
 
     #[test]
     fn ncrna_compound_splicing() {
-        let var = v(
-            "ncRNA_exonic;splicing",
-            "",
-            15.0,
-            0.0,
-            false,
-            false,
-            false,
-            false,
-        );
+        let var = v("ncRNA_exonic;splicing", "", false, false, false, false);
         assert!(is_ncrna(&var));
     }
 
     #[test]
     fn intronic_matches_no_mask() {
-        let var = v("intronic", "", 13.9, 0.0, false, false, false, false);
+        let var = v("intronic", "", false, false, false, false);
         assert!(!is_plof(&var));
         assert!(!is_missense(&var));
         assert!(!is_synonymous(&var));
@@ -555,12 +493,12 @@ mod tests {
 
     #[test]
     fn coding_incl_ptv_unions_coding_categories() {
-        let stopgain = v("exonic", "stopgain", 30.0, 0.0, false, false, false, false);
-        let frameshift = v("exonic", "frameshift deletion", 25.0, 0.0, false, false, false, false);
-        let missense = v("exonic", "nonsynonymous SNV", 20.0, 0.0, false, false, false, false);
-        let synonymous = v("exonic", "synonymous SNV", 6.4, 0.0, false, false, false, false);
-        let splice = v("splicing", "", 25.1, 0.0, false, false, false, false);
-        let intergenic = v("intergenic", "", 5.0, 0.0, false, false, false, false);
+        let stopgain = v("exonic", "stopgain", false, false, false, false);
+        let frameshift = v("exonic", "frameshift deletion", false, false, false, false);
+        let missense = v("exonic", "nonsynonymous SNV", false, false, false, false);
+        let synonymous = v("exonic", "synonymous SNV", false, false, false, false);
+        let splice = v("splicing", "", false, false, false, false);
+        let intergenic = v("intergenic", "", false, false, false, false);
 
         assert!(is_coding_incl_ptv(&stopgain));
         assert!(is_coding_incl_ptv(&frameshift));
@@ -577,35 +515,17 @@ mod tests {
             AnnotatedVariant {
                 position: 100,
                 gene_name: "TP53".into(),
-                ..v("exonic", "stopgain", 30.0, 0.0, false, false, false, false)
+                ..v("exonic", "stopgain", false, false, false, false)
             },
             AnnotatedVariant {
                 position: 200,
                 gene_name: "TP53".into(),
-                ..v(
-                    "exonic",
-                    "frameshift deletion",
-                    25.0,
-                    0.0,
-                    false,
-                    false,
-                    false,
-                    false,
-                )
+                ..v("exonic", "frameshift deletion", false, false, false, false)
             },
             AnnotatedVariant {
                 position: 300,
                 gene_name: "BRCA1".into(),
-                ..v(
-                    "exonic",
-                    "nonsynonymous SNV",
-                    20.0,
-                    0.0,
-                    false,
-                    false,
-                    false,
-                    false,
-                )
+                ..v("exonic", "nonsynonymous SNV", false, false, false, false)
             },
         ];
         let masks = build_coding_masks(&variants, 2);
@@ -622,7 +542,7 @@ mod tests {
         let variants: Vec<AnnotatedVariant> = (0..5)
             .map(|i| AnnotatedVariant {
                 position: i * 500,
-                ..v("exonic", "stopgain", 10.0, 0.0, false, false, false, false)
+                ..v("exonic", "stopgain", false, false, false, false)
             })
             .collect();
         let indices: Vec<usize> = (0..5).collect();
@@ -634,48 +554,23 @@ mod tests {
     }
 
     #[test]
-    fn vep_missense_variant() {
-        let var = v(
-            "exonic",
-            "missense_variant",
-            25.0,
-            0.7,
-            false,
-            false,
-            false,
-            false,
-        );
+    fn vep_missense_variant_with_metasvm_is_disruptive() {
+        // SO-term "missense_variant" should behave identically to the
+        // ANNOVAR "nonsynonymous SNV" spelling.
+        let var = v_ds("exonic", "missense_variant");
         assert!(is_missense(&var));
         assert!(is_disruptive_missense(&var));
     }
 
     #[test]
     fn vep_upstream_gene_variant() {
-        let var = v(
-            "",
-            "upstream_gene_variant",
-            5.0,
-            0.0,
-            false,
-            false,
-            false,
-            false,
-        );
+        let var = v("", "upstream_gene_variant", false, false, false, false);
         assert!(is_upstream(&var));
     }
 
     #[test]
-    fn vep_splice_donor_high_cadd_is_ptv_ds() {
-        let var = v(
-            "",
-            "splice_donor_variant",
-            30.0,
-            0.0,
-            false,
-            false,
-            false,
-            false,
-        );
+    fn vep_splice_donor_is_ptv_ds() {
+        let var = v("", "splice_donor_variant", false, false, false, false);
         assert!(is_plof(&var));
         assert!(is_splice(&var));
         assert!(is_ptv_ds(&var));
