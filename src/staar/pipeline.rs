@@ -825,6 +825,7 @@ impl<'a> StaarPipeline<'a> {
             TraitType::Continuous,
             n,
             n_rare,
+            self.config.known_loci.is_some(),
             self.out,
         )
     }
@@ -986,8 +987,15 @@ impl<'a> StaarPipeline<'a> {
             ))
         })?;
 
+        let is_conditional = self.config.known_loci.is_some();
+
         if self.config.individual && !scoring.individual.is_empty() {
-            write_individual_results(&scoring.individual, &results_dir, self.out)?;
+            write_individual_results(
+                &scoring.individual,
+                &results_dir,
+                is_conditional,
+                self.out,
+            )?;
         }
 
         write_results(
@@ -1001,6 +1009,7 @@ impl<'a> StaarPipeline<'a> {
             trait_type,
             n,
             n_rare,
+            is_conditional,
             self.out,
         )
     }
@@ -1017,6 +1026,11 @@ impl<'a> StaarPipeline<'a> {
         if self.config.has_kinship() && mode == ScoringMode::Spa {
             self.out.warn(
                 "--spa with --kinship: SPA is applied at the score-test layer; the kinship-aware path provides exact variance via the GLMM projection.",
+            );
+        }
+        if self.config.known_loci.is_some() && mode == ScoringMode::Spa {
+            self.out.warn(
+                "--spa with --known-loci: the known-loci adjustment is absorbed into the fitted null, but the SPA saddlepoint reads raw G; gene-mask p-values from this run are SPA-adjusted but not conditional. A separate --cond-spa path is tracked in STAARpipeline as Gene_Centric_*_cond_spa.",
             );
         }
     }
