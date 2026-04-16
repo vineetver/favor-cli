@@ -402,6 +402,8 @@ fn write_variants_parquet(
         region_type: Box<str>,
         consequence: Box<str>,
         revel: f64,
+        metasvm_pred: Box<str>,
+        genehancer: Box<str>,
         cage_prom: bool,
         cage_enh: bool,
         ccre_prom: bool,
@@ -419,6 +421,8 @@ fn write_variants_parquet(
         let rt_arr = str_col_by_name(batch, Col::RegionType.as_str())?;
         let csq_arr = str_col_by_name(batch, Col::Consequence.as_str())?;
         let revel_arr = col_by_name::<Float64Array>(batch, Col::Revel.as_str())?;
+        let msp_arr = str_col_by_name(batch, Col::MetaSvmPred.as_str())?;
+        let gh_arr = str_col_by_name(batch, Col::GeneHancer.as_str())?;
         let cps = col_by_name::<BooleanArray>(batch, Col::IsCagePromoter.as_str())?;
         let ces = col_by_name::<BooleanArray>(batch, Col::IsCageEnhancer.as_str())?;
         let crps = col_by_name::<BooleanArray>(batch, Col::IsCcrePromoter.as_str())?;
@@ -449,6 +453,8 @@ fn write_variants_parquet(
                     region_type: rt_arr.value(i).into(),
                     consequence: csq_arr.value(i).into(),
                     revel: revel_arr.value(i),
+                    metasvm_pred: msp_arr.value(i).into(),
+                    genehancer: gh_arr.value(i).into(),
                     cage_prom: cps.value(i),
                     cage_enh: ces.value(i),
                     ccre_prom: crps.value(i),
@@ -470,6 +476,8 @@ fn write_variants_parquet(
     let mut rt_b = StringBuilder::with_capacity(n, n * 16);
     let mut csq_b = StringBuilder::with_capacity(n, n * 16);
     let mut revel_b = Float64Builder::with_capacity(n);
+    let mut msp_b = StringBuilder::with_capacity(n, n);
+    let mut gh_b = StringBuilder::with_capacity(n, n * 8);
     let mut cp_b = BooleanBuilder::with_capacity(n);
     let mut ce_b = BooleanBuilder::with_capacity(n);
     let mut crp_b = BooleanBuilder::with_capacity(n);
@@ -498,6 +506,8 @@ fn write_variants_parquet(
             rt_b.append_value(&*m.region_type);
             csq_b.append_value(&*m.consequence);
             revel_b.append_value(m.revel);
+            msp_b.append_value(&*m.metasvm_pred);
+            gh_b.append_value(&*m.genehancer);
             cp_b.append_value(m.cage_prom);
             ce_b.append_value(m.cage_enh);
             crp_b.append_value(m.ccre_prom);
@@ -511,6 +521,8 @@ fn write_variants_parquet(
             rt_b.append_value("");
             csq_b.append_value("");
             revel_b.append_value(0.0);
+            msp_b.append_value("");
+            gh_b.append_value("");
             cp_b.append_value(false);
             ce_b.append_value(false);
             crp_b.append_value(false);
@@ -535,6 +547,8 @@ fn write_variants_parquet(
         Field::new(Col::RegionType.as_str(), DataType::Utf8, false),
         Field::new(Col::Consequence.as_str(), DataType::Utf8, false),
         Field::new(Col::Revel.as_str(), DataType::Float64, false),
+        Field::new(Col::MetaSvmPred.as_str(), DataType::Utf8, false),
+        Field::new(Col::GeneHancer.as_str(), DataType::Utf8, false),
         Field::new(Col::IsCagePromoter.as_str(), DataType::Boolean, false),
         Field::new(Col::IsCageEnhancer.as_str(), DataType::Boolean, false),
         Field::new(Col::IsCcrePromoter.as_str(), DataType::Boolean, false),
@@ -556,6 +570,8 @@ fn write_variants_parquet(
         Arc::new(rt_b.finish()),
         Arc::new(csq_b.finish()),
         Arc::new(revel_b.finish()),
+        Arc::new(msp_b.finish()),
+        Arc::new(gh_b.finish()),
         Arc::new(cp_b.finish()),
         Arc::new(ce_b.finish()),
         Arc::new(crp_b.finish()),

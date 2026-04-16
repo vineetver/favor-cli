@@ -454,6 +454,7 @@ impl<'a> StaarPipeline<'a> {
         let weight_cols: Vec<crate::column::Col> = STAAR_PHRED_CHANNELS.to_vec();
         ann_vs.supports(&weight_cols)?;
         ann_vs.require_staar_weight_catalog()?;
+        ann_vs.require_structural_annotation_catalog()?;
 
         // Raw annotation column contract.
         let contract = ColumnContract {

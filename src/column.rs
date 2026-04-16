@@ -15,6 +15,8 @@ pub enum Col {
 
     CaddPhred,
     Revel,
+    MetaSvmPred,
+    GeneHancer,
 
     Vid,
     VariantVcf,
@@ -52,6 +54,8 @@ impl Col {
             Col::Consequence => "consequence",
             Col::CaddPhred => "cadd_phred",
             Col::Revel => "revel",
+            Col::MetaSvmPred => "metasvm_pred",
+            Col::GeneHancer => "genehancer",
             Col::IsCagePromoter => "is_cage_promoter",
             Col::IsCageEnhancer => "is_cage_enhancer",
             Col::IsCcrePromoter => "is_ccre_promoter",
@@ -152,7 +156,7 @@ pub const STAAR_PHRED_SOURCES: [(&str, &str); 11] = [
     ),
 ];
 
-pub const STORE_METADATA_COLS: [Col; 13] = [
+pub const STORE_METADATA_COLS: [Col; 15] = [
     Col::Position,
     Col::EndPosition,
     Col::RefAllele,
@@ -162,11 +166,19 @@ pub const STORE_METADATA_COLS: [Col; 13] = [
     Col::RegionType,
     Col::Consequence,
     Col::Revel,
+    Col::MetaSvmPred,
+    Col::GeneHancer,
     Col::IsCagePromoter,
     Col::IsCageEnhancer,
     Col::IsCcrePromoter,
     Col::IsCcreEnhancer,
 ];
+
+/// Structural annotation columns beyond the 11 weight channels. Required
+/// for mask predicates that match STAARpipeline (disruptive_missense,
+/// plof_ds, ptv_ds via MetaSVM; GeneHancer pass-through for downstream
+/// tooling). Locked at cohort preflight.
+pub const STAAR_STRUCTURAL_COLS: [Col; 2] = [Col::MetaSvmPred, Col::GeneHancer];
 
 pub fn store_columns() -> Vec<Col> {
     let mut cols = STORE_METADATA_COLS.to_vec();
@@ -212,6 +224,14 @@ pub static ANNOTATION_EXTRACTS: &[AnnotationExtract] = &[
     AnnotationExtract {
         output: Col::Revel,
         sql: "CAST(COALESCE(a.dbnsfp.revel, 0.0) AS DOUBLE)",
+    },
+    AnnotationExtract {
+        output: Col::MetaSvmPred,
+        sql: "COALESCE(a.dbnsfp.metasvm_pred, '')",
+    },
+    AnnotationExtract {
+        output: Col::GeneHancer,
+        sql: "COALESCE(a.genehancer.id, '')",
     },
     AnnotationExtract {
         output: Col::IsCagePromoter,
@@ -473,6 +493,8 @@ pub static VARIANT_STORE_CONTRACT: SchemaContract = SchemaContract {
         (Col::Consequence, ColType::Utf8),
         (Col::CaddPhred, ColType::Float64),
         (Col::Revel, ColType::Float64),
+        (Col::MetaSvmPred, ColType::Utf8),
+        (Col::GeneHancer, ColType::Utf8),
         (Col::IsCagePromoter, ColType::Boolean),
         (Col::IsCageEnhancer, ColType::Boolean),
         (Col::IsCcrePromoter, ColType::Boolean),
@@ -550,7 +572,7 @@ mod tests {
     #[test]
     fn store_columns_complete() {
         let cols = store_columns();
-        assert_eq!(cols.len(), 24); // 13 metadata + 11 phred channels
+        assert_eq!(cols.len(), 26); // 15 metadata + 11 phred channels
     }
 
     #[test]

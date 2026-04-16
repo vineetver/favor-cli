@@ -46,7 +46,7 @@ use crate::store::cohort::{ChromosomeView, CohortId};
 use crate::store::list::parquet_column_names;
 use crate::types::{
     AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation,
-    MetaVariant, RegionType, RegulatoryFlags,
+    MetaSvmPred, MetaVariant, RegionType, RegulatoryFlags,
 };
 
 const META_SUMSTATS_COLUMNS: &[ColumnRequirement] = &[
@@ -399,6 +399,8 @@ pub fn merge_chromosome(
              first_value({csq}) FILTER (WHERE {csq} != '') AS {csq}, \
              first_value(cadd_phred_raw) AS cadd_phred_raw, \
              first_value({revel}) AS {revel}, \
+             first_value({msp}) FILTER (WHERE {msp} != '') AS {msp}, \
+             first_value({gh}) FILTER (WHERE {gh} != '') AS {gh}, \
              bool_or({cage_p}) AS {cage_p}, \
              bool_or({cage_e}) AS {cage_e}, \
              bool_or({ccre_p}) AS {ccre_p}, \
@@ -415,6 +417,7 @@ pub fn merge_chromosome(
         maf = Col::Maf,
         gene = Col::GeneName, region = Col::RegionType, csq = Col::Consequence,
         revel = Col::Revel,
+        msp = Col::MetaSvmPred, gh = Col::GeneHancer,
         cage_p = Col::IsCagePromoter, cage_e = Col::IsCageEnhancer,
         ccre_p = Col::IsCcrePromoter, ccre_e = Col::IsCcreEnhancer,
     ))?;
@@ -422,7 +425,7 @@ pub fn merge_chromosome(
     let batches = engine.collect(&format!(
         "SELECT {pos}, {ref_a}, {alt_a}, u_meta, \
          mac_total, n_total, {gene}, {region}, {csq}, \
-         cadd_phred_raw, {revel}, \
+         cadd_phred_raw, {revel}, {msp}, {gh}, \
          {cage_p}, {cage_e}, {ccre_p}, {ccre_e}, \
          {weight_select}, \
          study_segs \
@@ -434,6 +437,8 @@ pub fn merge_chromosome(
         region = Col::RegionType,
         csq = Col::Consequence,
         revel = Col::Revel,
+        msp = Col::MetaSvmPred,
+        gh = Col::GeneHancer,
         cage_p = Col::IsCagePromoter,
         cage_e = Col::IsCageEnhancer,
         ccre_p = Col::IsCcrePromoter,
@@ -492,19 +497,21 @@ pub fn merge_chromosome(
         let csq_arr = str_col(8)?;
         let cadd_raw_arr = f64_col(9)?;
         let revel_arr = f64_col(10)?;
-        let cp_arr = bool_col(11)?;
-        let ce_arr = bool_col(12)?;
-        let crp_arr = bool_col(13)?;
-        let cre_arr = bool_col(14)?;
+        let msp_arr = str_col(11)?;
+        let gh_arr = str_col(12)?;
+        let cp_arr = bool_col(13)?;
+        let ce_arr = bool_col(14)?;
+        let crp_arr = bool_col(15)?;
+        let cre_arr = bool_col(16)?;
 
         // Sumstats parquet stores transformed [0,1] weights under the
         // FAVOR-native channel names; pass them through so the
         // PHRED -> probability transform is not applied a second time.
         let mut w_arrs: Vec<&Float64Array> = Vec::with_capacity(11);
         for i in 0..11 {
-            w_arrs.push(f64_col(15 + i)?);
+            w_arrs.push(f64_col(17 + i)?);
         }
-        let segs_arr = str_col(26)?;
+        let segs_arr = str_col(28)?;
 
         for i in 0..n {
             let mut weights = [0.0f64; 11];
@@ -532,11 +539,13 @@ pub fn merge_chromosome(
                     alt_allele: str_or(alt_arr, i, "").into(),
                     maf,
                     gene_name: str_or(gene_arr, i, "").into(),
+                    genehancer: str_or(gh_arr, i, "").into(),
                     annotation: FunctionalAnnotation {
                         region_type: RegionType::from_str_lossy(str_or(rt_arr, i, "")),
                         consequence: Consequence::from_str_lossy(str_or(csq_arr, i, "")),
                         cadd_phred,
                         revel: f64_or(revel_arr, i, 0.0),
+                        metasvm_pred: MetaSvmPred::from_str_lossy(str_or(msp_arr, i, "")),
                         regulatory: RegulatoryFlags {
                             cage_promoter: bool_or(cp_arr, i, false),
                             cage_enhancer: bool_or(ce_arr, i, false),
@@ -899,6 +908,8 @@ fn variant_schema() -> Schema {
         Field::new(Col::Consequence.as_str(), DataType::Utf8, false),
         Field::new("cadd_phred_raw", DataType::Float64, false),
         Field::new(Col::Revel.as_str(), DataType::Float64, false),
+        Field::new(Col::MetaSvmPred.as_str(), DataType::Utf8, false),
+        Field::new(Col::GeneHancer.as_str(), DataType::Utf8, false),
         Field::new(Col::IsCagePromoter.as_str(), DataType::Boolean, false),
         Field::new(Col::IsCageEnhancer.as_str(), DataType::Boolean, false),
         Field::new(Col::IsCcrePromoter.as_str(), DataType::Boolean, false),
@@ -964,6 +975,8 @@ struct SumstatsWriter {
     consequence: StringBuilder,
     cadd: Float64Builder,
     revel: Float64Builder,
+    metasvm_pred: StringBuilder,
+    genehancer: StringBuilder,
     cage_prom: BooleanBuilder,
     cage_enh: BooleanBuilder,
     ccre_prom: BooleanBuilder,
@@ -996,6 +1009,8 @@ impl SumstatsWriter {
             consequence: StringBuilder::with_capacity(total_variants, total_variants * 8),
             cadd: Float64Builder::with_capacity(total_variants),
             revel: Float64Builder::with_capacity(total_variants),
+            metasvm_pred: StringBuilder::with_capacity(total_variants, total_variants),
+            genehancer: StringBuilder::with_capacity(total_variants, total_variants * 8),
             cage_prom: BooleanBuilder::with_capacity(total_variants),
             cage_enh: BooleanBuilder::with_capacity(total_variants),
             ccre_prom: BooleanBuilder::with_capacity(total_variants),
@@ -1043,6 +1058,9 @@ impl SumstatsWriter {
             .append_value(v.annotation.consequence.as_str());
         self.cadd.append_value(v.annotation.cadd_phred);
         self.revel.append_value(v.annotation.revel);
+        self.metasvm_pred
+            .append_value(v.annotation.metasvm_pred.as_str());
+        self.genehancer.append_value(&v.genehancer);
         self.cage_prom
             .append_value(v.annotation.regulatory.cage_promoter);
         self.cage_enh
@@ -1111,6 +1129,8 @@ impl SumstatsWriter {
             Arc::new(self.consequence.finish()),
             Arc::new(self.cadd.finish()),
             Arc::new(self.revel.finish()),
+            Arc::new(self.metasvm_pred.finish()),
+            Arc::new(self.genehancer.finish()),
             Arc::new(self.cage_prom.finish()),
             Arc::new(self.cage_enh.finish()),
             Arc::new(self.ccre_prom.finish()),
@@ -1458,11 +1478,13 @@ mod tests {
             alt_allele: alt_b.into(),
             maf,
             gene_name: "GENE".into(),
+            genehancer: "".into(),
             annotation: FunctionalAnnotation {
                 region_type: RegionType::Exonic,
                 consequence: Consequence::NonsynonymousSNV,
                 cadd_phred: 20.0,
                 revel: 0.5,
+                metasvm_pred: MetaSvmPred::Unknown,
                 regulatory: RegulatoryFlags::default(),
                 weights: AnnotationWeights([1.0; 11]),
             },

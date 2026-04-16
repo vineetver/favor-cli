@@ -297,7 +297,8 @@ fn v(
     ccre_enh: bool,
 ) -> AnnotatedVariant {
     use crate::types::{
-        AnnotationWeights, Chromosome, FunctionalAnnotation, RegionType, RegulatoryFlags,
+        AnnotationWeights, Chromosome, FunctionalAnnotation, MetaSvmPred, RegionType,
+        RegulatoryFlags,
     };
     AnnotatedVariant {
         chromosome: Chromosome::Autosome(22),
@@ -306,11 +307,13 @@ fn v(
         alt_allele: "T".into(),
         maf: 0.001,
         gene_name: "BRCA2".into(),
+        genehancer: "".into(),
         annotation: FunctionalAnnotation {
             region_type: RegionType::from_str_lossy(region_type),
             consequence: Consequence::from_str_lossy(consequence),
             cadd_phred: cadd,
             revel,
+            metasvm_pred: MetaSvmPred::Unknown,
             weights: AnnotationWeights([0.0; 11]),
             regulatory: RegulatoryFlags {
                 cage_promoter: cage_prom,
@@ -681,7 +684,8 @@ mod tests {
 
     fn var_at(pos: u32) -> AnnotatedVariant {
         use crate::types::{
-            AnnotationWeights, Chromosome, FunctionalAnnotation, RegionType, RegulatoryFlags,
+            AnnotationWeights, Chromosome, FunctionalAnnotation, MetaSvmPred, RegionType,
+            RegulatoryFlags,
         };
         AnnotatedVariant {
             chromosome: Chromosome::Autosome(1),
@@ -690,11 +694,13 @@ mod tests {
             alt_allele: "T".into(),
             maf: 0.005,
             gene_name: "".into(),
+            genehancer: "".into(),
             annotation: FunctionalAnnotation {
                 region_type: RegionType::Unknown,
                 consequence: Consequence::Unknown,
                 cadd_phred: 10.0,
                 revel: 0.0,
+                metasvm_pred: MetaSvmPred::Unknown,
                 weights: AnnotationWeights([0.5; 11]),
                 regulatory: RegulatoryFlags::default(),
             },

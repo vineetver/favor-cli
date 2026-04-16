@@ -6,8 +6,8 @@ use std::path::Path;
 use crate::error::CohortError;
 use crate::store::backend::{Backend, BoxedBatchReader};
 use crate::types::{
-    AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation, RegionType,
-    RegulatoryFlags,
+    AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation, MetaSvmPred,
+    RegionType, RegulatoryFlags,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -42,6 +42,8 @@ pub struct VariantIndexEntry {
     pub consequence: Consequence,
     pub cadd_phred: f64,
     pub revel: f64,
+    pub metasvm_pred: MetaSvmPred,
+    pub genehancer: Box<str>,
     pub regulatory: RegulatoryFlags,
     pub weights: AnnotationWeights,
 }
@@ -55,11 +57,13 @@ impl VariantIndexEntry {
             alt_allele: self.alt_allele.clone(),
             maf: self.maf,
             gene_name: "".into(), // gene is a derived property, not stored per-variant
+            genehancer: self.genehancer.clone(),
             annotation: FunctionalAnnotation {
                 region_type: self.region_type,
                 consequence: self.consequence,
                 cadd_phred: self.cadd_phred,
                 revel: self.revel,
+                metasvm_pred: self.metasvm_pred,
                 regulatory: self.regulatory,
                 weights: self.weights,
             },
@@ -188,6 +192,8 @@ fn load_variant_entries(reader: BoxedBatchReader) -> Result<Vec<VariantIndexEntr
         let rt_arr = col_by_name::<StringArray>(&batch, Col::RegionType.as_str())?;
         let csq_arr = col_by_name::<StringArray>(&batch, Col::Consequence.as_str())?;
         let revel_arr = col_by_name::<Float64Array>(&batch, Col::Revel.as_str())?;
+        let msp_arr = col_by_name::<StringArray>(&batch, Col::MetaSvmPred.as_str())?;
+        let gh_arr = col_by_name::<StringArray>(&batch, Col::GeneHancer.as_str())?;
         let cp_arr = col_by_name::<BooleanArray>(&batch, Col::IsCagePromoter.as_str())?;
         let ce_arr = col_by_name::<BooleanArray>(&batch, Col::IsCageEnhancer.as_str())?;
         let crp_arr = col_by_name::<BooleanArray>(&batch, Col::IsCcrePromoter.as_str())?;
@@ -223,6 +229,8 @@ fn load_variant_entries(reader: BoxedBatchReader) -> Result<Vec<VariantIndexEntr
                 consequence: Consequence::from_str_lossy(csq_arr.value(i)),
                 cadd_phred,
                 revel: revel_arr.value(i),
+                metasvm_pred: MetaSvmPred::from_str_lossy(msp_arr.value(i)),
+                genehancer: gh_arr.value(i).into(),
                 regulatory: RegulatoryFlags {
                     cage_promoter: cp_arr.value(i),
                     cage_enhancer: ce_arr.value(i),
@@ -256,6 +264,8 @@ mod tests {
                 consequence: Consequence::MissenseVariant,
                 cadd_phred: 25.0,
                 revel: 0.8,
+                metasvm_pred: MetaSvmPred::Unknown,
+                genehancer: "".into(),
                 regulatory: RegulatoryFlags::default(),
                 weights: AnnotationWeights([1.0; 11]),
             },
@@ -270,6 +280,8 @@ mod tests {
                 consequence: Consequence::Stopgain,
                 cadd_phred: 35.0,
                 revel: 0.95,
+                metasvm_pred: MetaSvmPred::Unknown,
+                genehancer: "".into(),
                 regulatory: RegulatoryFlags::default(),
                 weights: AnnotationWeights([0.5; 11]),
             },
@@ -284,6 +296,8 @@ mod tests {
                 consequence: Consequence::Unknown,
                 cadd_phred: 5.0,
                 revel: 0.1,
+                metasvm_pred: MetaSvmPred::Unknown,
+                genehancer: "".into(),
                 regulatory: RegulatoryFlags::default(),
                 weights: AnnotationWeights([0.2; 11]),
             },
@@ -461,6 +475,8 @@ mod tests {
             Field::new(Col::RegionType.as_str(), DataType::Utf8, false),
             Field::new(Col::Consequence.as_str(), DataType::Utf8, false),
             Field::new(Col::Revel.as_str(), DataType::Float64, false),
+            Field::new(Col::MetaSvmPred.as_str(), DataType::Utf8, false),
+            Field::new(Col::GeneHancer.as_str(), DataType::Utf8, false),
             Field::new(Col::IsCagePromoter.as_str(), DataType::Boolean, false),
             Field::new(Col::IsCageEnhancer.as_str(), DataType::Boolean, false),
             Field::new(Col::IsCcrePromoter.as_str(), DataType::Boolean, false),
@@ -487,6 +503,8 @@ mod tests {
             Arc::new(StringArray::from(vec!["exonic", "intronic"])),
             Arc::new(StringArray::from(vec!["missense_variant", ""])),
             Arc::new(Float64Array::from(vec![0.8, 0.1])),
+            Arc::new(StringArray::from(vec!["D", ""])),
+            Arc::new(StringArray::from(vec!["GH22J001", ""])),
             Arc::new(BooleanArray::from(vec![false, false])),
             Arc::new(BooleanArray::from(vec![false, true])),
             Arc::new(BooleanArray::from(vec![true, false])),

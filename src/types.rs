@@ -421,6 +421,35 @@ pub struct RegulatoryFlags {
     pub ccre_enhancer: bool,
 }
 
+/// dbNSFP MetaSVM ensemble missense prediction. "D" (Deleterious) drives
+/// STAARpipeline's disruptive_missense / plof_ds / ptv_ds predicates; "T"
+/// (Tolerated) and missing (".") collapse to Unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum MetaSvmPred {
+    #[default]
+    Unknown,
+    Deleterious,
+    Tolerated,
+}
+
+impl MetaSvmPred {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deleterious => "D",
+            Self::Tolerated => "T",
+            Self::Unknown => "",
+        }
+    }
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s {
+            "D" => Self::Deleterious,
+            "T" => Self::Tolerated,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// Everything STAAR needs to classify (masks) and weight (score tests) a variant.
 ///
 /// Mask predicates access `consequence` / `region_type`.
@@ -431,6 +460,7 @@ pub struct FunctionalAnnotation {
     pub consequence: Consequence,
     pub cadd_phred: f64,
     pub revel: f64,
+    pub metasvm_pred: MetaSvmPred,
     pub regulatory: RegulatoryFlags,
     pub weights: AnnotationWeights,
 }
@@ -447,6 +477,9 @@ pub struct AnnotatedVariant {
     pub alt_allele: Box<str>,
     pub maf: f64,
     pub gene_name: Box<str>,
+    /// Raw GeneHancer identifier string from FAVOR (`a.genehancer.id`).
+    /// Pass-through to sumstats; no mask predicate reads it today.
+    pub genehancer: Box<str>,
     pub annotation: FunctionalAnnotation,
 }
 

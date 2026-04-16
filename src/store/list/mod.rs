@@ -141,6 +141,29 @@ impl VariantSet {
             missing.join(", "),
         )))
     }
+
+    /// Structural annotation columns beyond the 11 weight channels
+    /// (MetaSVM, GeneHancer). Required for STAARpipeline-parity mask
+    /// predicates (disruptive_missense, plof_ds, ptv_ds) and for pass-
+    /// through fields the downstream tooling expects.
+    pub fn require_structural_annotation_catalog(&self) -> Result<(), CohortError> {
+        let have = self.columns();
+        let missing: Vec<&str> = crate::column::STAAR_STRUCTURAL_COLS
+            .iter()
+            .map(|c| c.as_str())
+            .filter(|name| !have.iter().any(|h| h == name))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(CohortError::DataMissing(format!(
+            "Cohort store at {} is missing structural annotation columns:\n  {}\n\
+             Required for MetaSVM-driven coding masks and GeneHancer pass-through.\n\
+             Rebuild the cohort: `favor ingest <vcf> --annotations <full-tier> --cohort-id <id>`.",
+            self.root.display(),
+            missing.join(", "),
+        )))
+    }
 }
 
 pub struct VariantSetWriter {
