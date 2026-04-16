@@ -1012,8 +1012,6 @@ mod tests {
                 acat_o: p,
                 staar_o: p,
             },
-            burden_beta: f64::NAN,
-            burden_se: f64::NAN,
         }
     }
 

@@ -23,6 +23,19 @@ use super::carrier::AnalysisVectors;
 use super::masks::MaskGroup;
 use super::score;
 use super::GeneResult;
+
+/// Meta-analysis per-gene result. Wraps a `GeneResult` with the
+/// unweighted burden effect size — only meaningful for meta runs, so it
+/// lives here instead of bloating `GeneResult` with NaN-80%-of-the-time
+/// fields on the single-study path.
+#[derive(Debug, Clone)]
+pub struct MetaGeneResult {
+    pub gene: GeneResult,
+    /// Unweighted burden coefficient β̂ = (1ᵀU)/(1ᵀK1).
+    pub burden_beta: f64,
+    /// SE of β̂: sqrt(1 / 1ᵀK1).
+    pub burden_se: f64,
+}
 use crate::column::{Col, STAAR_WEIGHTS};
 use crate::engine::DfEngine;
 use crate::error::CohortError;
@@ -546,7 +559,7 @@ pub fn meta_score_gene(
     meta_variants: &[MetaVariant],
     studies: &[StudyHandle],
     segment_cache: &HashMap<(usize, i32), SegmentCov>,
-) -> Option<GeneResult> {
+) -> Option<MetaGeneResult> {
     let indices: Vec<usize> = group
         .variant_indices
         .iter()
@@ -632,15 +645,17 @@ pub fn meta_score_gene(
     let (burden_beta, burden_se) = unweighted_burden_estimate(&u, &cov);
     let cmac: i64 = indices.iter().map(|&gi| meta_variants[gi].mac_total).sum();
 
-    Some(GeneResult {
-        ensembl_id: group.name.clone(),
-        gene_symbol: group.name.clone(),
-        chromosome: group.chromosome,
-        start: group.start,
-        end: group.end,
-        n_variants: m as u32,
-        cumulative_mac: cmac as u32,
-        staar: sr,
+    Some(MetaGeneResult {
+        gene: GeneResult {
+            ensembl_id: group.name.clone(),
+            gene_symbol: group.name.clone(),
+            chromosome: group.chromosome,
+            start: group.start,
+            end: group.end,
+            n_variants: m as u32,
+            cumulative_mac: cmac as u32,
+            staar: sr,
+        },
         burden_beta,
         burden_se,
     })
@@ -1190,7 +1205,7 @@ pub fn meta_score_gene_conditional(
     segment_cache: &HashMap<(usize, i32), SegmentCov>,
     known_loci_indices: &[usize],
     _heterogeneous: bool,
-) -> Option<GeneResult> {
+) -> Option<MetaGeneResult> {
     let gene_indices: Vec<usize> = group
         .variant_indices
         .iter()
@@ -1349,7 +1364,7 @@ fn finish_conditional(
     u_cond: &Mat<f64>,
     k_cond: &Mat<f64>,
     group: &MaskGroup,
-) -> Option<GeneResult> {
+) -> Option<MetaGeneResult> {
     let m_t = gene_indices.len();
 
     let mafs: Vec<f64> = gene_indices
@@ -1386,15 +1401,17 @@ fn finish_conditional(
         .map(|&gi| meta_variants[gi].mac_total)
         .sum();
 
-    Some(GeneResult {
-        ensembl_id: group.name.clone(),
-        gene_symbol: group.name.clone(),
-        chromosome: group.chromosome,
-        start: group.start,
-        end: group.end,
-        n_variants: m_t as u32,
-        cumulative_mac: cmac as u32,
-        staar: sr,
+    Some(MetaGeneResult {
+        gene: GeneResult {
+            ensembl_id: group.name.clone(),
+            gene_symbol: group.name.clone(),
+            chromosome: group.chromosome,
+            start: group.start,
+            end: group.end,
+            n_variants: m_t as u32,
+            cumulative_mac: cmac as u32,
+            staar: sr,
+        },
         burden_beta,
         burden_se,
     })
@@ -1529,12 +1546,12 @@ mod tests {
 
         let result = meta_score_gene(&group, &variants, &studies, &cache).expect("score");
         assert!(
-            (result.staar.staar_o - direct.staar_o).abs() < 1e-12,
+            (result.gene.staar.staar_o - direct.staar_o).abs() < 1e-12,
             "K=1 meta {} vs direct {}",
-            result.staar.staar_o,
+            result.gene.staar.staar_o,
             direct.staar_o
         );
-        assert_eq!(result.n_variants, m as u32);
+        assert_eq!(result.gene.n_variants, m as u32);
         assert!((result.burden_beta - expected_beta).abs() < 1e-12);
         assert!((result.burden_se - expected_se).abs() < 1e-12);
     }
@@ -1642,9 +1659,9 @@ mod tests {
 
         let result = meta_score_gene(&group, &variants, &studies, &cache).expect("score");
         assert!(
-            (result.staar.staar_o - direct.staar_o).abs() < 1e-12,
+            (result.gene.staar.staar_o - direct.staar_o).abs() < 1e-12,
             "K=2 split meta {} vs direct {}",
-            result.staar.staar_o,
+            result.gene.staar.staar_o,
             direct.staar_o
         );
     }

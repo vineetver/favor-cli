@@ -592,12 +592,10 @@ fn apply_build_override(
         Some(GenomeBuild::Hg38) => {
             analysis.build_guess = BuildGuess::Hg38;
         }
-        None if analysis.format != InputFormat::Vcf => {
-            // Pre-setup ingest is a first-class path: skip build detection when
-            // no configured engine is available.
-            if engine.config_opt().is_some() {
-                let _ = ingest::detect::detect_build_and_coords(engine, analysis, first);
-            }
+        // Pre-setup ingest is a first-class path: skip build detection when
+        // no configured engine is available.
+        None if analysis.format != InputFormat::Vcf && engine.config_opt().is_some() => {
+            let _ = ingest::detect::detect_build_and_coords(engine, analysis, first);
         }
         None => {}
     }
