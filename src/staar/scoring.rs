@@ -476,8 +476,6 @@ fn score_gene_masks(
                 n_variants: qualifying.len() as u32,
                 cumulative_mac: cmac,
                 staar,
-                burden_beta: f64::NAN,
-                burden_se: f64::NAN,
             },
         ));
     }
@@ -695,8 +693,6 @@ fn score_one_window(
         n_variants: m as u32,
         cumulative_mac: cmac,
         staar,
-        burden_beta: f64::NAN,
-        burden_se: f64::NAN,
     })
 }
 
@@ -899,8 +895,6 @@ fn score_chrom_genes_multi(
                         n_variants: qualifying.len() as u32,
                         cumulative_mac: cmac,
                         staar,
-                        burden_beta: f64::NAN,
-                        burden_se: f64::NAN,
                     },
                 ));
             }
@@ -1066,8 +1060,6 @@ fn score_one_window_multi(
         n_variants: m as u32,
         cumulative_mac: cmac,
         staar,
-        burden_beta: f64::NAN,
-        burden_se: f64::NAN,
     })
 }
 

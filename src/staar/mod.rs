@@ -154,9 +154,4 @@ pub struct GeneResult {
     pub n_variants: u32,
     pub cumulative_mac: u32,
     pub staar: score::StaarResult,
-    /// Unweighted burden coefficient β̂ = (1ᵀU)/(1ᵀK1) and its standard
-    /// error sqrt(1/(1ᵀK1)). Only the meta-analysis path populates these
-    /// today; single-study scoring leaves them NaN.
-    pub burden_beta: f64,
-    pub burden_se: f64,
 }

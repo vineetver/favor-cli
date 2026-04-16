@@ -18,7 +18,8 @@ use crate::error::CohortError;
 use crate::output::Output;
 use crate::runtime::Engine;
 use crate::staar::masks::MaskGroup;
-use crate::staar::{self, GeneResult, MaskCategory, MaskType};
+use crate::staar::meta::MetaGeneResult;
+use crate::staar::{self, MaskCategory, MaskType};
 use crate::types::Chromosome;
 
 pub fn build_config(
@@ -171,7 +172,7 @@ fn run_all_chromosomes(
     known_loci: &[(String, u32, String, String)],
     engine: &DfEngine,
     out: &dyn Output,
-) -> Result<Vec<(MaskType, Vec<GeneResult>)>, CohortError> {
+) -> Result<Vec<(MaskType, Vec<MetaGeneResult>)>, CohortError> {
     let k = studies.len();
     let conditional = !known_loci.is_empty();
     let heterogeneous = matches!(
@@ -179,7 +180,7 @@ fn run_all_chromosomes(
         crate::cli::ConditionalModel::Heterogeneous
     );
     let chromosomes = discover_chromosomes(&studies[0].path);
-    let mut all_results: Vec<(MaskType, Vec<GeneResult>)> = Vec::new();
+    let mut all_results: Vec<(MaskType, Vec<MetaGeneResult>)> = Vec::new();
 
     for chrom in &chromosomes {
         out.status(&format!(
@@ -216,7 +217,7 @@ fn run_all_chromosomes(
         let segment_cache = load_segment_cache(studies, chrom, out);
 
         for (mask_type, groups) in &chrom_masks {
-            let results: Vec<GeneResult> = groups
+            let results: Vec<MetaGeneResult> = groups
                 .par_iter()
                 .filter_map(|group| {
                     if cond_indices.is_empty() {
@@ -366,7 +367,7 @@ fn discover_chromosomes(study_dir: &std::path::Path) -> Vec<String> {
 
 fn generate_summary(
     studies: &[staar::meta::StudyHandle],
-    results: &[(MaskType, Vec<GeneResult>)],
+    results: &[(MaskType, Vec<MetaGeneResult>)],
     config: &MetaStaarConfig,
     out: &dyn Output,
 ) {
@@ -376,8 +377,15 @@ fn generate_summary(
     let trait_names = vec![studies[0].meta.trait_name.clone()];
     let title = format!("MetaSTAAR Meta-Analysis ({k} studies, N={total_n})");
 
+    // `generate_report` is single-study-shaped; the burden effect columns
+    // only live in the parquet writer, not the summary HTML.
+    let report_results: Vec<(MaskType, Vec<staar::GeneResult>)> = results
+        .iter()
+        .map(|(mt, rs)| (*mt, rs.iter().map(|r| r.gene.clone()).collect()))
+        .collect();
+
     match staar::output::generate_report(
-        results,
+        &report_results,
         &trait_names,
         total_n,
         n_rare,
@@ -393,7 +401,7 @@ fn generate_summary(
 }
 
 fn write_meta_results(
-    all_mask_results: &[(MaskType, Vec<GeneResult>)],
+    all_mask_results: &[(MaskType, Vec<MetaGeneResult>)],
     output_dir: &std::path::Path,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
@@ -414,7 +422,7 @@ fn write_meta_results(
 
 fn write_mask_results(
     mask_type: &MaskType,
-    results: &[GeneResult],
+    results: &[MetaGeneResult],
     channels: &[&str],
     output_dir: &std::path::Path,
     out: &dyn Output,
@@ -422,11 +430,12 @@ fn write_mask_results(
     let out_path = output_dir.join(format!("{}.parquet", mask_type.file_stem()));
     let n_channels = channels.len();
 
-    let mut sorted: Vec<&GeneResult> = results.iter().collect();
+    let mut sorted: Vec<&MetaGeneResult> = results.iter().collect();
     sorted.sort_by(|a, b| {
-        a.staar
+        a.gene
+            .staar
             .staar_o
-            .partial_cmp(&b.staar.staar_o)
+            .partial_cmp(&b.gene.staar.staar_o)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -446,7 +455,7 @@ fn write_mask_results(
         .close()
         .map_err(|e| CohortError::Resource(format!("Parquet close: {e}")))?;
 
-    let n_sig = results.iter().filter(|r| r.staar.staar_o < 2.5e-6).count();
+    let n_sig = results.iter().filter(|r| r.gene.staar.staar_o < 2.5e-6).count();
     out.success(&format!(
         "  {} -> {} genes, {} significant",
         mask_type.file_stem(),
@@ -458,7 +467,7 @@ fn write_mask_results(
 }
 
 fn build_result_batch(
-    sorted: &[&GeneResult],
+    sorted: &[&MetaGeneResult],
     channels: &[&str],
     n_channels: usize,
 ) -> Result<(Arc<Schema>, RecordBatch), CohortError> {
@@ -479,14 +488,15 @@ fn build_result_batch(
         .collect();
 
     for r in sorted {
-        let s = &r.staar;
-        b_ensembl.append_value(&r.ensembl_id);
-        b_symbol.append_value(&r.gene_symbol);
-        b_chrom.append_value(r.chromosome.label());
-        b_start.append_value(r.start);
-        b_end.append_value(r.end);
-        b_nvariants.append_value(r.n_variants);
-        b_cmac.append_value(r.cumulative_mac);
+        let g = &r.gene;
+        let s = &g.staar;
+        b_ensembl.append_value(&g.ensembl_id);
+        b_symbol.append_value(&g.gene_symbol);
+        b_chrom.append_value(g.chromosome.label());
+        b_start.append_value(g.start);
+        b_end.append_value(g.end);
+        b_nvariants.append_value(g.n_variants);
+        b_cmac.append_value(g.cumulative_mac);
         b_burden_beta.append_value(r.burden_beta);
         b_burden_se.append_value(r.burden_se);
 
