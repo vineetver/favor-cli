@@ -103,9 +103,11 @@ pub struct IndividualRow {
 pub fn write_individual_results(
     rows: &[IndividualRow],
     output_dir: &Path,
+    is_conditional: bool,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
-    let out_path = output_dir.join("individual.parquet");
+    let stem = if is_conditional { "individual_cond" } else { "individual" };
+    let out_path = output_dir.join(format!("{stem}.parquet"));
     let n = rows.len();
 
     // R orders by POS ascending before returning (Individual_Analysis.R:450).
@@ -381,8 +383,10 @@ pub fn write_results(
     trait_type: TraitType,
     n: usize,
     n_rare: i64,
+    is_conditional: bool,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
+    let cond_suffix = if is_conditional { "_cond" } else { "" };
     out.status("Writing results...");
     let mut significant_genes: Vec<serde_json::Value> = Vec::new();
 
@@ -397,7 +401,8 @@ pub fn write_results(
         if results.is_empty() {
             continue;
         }
-        let out_path = output_dir.join(format!("{}.parquet", mask_type.file_stem()));
+        let out_path =
+            output_dir.join(format!("{}{cond_suffix}.parquet", mask_type.file_stem()));
 
         let nan_pvals = results.iter().filter(|r| r.staar.staar_o.is_nan()).count();
         if nan_pvals > 0 {
@@ -453,6 +458,7 @@ pub fn write_results(
         "cohort_staar_version": 1,
         "traits": trait_names, "trait_type": format!("{:?}", trait_type),
         "n_samples": n, "n_rare_variants": n_rare, "maf_cutoff": maf_cutoff,
+        "conditional": is_conditional,
         "significant_genes": significant_genes,
     });
     // Merge null-model summary fields (sigma2 for single-trait, or the
