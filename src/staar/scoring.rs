@@ -236,6 +236,12 @@ fn score_chrom_individual(
     let vcfs: Vec<VariantVcf> = passing.iter().map(|(v, _)| VariantVcf(*v)).collect();
     let batch = chrom_ctx.view.carriers_batch(&vcfs)?;
 
+    // R AI_Individual_Analysis.R:52-55 returns NULL when use_SPA=TRUE, and
+    // we only validate the gaussian-unrelated path. Gate the AI call on both.
+    let ai_ctx = request
+        .ancestry
+        .filter(|_| !request.spa_active && analysis.kinship.is_none());
+
     let mut chrom_rows: Vec<crate::staar::output::IndividualRow> = passing
         .par_iter()
         .zip(batch.entries.par_iter())
@@ -247,6 +253,15 @@ fn score_chrom_individual(
                 -result.pvalue.log10()
             } else {
                 f64::INFINITY
+            };
+            let (ai_pvalue, pop_mafs) = match ai_ctx {
+                Some(ancestry) => {
+                    let (p, mafs) = crate::staar::ancestry::ai_individual_score_test(
+                        carriers, analysis, ancestry,
+                    );
+                    (Some(p), mafs)
+                }
+                None => (None, Vec::new()),
             };
             crate::staar::output::IndividualRow {
                 chromosome: chrom_label.clone(),
@@ -263,6 +278,8 @@ fn score_chrom_individual(
                 score_se: result.score_se,
                 est: result.est,
                 est_se: result.est_se,
+                ai_pvalue,
+                pop_mafs,
             }
         })
         .collect();

@@ -91,6 +91,13 @@ pub struct IndividualRow {
     pub score_se: f64,
     pub est: f64,
     pub est_se: f64,
+    /// Ancestry-informed Cauchy-combined p-value. Populated when
+    /// `--ancestry-col` is in effect; `None` otherwise so the parquet writer
+    /// can skip the AI columns for non-ancestry runs.
+    pub ai_pvalue: Option<f64>,
+    /// Per-population unfolded MAF, aligned with the ancestry-group indexing.
+    /// Empty vector when AI is inactive.
+    pub pop_mafs: Vec<f64>,
 }
 
 pub fn write_individual_results(
@@ -104,6 +111,8 @@ pub fn write_individual_results(
     // R orders by POS ascending before returning (Individual_Analysis.R:450).
     let mut sorted: Vec<IndividualRow> = rows.to_vec();
     sorted.sort_by_key(|r| r.position);
+
+    let ai_active = sorted.iter().any(|r| r.ai_pvalue.is_some());
 
     let mut b_chrom = StringBuilder::with_capacity(n, n * 2);
     let mut b_pos = Int32Builder::with_capacity(n);
@@ -119,6 +128,9 @@ pub fn write_individual_results(
     let mut b_score_se = Float64Builder::with_capacity(n);
     let mut b_est = Float64Builder::with_capacity(n);
     let mut b_est_se = Float64Builder::with_capacity(n);
+    let mut b_ai_pvalue = Float64Builder::with_capacity(n);
+    let mut b_ai_log10 = Float64Builder::with_capacity(n);
+    let mut b_pop_mafs = arrow::array::ListBuilder::new(Float64Builder::new());
 
     for row in &sorted {
         b_chrom.append_value(&row.chromosome);
@@ -135,9 +147,25 @@ pub fn write_individual_results(
         b_score_se.append_value(row.score_se);
         b_est.append_value(row.est);
         b_est_se.append_value(row.est_se);
+        if ai_active {
+            match row.ai_pvalue {
+                Some(p) => {
+                    b_ai_pvalue.append_value(p);
+                    b_ai_log10.append_value(if p > 0.0 { -p.log10() } else { f64::INFINITY });
+                }
+                None => {
+                    b_ai_pvalue.append_null();
+                    b_ai_log10.append_null();
+                }
+            }
+            for &m in &row.pop_mafs {
+                b_pop_mafs.values().append_value(m);
+            }
+            b_pop_mafs.append(true);
+        }
     }
 
-    let schema = Arc::new(Schema::new(vec![
+    let mut fields = vec![
         Field::new(Col::Chromosome.as_str(), DataType::Utf8, false),
         Field::new(Col::Position.as_str(), DataType::Int32, false),
         Field::new(Col::RefAllele.as_str(), DataType::Utf8, false),
@@ -152,8 +180,8 @@ pub fn write_individual_results(
         Field::new("Score_se", DataType::Float64, false),
         Field::new("Est", DataType::Float64, false),
         Field::new("Est_se", DataType::Float64, false),
-    ]));
-    let columns: Vec<ArrayRef> = vec![
+    ];
+    let mut columns: Vec<ArrayRef> = vec![
         Arc::new(b_chrom.finish()),
         Arc::new(b_pos.finish()),
         Arc::new(b_ref.finish()),
@@ -169,6 +197,19 @@ pub fn write_individual_results(
         Arc::new(b_est.finish()),
         Arc::new(b_est_se.finish()),
     ];
+    if ai_active {
+        fields.push(Field::new("pvalue_ai", DataType::Float64, true));
+        fields.push(Field::new("pvalue_ai_log10", DataType::Float64, true));
+        fields.push(Field::new(
+            "pop_mafs",
+            DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+            true,
+        ));
+        columns.push(Arc::new(b_ai_pvalue.finish()));
+        columns.push(Arc::new(b_ai_log10.finish()));
+        columns.push(Arc::new(b_pop_mafs.finish()));
+    }
+    let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| CohortError::Resource(format!("Arrow batch: {e}")))?;
 

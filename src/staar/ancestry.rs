@@ -127,6 +127,91 @@ pub fn run_ai_staar_gene(
     run_ai_staar(&g, annotation_matrix, &pop_mafs, ancestry, &null, use_spa)
 }
 
+/// Ancestry-informed single-variant score test. Mirrors
+/// `STAARpipeline/R/AI_Individual_Analysis.R`: for each base test `b` and
+/// scenario s ∈ {1, 2}, row-scale the variant's dosage by the per-pop
+/// ensemble weight, run the gaussian-unrelated score test, and Cauchy-
+/// combine the 2 × B p-values into an ensemble p-value.
+///
+/// Returns `(ensemble_pvalue, pop_mafs)` where `pop_mafs[p]` is the UNFOLDED
+/// minor-allele frequency in population `p`. The base `individual_score_test`
+/// stays the source of truth for MAC, est, est_se — the ensemble only
+/// replaces the p-value.
+///
+/// Gaussian-unrelated only: R's AI_Individual_Analysis short-circuits on
+/// SPA, and binary/kinship paths are not validated here. Callers route those
+/// variants through the plain `individual_score_test`.
+pub fn ai_individual_score_test(
+    carriers: &CarrierList,
+    analysis: &AnalysisVectors,
+    ancestry: &AncestryInfo,
+) -> (f64, Vec<f64>) {
+    let n = analysis.n_pheno;
+    let n_pops = ancestry.n_pops;
+
+    let mut g_dense = vec![0.0f64; n];
+    for &CarrierEntry { sample_idx, dosage } in &carriers.entries {
+        if dosage == 255 {
+            continue;
+        }
+        if let Some(pi) = analysis.vcf_to_pheno[sample_idx as usize] {
+            g_dense[pi as usize] = dosage as f64;
+        }
+    }
+
+    let mut pop_n = vec![0usize; n_pops];
+    let mut pop_sum = vec![0.0f64; n_pops];
+    for (i, &d) in g_dense.iter().enumerate() {
+        let p = ancestry.group[i];
+        pop_n[p] += 1;
+        pop_sum[p] += d;
+    }
+    let pop_mafs: Vec<f64> = (0..n_pops)
+        .map(|p| {
+            if pop_n[p] == 0 {
+                0.0
+            } else {
+                pop_sum[p] / (2.0 * pop_n[p] as f64)
+            }
+        })
+        .collect();
+    // a_p[k] = dbeta(folded MAF in pop k, 1, 25). AI_Individual_Analysis.R:163.
+    let a_p: Vec<f64> = pop_mafs
+        .iter()
+        .map(|&maf| {
+            let folded = maf.min(1.0 - maf);
+            if folded > 0.0 {
+                score::beta_density_weight(folded, 1.0, 25.0)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
+    let n_cols = ancestry.pop_weights_1_1[0].len();
+    let mut pvalues = Vec::with_capacity(2 * n_cols);
+    let mut g_scaled = vec![0.0f64; n];
+    for b in 0..n_cols {
+        for i in 0..n {
+            let p = ancestry.group[i];
+            g_scaled[i] = ancestry.pop_weights_1_1[p][b] * g_dense[i];
+        }
+        pvalues.push(sparse_score::individual_score_test_dense(
+            &g_scaled, analysis,
+        ));
+
+        for i in 0..n {
+            let p = ancestry.group[i];
+            g_scaled[i] = a_p[p] * ancestry.pop_weights_1_25[p][b] * g_dense[i];
+        }
+        pvalues.push(sparse_score::individual_score_test_dense(
+            &g_scaled, analysis,
+        ));
+    }
+
+    (stats::cauchy_combine(&pvalues), pop_mafs)
+}
+
 /// `pop_mafs[v][p]` = unfolded MAF of variant v in population p.
 pub fn run_ai_staar(
     g: &Mat<f64>,
@@ -618,6 +703,105 @@ mod tests {
         assert!((from_carriers.acat_o - from_dense.acat_o).abs() < 1e-12);
         assert!((from_carriers.burden_1_25 - from_dense.burden_1_25).abs() < 1e-12);
         assert!((from_carriers.skat_1_25 - from_dense.skat_1_25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ai_individual_matches_manual_ensemble() {
+        use crate::staar::carrier::sparse_score::AnalysisVectors;
+
+        let n = 40;
+        let n_pops = 2;
+        let n_base_tests = 3;
+
+        let mut state = 0xa1b2c3d4u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as f64) / ((1u64 << 31) as f64)
+        };
+
+        let mut x = Mat::zeros(n, 2);
+        for i in 0..n {
+            x[(i, 0)] = 1.0;
+            x[(i, 1)] = next() * 2.0 - 1.0;
+        }
+        let mut y = Mat::zeros(n, 1);
+        for i in 0..n {
+            y[(i, 0)] = 0.2 * x[(i, 1)] + (next() - 0.5) * 0.3;
+        }
+        let null = model::fit_glm(&y, &x);
+        let pheno_mask = vec![true; n];
+        let analysis = AnalysisVectors::from_null_model(&null, &pheno_mask).unwrap();
+
+        // Single variant with a handful of carriers spanning both populations.
+        let group: Vec<usize> = (0..n).map(|i| if i < n / 2 { 0 } else { 1 }).collect();
+        let ancestry = AncestryInfo::new(group.clone(), n_pops, n_base_tests, 7590);
+        let mut carriers = CarrierList { entries: Vec::new() };
+        for &i in &[0usize, 5, 11, 22, 27, 33] {
+            carriers.entries.push(CarrierEntry {
+                sample_idx: i as u32,
+                dosage: 1,
+            });
+        }
+
+        let (actual_p, actual_mafs) =
+            ai_individual_score_test(&carriers, &analysis, &ancestry);
+
+        // Reproduce the inner loop explicitly.
+        let mut g_dense = vec![0.0f64; n];
+        for &CarrierEntry { sample_idx, dosage } in &carriers.entries {
+            g_dense[sample_idx as usize] = dosage as f64;
+        }
+        let mut pop_n = vec![0usize; n_pops];
+        let mut pop_sum = vec![0.0f64; n_pops];
+        for i in 0..n {
+            pop_n[group[i]] += 1;
+            pop_sum[group[i]] += g_dense[i];
+        }
+        let pop_mafs: Vec<f64> = (0..n_pops)
+            .map(|p| pop_sum[p] / (2.0 * pop_n[p] as f64))
+            .collect();
+        let a_p: Vec<f64> = pop_mafs
+            .iter()
+            .map(|&m| {
+                let f = m.min(1.0 - m);
+                if f > 0.0 {
+                    score::beta_density_weight(f, 1.0, 25.0)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let n_cols = ancestry.pop_weights_1_1[0].len();
+        let mut expected_pvalues = Vec::with_capacity(2 * n_cols);
+        let mut scaled = vec![0.0f64; n];
+        for b in 0..n_cols {
+            for i in 0..n {
+                scaled[i] = ancestry.pop_weights_1_1[group[i]][b] * g_dense[i];
+            }
+            expected_pvalues.push(sparse_score::individual_score_test_dense(
+                &scaled, &analysis,
+            ));
+            for i in 0..n {
+                scaled[i] = a_p[group[i]] * ancestry.pop_weights_1_25[group[i]][b] * g_dense[i];
+            }
+            expected_pvalues.push(sparse_score::individual_score_test_dense(
+                &scaled, &analysis,
+            ));
+        }
+        let expected_p = stats::cauchy_combine(&expected_pvalues);
+
+        assert!((actual_p - expected_p).abs() < 1e-12, "p {actual_p} vs {expected_p}");
+        assert_eq!(actual_mafs.len(), n_pops);
+        for p in 0..n_pops {
+            assert!(
+                (actual_mafs[p] - pop_mafs[p]).abs() < 1e-12,
+                "pop {p} maf: {} vs {}",
+                actual_mafs[p],
+                pop_mafs[p]
+            );
+        }
     }
 
     #[test]

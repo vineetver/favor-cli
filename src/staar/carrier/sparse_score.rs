@@ -634,6 +634,54 @@ pub fn individual_score_test(
     }
 }
 
+/// Dense-dosage counterpart to [`individual_score_test`]. Returns only the
+/// p-value because AI-Individual aggregates across B ensemble runs and the
+/// per-run score / MAC / MAF are already captured by the base (unscaled)
+/// [`individual_score_test`].
+///
+/// Matches R `Individual_Score_Test_denseGRM` on gaussian-unrelated nulls.
+pub fn individual_score_test_dense(g: &[f64], analysis: &AnalysisVectors) -> f64 {
+    debug_assert!(analysis.kinship.is_none(), "kinship path not wired");
+    debug_assert!(analysis.working_weights.is_empty(), "binary path not wired");
+    debug_assert_eq!(g.len(), analysis.n_pheno);
+    let k = analysis.k;
+
+    let mut score_raw = 0.0f64;
+    let mut gtg = 0.0f64;
+    let mut gtx = vec![0.0f64; k];
+
+    for (pi, &d) in g.iter().enumerate() {
+        if d == 0.0 {
+            continue;
+        }
+        score_raw += d * analysis.residuals[pi];
+        gtg += d * d;
+        let row = &analysis.x_row_major[pi * k..(pi + 1) * k];
+        for c in 0..k {
+            gtx[c] += d * row[c];
+        }
+    }
+
+    let mut correction = 0.0f64;
+    for i in 0..k {
+        let row = &analysis.xtx_inv[i * k..(i + 1) * k];
+        let mut inner = 0.0f64;
+        for j in 0..k {
+            inner += row[j] * gtx[j];
+        }
+        correction += gtx[i] * inner;
+    }
+    let k_jj = gtg - correction;
+    let cov = k_jj / analysis.sigma2;
+    if cov.is_finite() && cov > 0.0 {
+        let score_r = score_raw / analysis.sigma2;
+        let t = score_r * score_r / cov;
+        crate::staar::score::chisq1_pvalue(t)
+    } else {
+        1.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
