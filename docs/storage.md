@@ -177,9 +177,15 @@ offsets[v] ──jump──> carrier block ──read──> n_carriers entries
 One row per `variant_vcf`:
 
 - identity: `variant_vcf`, `position`, `ref_allele`, `alt_allele`, `vid`
-- annotations: `maf`, `region_type`, `consequence`, `cadd_phred`, `revel`
+- annotations: `maf`, `region_type`, `consequence`, `revel`
 - regulatory flags: CAGE and cCRE booleans
-- 11 STAAR weight channels (still `Float64`, probably too wide)
+- 11 FAVOR-native PHRED channels: `cadd_phred`, `linsight`, `fathmm_xf`,
+  `apc_epigenetics_active`, `apc_epigenetics_repressed`,
+  `apc_epigenetics_transcription`, `apc_conservation`,
+  `apc_protein_function`, `apc_local_nucleotide_diversity`,
+  `apc_mutation_density`, `apc_transcription_factor`.
+  Stored as raw PHRED (`Float64`); STAAR applies
+  `w = 1 - 10^(-phred/10)` at load time.
 
 ### membership.parquet
 

@@ -18,7 +18,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use crate::column::{self, Col, STAAR_WEIGHTS};
+use crate::column::{self, Col, STAAR_PHRED_CHANNELS};
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::output::Output;
@@ -394,18 +394,19 @@ fn write_variants_parquet(
 
     // (pos, ref, alt) → first batch row. The query is already sorted by
     // (pos, ref, alt) so the first hit is the canonical row.
+    // `cadd_phred` is channel 0 of `phreds`, stored once on disk; the
+    // in-memory VariantIndexEntry copies it out into its own field.
     struct MetaRow {
         end_position: i32,
         maf: f64,
         region_type: Box<str>,
         consequence: Box<str>,
-        cadd_phred: f64,
         revel: f64,
         cage_prom: bool,
         cage_enh: bool,
         ccre_prom: bool,
         ccre_enh: bool,
-        weights: [f64; 11],
+        phreds: [f64; 11],
     }
 
     let mut meta_map: HashMap<(i32, Box<str>, Box<str>), MetaRow> = HashMap::new();
@@ -417,13 +418,12 @@ fn write_variants_parquet(
         let maf_arr = col_by_name::<Float64Array>(batch, Col::Maf.as_str())?;
         let rt_arr = str_col_by_name(batch, Col::RegionType.as_str())?;
         let csq_arr = str_col_by_name(batch, Col::Consequence.as_str())?;
-        let cadd_arr = col_by_name::<Float64Array>(batch, Col::CaddPhred.as_str())?;
         let revel_arr = col_by_name::<Float64Array>(batch, Col::Revel.as_str())?;
         let cps = col_by_name::<BooleanArray>(batch, Col::IsCagePromoter.as_str())?;
         let ces = col_by_name::<BooleanArray>(batch, Col::IsCageEnhancer.as_str())?;
         let crps = col_by_name::<BooleanArray>(batch, Col::IsCcrePromoter.as_str())?;
         let cres = col_by_name::<BooleanArray>(batch, Col::IsCcreEnhancer.as_str())?;
-        let w_arrs: Vec<&Float64Array> = STAAR_WEIGHTS
+        let phred_arrs: Vec<&Float64Array> = STAAR_PHRED_CHANNELS
             .iter()
             .map(|c| col_by_name::<Float64Array>(batch, c.as_str()))
             .collect::<Result<Vec<_>, _>>()?;
@@ -437,9 +437,9 @@ fn write_variants_parquet(
             if meta_map.contains_key(&key) {
                 continue;
             } // keep first
-            let mut w = [0.0f64; 11];
-            for (ch, wa) in w_arrs.iter().enumerate() {
-                w[ch] = wa.value(i);
+            let mut phreds = [0.0f64; 11];
+            for (ch, pa) in phred_arrs.iter().enumerate() {
+                phreds[ch] = if pa.is_null(i) { 0.0 } else { pa.value(i) };
             }
             meta_map.insert(
                 key,
@@ -448,13 +448,12 @@ fn write_variants_parquet(
                     maf: maf_arr.value(i),
                     region_type: rt_arr.value(i).into(),
                     consequence: csq_arr.value(i).into(),
-                    cadd_phred: cadd_arr.value(i),
                     revel: revel_arr.value(i),
                     cage_prom: cps.value(i),
                     cage_enh: ces.value(i),
                     ccre_prom: crps.value(i),
                     ccre_enh: cres.value(i),
-                    weights: w,
+                    phreds,
                 },
             );
         }
@@ -470,13 +469,12 @@ fn write_variants_parquet(
     let mut maf_b = Float64Builder::with_capacity(n);
     let mut rt_b = StringBuilder::with_capacity(n, n * 16);
     let mut csq_b = StringBuilder::with_capacity(n, n * 16);
-    let mut cadd_b = Float64Builder::with_capacity(n);
     let mut revel_b = Float64Builder::with_capacity(n);
     let mut cp_b = BooleanBuilder::with_capacity(n);
     let mut ce_b = BooleanBuilder::with_capacity(n);
     let mut crp_b = BooleanBuilder::with_capacity(n);
     let mut cre_b = BooleanBuilder::with_capacity(n);
-    let mut w_builders: Vec<Float64Builder> =
+    let mut phred_builders: Vec<Float64Builder> =
         (0..11).map(|_| Float64Builder::with_capacity(n)).collect();
 
     for (variant_vcf, uv) in unique_variants.iter().enumerate() {
@@ -499,32 +497,33 @@ fn write_variants_parquet(
             maf_b.append_value(m.maf);
             rt_b.append_value(&*m.region_type);
             csq_b.append_value(&*m.consequence);
-            cadd_b.append_value(m.cadd_phred);
             revel_b.append_value(m.revel);
             cp_b.append_value(m.cage_prom);
             ce_b.append_value(m.cage_enh);
             crp_b.append_value(m.ccre_prom);
             cre_b.append_value(m.ccre_enh);
-            for (ch, wb) in w_builders.iter_mut().enumerate() {
-                wb.append_value(m.weights[ch]);
+            for (ch, pb) in phred_builders.iter_mut().enumerate() {
+                pb.append_value(m.phreds[ch]);
             }
         } else {
             end_b.append_value(uv.pos + uv.ref_a.len() as i32 - 1);
             maf_b.append_value(0.0);
             rt_b.append_value("");
             csq_b.append_value("");
-            cadd_b.append_value(0.0);
             revel_b.append_value(0.0);
             cp_b.append_value(false);
             ce_b.append_value(false);
             crp_b.append_value(false);
             cre_b.append_value(false);
-            for wb in w_builders.iter_mut() {
-                wb.append_value(0.0);
+            for pb in phred_builders.iter_mut() {
+                pb.append_value(0.0);
             }
         }
     }
 
+    // `cadd_phred` lives once, as channel 0 of STAAR_PHRED_CHANNELS. The
+    // in-memory VariantIndexEntry.cadd_phred field is hydrated from that
+    // column at load time; there is no separate on-disk column for it.
     let mut fields = vec![
         Field::new(Col::VariantVcf.as_str(), DataType::UInt32, false),
         Field::new(Col::Position.as_str(), DataType::Int32, false),
@@ -535,14 +534,13 @@ fn write_variants_parquet(
         Field::new(Col::Maf.as_str(), DataType::Float64, false),
         Field::new(Col::RegionType.as_str(), DataType::Utf8, false),
         Field::new(Col::Consequence.as_str(), DataType::Utf8, false),
-        Field::new(Col::CaddPhred.as_str(), DataType::Float64, false),
         Field::new(Col::Revel.as_str(), DataType::Float64, false),
         Field::new(Col::IsCagePromoter.as_str(), DataType::Boolean, false),
         Field::new(Col::IsCageEnhancer.as_str(), DataType::Boolean, false),
         Field::new(Col::IsCcrePromoter.as_str(), DataType::Boolean, false),
         Field::new(Col::IsCcreEnhancer.as_str(), DataType::Boolean, false),
     ];
-    for col in &STAAR_WEIGHTS {
+    for col in &STAAR_PHRED_CHANNELS {
         fields.push(Field::new(col.as_str(), DataType::Float64, false));
     }
     let schema = Arc::new(Schema::new(fields));
@@ -557,15 +555,14 @@ fn write_variants_parquet(
         Arc::new(maf_b.finish()),
         Arc::new(rt_b.finish()),
         Arc::new(csq_b.finish()),
-        Arc::new(cadd_b.finish()),
         Arc::new(revel_b.finish()),
         Arc::new(cp_b.finish()),
         Arc::new(ce_b.finish()),
         Arc::new(crp_b.finish()),
         Arc::new(cre_b.finish()),
     ];
-    for wb in &mut w_builders {
-        columns.push(Arc::new(wb.finish()));
+    for pb in &mut phred_builders {
+        columns.push(Arc::new(pb.finish()));
     }
 
     let batch = RecordBatch::try_new(schema.clone(), columns)

@@ -24,17 +24,16 @@ pub enum Col {
     IsCcrePromoter,
     IsCcreEnhancer,
 
-    WCadd,
-    WLinsight,
-    WFathmmXf,
-    WApcEpiActive,
-    WApcEpiRepressed,
-    WApcEpiTranscription,
-    WApcConservation,
-    WApcProteinFunction,
-    WApcLocalNd,
-    WApcMutationDensity,
-    WApcTf,
+    Linsight,
+    FathmmXf,
+    ApcEpigeneticsActive,
+    ApcEpigeneticsRepressed,
+    ApcEpigeneticsTranscription,
+    ApcConservation,
+    ApcProteinFunction,
+    ApcLocalNucleotideDiversity,
+    ApcMutationDensity,
+    ApcTranscriptionFactor,
 }
 
 impl Col {
@@ -57,39 +56,21 @@ impl Col {
             Col::IsCageEnhancer => "is_cage_enhancer",
             Col::IsCcrePromoter => "is_ccre_promoter",
             Col::IsCcreEnhancer => "is_ccre_enhancer",
-            Col::WCadd => "w_cadd",
-            Col::WLinsight => "w_linsight",
-            Col::WFathmmXf => "w_fathmm_xf",
-            Col::WApcEpiActive => "w_apc_epi_active",
-            Col::WApcEpiRepressed => "w_apc_epi_repressed",
-            Col::WApcEpiTranscription => "w_apc_epi_transcription",
-            Col::WApcConservation => "w_apc_conservation",
-            Col::WApcProteinFunction => "w_apc_protein_function",
-            Col::WApcLocalNd => "w_apc_local_nd",
-            Col::WApcMutationDensity => "w_apc_mutation_density",
-            Col::WApcTf => "w_apc_tf",
-        }
-    }
-
-    pub fn weight_display_name(self) -> Option<&'static str> {
-        match self {
-            Col::WCadd => Some("cadd_phred"),
-            Col::WLinsight => Some("linsight"),
-            Col::WFathmmXf => Some("fathmm_xf"),
-            Col::WApcEpiActive => Some("apc_epigenetics_active"),
-            Col::WApcEpiRepressed => Some("apc_epigenetics_repressed"),
-            Col::WApcEpiTranscription => Some("apc_epigenetics_transcription"),
-            Col::WApcConservation => Some("apc_conservation"),
-            Col::WApcProteinFunction => Some("apc_protein_function"),
-            Col::WApcLocalNd => Some("apc_local_nucleotide_diversity"),
-            Col::WApcMutationDensity => Some("apc_mutation_density"),
-            Col::WApcTf => Some("apc_transcription_factor"),
-            _ => None,
+            Col::Linsight => "linsight",
+            Col::FathmmXf => "fathmm_xf",
+            Col::ApcEpigeneticsActive => "apc_epigenetics_active",
+            Col::ApcEpigeneticsRepressed => "apc_epigenetics_repressed",
+            Col::ApcEpigeneticsTranscription => "apc_epigenetics_transcription",
+            Col::ApcConservation => "apc_conservation",
+            Col::ApcProteinFunction => "apc_protein_function",
+            Col::ApcLocalNucleotideDiversity => "apc_local_nucleotide_diversity",
+            Col::ApcMutationDensity => "apc_mutation_density",
+            Col::ApcTranscriptionFactor => "apc_transcription_factor",
         }
     }
 
     pub fn weight_index(self) -> Option<usize> {
-        STAAR_WEIGHTS.iter().position(|&c| c == self)
+        STAAR_PHRED_CHANNELS.iter().position(|&c| c == self)
     }
 
     pub fn annotation_name(self) -> Option<&'static str> {
@@ -110,21 +91,68 @@ impl std::fmt::Display for Col {
     }
 }
 
-pub const STAAR_WEIGHTS: [Col; 11] = [
-    Col::WCadd,
-    Col::WLinsight,
-    Col::WFathmmXf,
-    Col::WApcEpiActive,
-    Col::WApcEpiRepressed,
-    Col::WApcEpiTranscription,
-    Col::WApcConservation,
-    Col::WApcProteinFunction,
-    Col::WApcLocalNd,
-    Col::WApcMutationDensity,
-    Col::WApcTf,
+/// FAVOR-native PHRED-scaled annotation channels used by STAAR. The score
+/// kernel receives one transformed weight per channel per variant; the
+/// transform `w = 1 - 10^(-phred/10)` is applied uniformly at load time
+/// (see VariantIndex::load), turning PHRED into the [0,1] probability the
+/// STAAR tests are parametrised in.
+pub const STAAR_PHRED_CHANNELS: [Col; 11] = [
+    Col::CaddPhred,
+    Col::Linsight,
+    Col::FathmmXf,
+    Col::ApcEpigeneticsActive,
+    Col::ApcEpigeneticsRepressed,
+    Col::ApcEpigeneticsTranscription,
+    Col::ApcConservation,
+    Col::ApcProteinFunction,
+    Col::ApcLocalNucleotideDiversity,
+    Col::ApcMutationDensity,
+    Col::ApcTranscriptionFactor,
 ];
 
-pub const STORE_METADATA_COLS: [Col; 14] = [
+/// Output column name paired with the DuckDB SQL that extracts the PHRED
+/// value from the FAVOR annotation alias `a`. Emitted by
+/// `annotation_join_sql` as `<sql> AS <name>`. The PHRED -> probability
+/// transform happens later, inside the STAAR score kernel.
+pub const STAAR_PHRED_SOURCES: [(&str, &str); 11] = [
+    ("cadd_phred", "CAST(a.main.cadd.phred AS DOUBLE)"),
+    ("linsight", "CAST(a.linsight AS DOUBLE)"),
+    ("fathmm_xf", "CAST(a.fathmm_xf AS DOUBLE)"),
+    (
+        "apc_epigenetics_active",
+        "CAST(a.apc.epigenetics_active AS DOUBLE)",
+    ),
+    (
+        "apc_epigenetics_repressed",
+        "CAST(a.apc.epigenetics_repressed AS DOUBLE)",
+    ),
+    (
+        "apc_epigenetics_transcription",
+        "CAST(a.apc.epigenetics_transcription AS DOUBLE)",
+    ),
+    (
+        "apc_conservation",
+        "CAST(a.apc.conservation_v2 AS DOUBLE)",
+    ),
+    (
+        "apc_protein_function",
+        "CAST(a.apc.protein_function_v3 AS DOUBLE)",
+    ),
+    (
+        "apc_local_nucleotide_diversity",
+        "CAST(a.apc.local_nucleotide_diversity_v3 AS DOUBLE)",
+    ),
+    (
+        "apc_mutation_density",
+        "CAST(a.apc.mutation_density AS DOUBLE)",
+    ),
+    (
+        "apc_transcription_factor",
+        "CAST(a.apc.transcription_factor AS DOUBLE)",
+    ),
+];
+
+pub const STORE_METADATA_COLS: [Col; 13] = [
     Col::Position,
     Col::EndPosition,
     Col::RefAllele,
@@ -133,7 +161,6 @@ pub const STORE_METADATA_COLS: [Col; 14] = [
     Col::GeneName,
     Col::RegionType,
     Col::Consequence,
-    Col::CaddPhred,
     Col::Revel,
     Col::IsCagePromoter,
     Col::IsCageEnhancer,
@@ -143,7 +170,7 @@ pub const STORE_METADATA_COLS: [Col; 14] = [
 
 pub fn store_columns() -> Vec<Col> {
     let mut cols = STORE_METADATA_COLS.to_vec();
-    cols.extend_from_slice(&STAAR_WEIGHTS);
+    cols.extend_from_slice(&STAAR_PHRED_CHANNELS);
     cols
 }
 
@@ -179,16 +206,9 @@ pub static ANNOTATION_EXTRACTS: &[AnnotationExtract] = &[
         output: Col::Consequence,
         sql: "COALESCE(a.gencode.consequence, '')",
     },
-    // FAVOR stores CADD and REVEL as FLOAT (Float32). The cohort store
-    // builder downcasts these as `Float64Array`, so we wrap the entire
-    // COALESCE in `CAST(... AS DOUBLE)`. A bare `COALESCE(FLOAT, 0.0)`
-    // stays FLOAT because the common type of FLOAT and DOUBLE_LITERAL
-    // narrows to the column's storage type — verified against the
-    // DuckDB / DataFusion type promotion rules.
-    AnnotationExtract {
-        output: Col::CaddPhred,
-        sql: "CAST(COALESCE(a.main.cadd.phred, 0.0) AS DOUBLE)",
-    },
+    // REVEL is FLOAT (Float32) in FAVOR; the cohort store builder reads
+    // it back as Float64Array so wrap COALESCE in CAST. CaddPhred is now
+    // emitted via STAAR_PHRED_SOURCES alongside the other 10 channels.
     AnnotationExtract {
         output: Col::Revel,
         sql: "CAST(COALESCE(a.dbnsfp.revel, 0.0) AS DOUBLE)",
@@ -211,60 +231,6 @@ pub static ANNOTATION_EXTRACTS: &[AnnotationExtract] = &[
     },
 ];
 
-pub struct WeightFormula {
-    pub output: Col,
-    pub sql: &'static str,
-}
-
-pub static WEIGHT_FORMULAS: &[WeightFormula] = &[
-    WeightFormula {
-        output: Col::WCadd,
-        sql: "CASE WHEN a.main.cadd.phred > 0 \
-              THEN 1.0 - POW(10.0, -a.main.cadd.phred / 10.0) \
-              ELSE 0.0 END",
-    },
-    WeightFormula {
-        output: Col::WLinsight,
-        sql: "COALESCE(a.linsight, 0)::DOUBLE",
-    },
-    WeightFormula {
-        output: Col::WFathmmXf,
-        sql: "COALESCE(a.fathmm_xf, 0)::DOUBLE",
-    },
-    WeightFormula {
-        output: Col::WApcEpiActive,
-        sql: "COALESCE(a.apc.epigenetics_active, 0)::DOUBLE",
-    },
-    WeightFormula {
-        output: Col::WApcEpiRepressed,
-        sql: "COALESCE(a.apc.epigenetics_repressed, 0)::DOUBLE",
-    },
-    WeightFormula {
-        output: Col::WApcEpiTranscription,
-        sql: "COALESCE(a.apc.epigenetics_transcription, 0)::DOUBLE",
-    },
-    WeightFormula {
-        output: Col::WApcConservation,
-        sql: "COALESCE(a.apc.conservation_v2, 0)::DOUBLE",
-    },
-    WeightFormula {
-        output: Col::WApcProteinFunction,
-        sql: "COALESCE(a.apc.protein_function_v3, 0)::DOUBLE",
-    },
-    WeightFormula {
-        output: Col::WApcLocalNd,
-        sql: "COALESCE(a.apc.local_nucleotide_diversity_v3, 0)::DOUBLE",
-    },
-    WeightFormula {
-        output: Col::WApcMutationDensity,
-        sql: "COALESCE(a.apc.mutation_density, 0)::DOUBLE",
-    },
-    WeightFormula {
-        output: Col::WApcTf,
-        sql: "COALESCE(a.apc.transcription_factor, 0)::DOUBLE",
-    },
-];
-
 pub fn annotation_join_sql() -> String {
     let mut select_parts: Vec<String> = Vec::new();
 
@@ -284,8 +250,8 @@ pub fn annotation_join_sql() -> String {
         select_parts.push(format!("{} AS {}", extract.sql, extract.output));
     }
 
-    for formula in WEIGHT_FORMULAS {
-        select_parts.push(format!("{} AS {}", formula.sql, formula.output));
+    for (name, sql) in STAAR_PHRED_SOURCES {
+        select_parts.push(format!("{sql} AS {name}"));
     }
 
     format!(
@@ -511,17 +477,16 @@ pub static VARIANT_STORE_CONTRACT: SchemaContract = SchemaContract {
         (Col::IsCageEnhancer, ColType::Boolean),
         (Col::IsCcrePromoter, ColType::Boolean),
         (Col::IsCcreEnhancer, ColType::Boolean),
-        (Col::WCadd, ColType::Float64),
-        (Col::WLinsight, ColType::Float64),
-        (Col::WFathmmXf, ColType::Float64),
-        (Col::WApcEpiActive, ColType::Float64),
-        (Col::WApcEpiRepressed, ColType::Float64),
-        (Col::WApcEpiTranscription, ColType::Float64),
-        (Col::WApcConservation, ColType::Float64),
-        (Col::WApcProteinFunction, ColType::Float64),
-        (Col::WApcLocalNd, ColType::Float64),
-        (Col::WApcMutationDensity, ColType::Float64),
-        (Col::WApcTf, ColType::Float64),
+        (Col::Linsight, ColType::Float64),
+        (Col::FathmmXf, ColType::Float64),
+        (Col::ApcEpigeneticsActive, ColType::Float64),
+        (Col::ApcEpigeneticsRepressed, ColType::Float64),
+        (Col::ApcEpigeneticsTranscription, ColType::Float64),
+        (Col::ApcConservation, ColType::Float64),
+        (Col::ApcProteinFunction, ColType::Float64),
+        (Col::ApcLocalNucleotideDiversity, ColType::Float64),
+        (Col::ApcMutationDensity, ColType::Float64),
+        (Col::ApcTranscriptionFactor, ColType::Float64),
     ],
 };
 
@@ -547,30 +512,32 @@ mod tests {
 
     #[test]
     fn col_as_str_non_empty() {
-        for &col in STAAR_WEIGHTS.iter().chain(STORE_METADATA_COLS.iter()) {
+        for &col in STAAR_PHRED_CHANNELS.iter().chain(STORE_METADATA_COLS.iter()) {
             let s = col.as_str();
             assert!(!s.is_empty(), "{col:?} has empty as_str()");
         }
     }
 
     #[test]
-    fn staar_weights_count() {
-        assert_eq!(STAAR_WEIGHTS.len(), 11);
+    fn staar_phred_channels_count() {
+        assert_eq!(STAAR_PHRED_CHANNELS.len(), 11);
+        assert_eq!(STAAR_PHRED_SOURCES.len(), 11);
     }
 
     #[test]
-    fn staar_weights_have_display_names() {
-        for col in &STAAR_WEIGHTS {
-            assert!(
-                col.weight_display_name().is_some(),
-                "{col:?} missing weight_display_name()"
+    fn phred_channel_names_match_sources() {
+        for (i, col) in STAAR_PHRED_CHANNELS.iter().enumerate() {
+            assert_eq!(
+                col.as_str(),
+                STAAR_PHRED_SOURCES[i].0,
+                "channel {i}: Col {col:?} as_str() != STAAR_PHRED_SOURCES name"
             );
         }
     }
 
     #[test]
     fn weight_index_roundtrip() {
-        for (i, col) in STAAR_WEIGHTS.iter().enumerate() {
+        for (i, col) in STAAR_PHRED_CHANNELS.iter().enumerate() {
             assert_eq!(
                 col.weight_index(),
                 Some(i),
@@ -583,40 +550,16 @@ mod tests {
     #[test]
     fn store_columns_complete() {
         let cols = store_columns();
-        assert_eq!(cols.len(), 25); // 14 metadata + 11 weights
-    }
-
-    #[test]
-    fn weight_names_match_annotation_weights() {
-        use crate::types::AnnotationWeights;
-        for (i, col) in STAAR_WEIGHTS.iter().enumerate() {
-            assert_eq!(
-                col.as_str(),
-                AnnotationWeights::NAMES[i],
-                "Col::{col:?} as_str() != AnnotationWeights::NAMES[{i}]"
-            );
-        }
-    }
-
-    #[test]
-    fn weight_display_names_match_annotation_weights() {
-        use crate::types::AnnotationWeights;
-        for (i, col) in STAAR_WEIGHTS.iter().enumerate() {
-            assert_eq!(
-                col.weight_display_name().unwrap(),
-                AnnotationWeights::DISPLAY_NAMES[i],
-                "Col::{col:?} display != AnnotationWeights::DISPLAY_NAMES[{i}]"
-            );
-        }
+        assert_eq!(cols.len(), 24); // 13 metadata + 11 phred channels
     }
 
     #[test]
     fn annotation_join_sql_contains_all_columns() {
         let sql = annotation_join_sql();
-        for col in &STAAR_WEIGHTS {
+        for col in &STAAR_PHRED_CHANNELS {
             assert!(
                 sql.contains(col.as_str()),
-                "annotation_join_sql() missing weight column {}",
+                "annotation_join_sql() missing phred channel column {}",
                 col.as_str()
             );
         }
@@ -637,20 +580,11 @@ mod tests {
         assert!(sql.contains("g.chromosome = a.chromosome"));
         assert!(sql.contains("g.position = a.position"));
         assert!(sql.contains("g.maf > 0"));
-        // Weight formulas
-        assert!(sql.contains("POW(10.0"));
-        assert!(sql.contains("COALESCE(a.linsight"));
-    }
-
-    #[test]
-    fn weight_formulas_cover_all_weights() {
-        let formula_outputs: Vec<Col> = WEIGHT_FORMULAS.iter().map(|f| f.output).collect();
-        for &w in &STAAR_WEIGHTS {
-            assert!(
-                formula_outputs.contains(&w),
-                "Missing weight formula for {w:?}"
-            );
-        }
+        // Raw PHRED columns, no transform at SQL level.
+        assert!(sql.contains("a.main.cadd.phred"));
+        assert!(sql.contains("a.linsight"));
+        assert!(sql.contains("a.apc.conservation_v2"));
+        assert!(!sql.contains("POW(10.0"));
     }
 
     #[test]

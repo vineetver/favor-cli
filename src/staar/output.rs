@@ -19,7 +19,7 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use serde_json::json;
 
-use crate::column::{Col, STAAR_WEIGHTS};
+use crate::column::{Col, STAAR_PHRED_CHANNELS};
 use crate::error::CohortError;
 use crate::output::Output;
 use crate::store::manifest::{fsync_parent, tmp_path, write_atomic};
@@ -345,10 +345,7 @@ pub fn write_results(
     out.status("Writing results...");
     let mut significant_genes: Vec<serde_json::Value> = Vec::new();
 
-    let channels: Vec<&str> = STAAR_WEIGHTS
-        .iter()
-        .map(|c| c.weight_display_name().expect("STAAR_WEIGHTS entries have display names"))
-        .collect();
+    let channels: Vec<&str> = STAAR_PHRED_CHANNELS.iter().map(|c| c.as_str()).collect();
     let n_channels = channels.len();
 
     // Schema is identical for every mask file (same channels, same test set)

@@ -5,10 +5,14 @@ use crate::types::{
     RegulatoryFlags,
 };
 
-// Ground truth annotation weights from real OR11H1 stopgain on chr22.
-// Order matches AnnotationWeights::NAMES exactly.
-const GROUND_TRUTH_WEIGHTS: [f64; 11] = [
-    0.9957,  // cadd: 1 - 10^(-23.7/10)
+// Raw FAVOR PHRED values for the OR11H1 stopgain on chr22. These go into
+// the test annotation parquet as-is; the PHRED -> [0,1] transform happens
+// downstream in VariantIndex::load / read_extracted_variants, matching
+// production. cadd_phred (index 0) is the actual PHRED score (23.7), not
+// the post-transform weight.
+// Order matches STAAR_PHRED_CHANNELS in column.rs.
+const GROUND_TRUTH_PHREDS: [f64; 11] = [
+    23.7,    // cadd_phred
     0.2149,  // linsight
     1.7630,  // fathmm_xf
     0.0126,  // apc_epigenetics_active
@@ -34,7 +38,7 @@ pub fn base_variant() -> AnnotatedVariant {
             consequence: Consequence::Stopgain,
             cadd_phred: 23.7,
             revel: 0.0,
-            weights: AnnotationWeights(GROUND_TRUTH_WEIGHTS),
+            weights: AnnotationWeights(GROUND_TRUTH_PHREDS),
             regulatory: RegulatoryFlags::default(),
         },
     }
@@ -410,9 +414,19 @@ pub fn write_test_genotype_parquet(dir: &Path) -> std::path::PathBuf {
 /// The exact SQL STAAR uses to build the _rare table, parameterized for test table names.
 /// Uses the same column naming as the production annotation_join_sql(), but with test
 /// table names and an upper MAF bound for rare-variant filtering.
+///
+/// The 11 FAVOR-native PHRED channels (cadd_phred, linsight, fathmm_xf, apc_*)
+/// are emitted raw; the PHRED -> [0,1] transform happens downstream when the
+/// variant index is loaded, not here.
 pub fn staar_rare_sql() -> String {
-    use crate::column::Col;
-    format!("CREATE TABLE _rare AS
+    use crate::column::{Col, STAAR_PHRED_SOURCES};
+    let phred_select: String = STAAR_PHRED_SOURCES
+        .iter()
+        .map(|(name, sql)| format!("{sql} AS {name}"))
+        .collect::<Vec<_>>()
+        .join(",\n         ");
+    format!(
+        "CREATE TABLE _rare AS
      SELECT
          CAST(g.chromosome AS VARCHAR) AS {chr},
          g.position AS {pos},
@@ -422,23 +436,12 @@ pub fn staar_rare_sql() -> String {
          COALESCE(array_element(a.gencode.genes, 1), '') AS {gene},
          COALESCE(a.gencode.region_type, '') AS {region},
          COALESCE(a.gencode.consequence, '') AS {csq},
-         COALESCE(a.main.cadd.phred, 0) AS {cadd},
          COALESCE(a.dbnsfp.revel, 0) AS {revel},
          a.cage.cage_promoter IS NOT NULL AS {cage_p},
          a.cage.cage_enhancer IS NOT NULL AS {cage_e},
          COALESCE(CAST(a.ccre.annotations AS VARCHAR) LIKE '%PLS%', false) AS {ccre_p},
          COALESCE(CAST(a.ccre.annotations AS VARCHAR) LIKE '%ELS%', false) AS {ccre_e},
-         CASE WHEN a.main.cadd.phred > 0 THEN 1.0 - POW(10.0, -a.main.cadd.phred / 10.0) ELSE 0.0 END AS {w_cadd},
-         CAST(COALESCE(a.linsight, 0) AS DOUBLE) AS {w_lin},
-         CAST(COALESCE(a.fathmm_xf, 0) AS DOUBLE) AS {w_fxf},
-         CAST(COALESCE(a.apc.epigenetics_active, 0) AS DOUBLE) AS {w_ea},
-         CAST(COALESCE(a.apc.epigenetics_repressed, 0) AS DOUBLE) AS {w_er},
-         CAST(COALESCE(a.apc.epigenetics_transcription, 0) AS DOUBLE) AS {w_et},
-         CAST(COALESCE(a.apc.conservation_v2, 0) AS DOUBLE) AS {w_con},
-         CAST(COALESCE(a.apc.protein_function_v3, 0) AS DOUBLE) AS {w_pf},
-         CAST(COALESCE(a.apc.local_nucleotide_diversity_v3, 0) AS DOUBLE) AS {w_lnd},
-         CAST(COALESCE(a.apc.mutation_density, 0) AS DOUBLE) AS {w_md},
-         CAST(COALESCE(a.apc.transcription_factor, 0) AS DOUBLE) AS {w_tf}
+         {phred_select}
      FROM _test_geno g
      INNER JOIN _test_ann a
          ON CAST(g.chromosome AS VARCHAR) = CAST(a.chromosome AS VARCHAR)
@@ -447,14 +450,9 @@ pub fn staar_rare_sql() -> String {
         chr = Col::Chromosome, pos = Col::Position,
         ref_a = Col::RefAllele, alt_a = Col::AltAllele,
         gene = Col::GeneName, region = Col::RegionType, csq = Col::Consequence,
-        cadd = Col::CaddPhred, revel = Col::Revel,
+        revel = Col::Revel,
         cage_p = Col::IsCagePromoter, cage_e = Col::IsCageEnhancer,
         ccre_p = Col::IsCcrePromoter, ccre_e = Col::IsCcreEnhancer,
-        w_cadd = Col::WCadd, w_lin = Col::WLinsight, w_fxf = Col::WFathmmXf,
-        w_ea = Col::WApcEpiActive, w_er = Col::WApcEpiRepressed,
-        w_et = Col::WApcEpiTranscription, w_con = Col::WApcConservation,
-        w_pf = Col::WApcProteinFunction, w_lnd = Col::WApcLocalNd,
-        w_md = Col::WApcMutationDensity, w_tf = Col::WApcTf,
     )
 }
 
@@ -510,17 +508,25 @@ mod tests {
     }
 
     fn read_extracted_variants(engine: &DfEngine) -> Vec<AnnotatedVariant> {
-        use crate::column::Col;
-        // _rare table has: chromosome, position, ref_allele, alt_allele, maf,
-        // gene_name, region_type, consequence, cadd_phred, revel,
-        // is_cage_promoter..is_ccre_enhancer, w_cadd..w_apc_tf
-        // (25 columns total = chromosome + 13 metadata + 11 weights)
+        use crate::column::{Col, STAAR_PHRED_CHANNELS};
+        // _rare table columns, in the order the SELECT below fixes:
+        //   0: chromosome
+        //   1-7: position, ref, alt, maf, gene, region_type, consequence
+        //   8: revel
+        //   9-12: cage_prom, cage_enh, ccre_prom, ccre_enh
+        //   13-23: 11 FAVOR-native PHRED channels (cadd_phred first)
+        // The PHRED -> [0,1] transform matches VariantIndex::load().
+        let phred_cols = STAAR_PHRED_CHANNELS
+            .iter()
+            .map(|c| c.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         let batches = engine
             .collect(&format!(
                 "SELECT {chr}, {pos}, {ref_a}, {alt_a}, {maf}, \
-                 {gene}, {region}, {csq}, {cadd}, {revel}, \
+                 {gene}, {region}, {csq}, {revel}, \
                  {cage_p}, {cage_e}, {ccre_p}, {ccre_e}, \
-                 {weights} \
+                 {phred_cols} \
                  FROM _rare ORDER BY {pos}",
                 chr = Col::Chromosome,
                 pos = Col::Position,
@@ -530,17 +536,11 @@ mod tests {
                 gene = Col::GeneName,
                 region = Col::RegionType,
                 csq = Col::Consequence,
-                cadd = Col::CaddPhred,
                 revel = Col::Revel,
                 cage_p = Col::IsCagePromoter,
                 cage_e = Col::IsCageEnhancer,
                 ccre_p = Col::IsCcrePromoter,
                 ccre_e = Col::IsCcreEnhancer,
-                weights = crate::column::STAAR_WEIGHTS
-                    .iter()
-                    .map(|c| c.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
             ))
             .unwrap();
 
@@ -549,8 +549,14 @@ mod tests {
             for row in 0..batch.num_rows() {
                 let mut weights = [0.0f64; 11];
                 for (i, w) in weights.iter_mut().enumerate() {
-                    *w = num_col_val(batch.column(14 + i).as_ref(), row);
+                    let phred = num_col_val(batch.column(13 + i).as_ref(), row);
+                    *w = if phred > 0.0 && phred.is_finite() {
+                        1.0 - 10f64.powf(-phred / 10.0)
+                    } else {
+                        0.0
+                    };
                 }
+                let cadd_phred = num_col_val(batch.column(13).as_ref(), row);
 
                 variants.push(AnnotatedVariant {
                     chromosome: str_col_val(batch.column(0).as_ref(), row)
@@ -570,13 +576,13 @@ mod tests {
                             batch.column(7).as_ref(),
                             row,
                         )),
-                        cadd_phred: num_col_val(batch.column(8).as_ref(), row),
-                        revel: num_col_val(batch.column(9).as_ref(), row),
+                        cadd_phred,
+                        revel: num_col_val(batch.column(8).as_ref(), row),
                         regulatory: RegulatoryFlags {
-                            cage_promoter: bool_col_val(batch.column(10).as_ref(), row),
-                            cage_enhancer: bool_col_val(batch.column(11).as_ref(), row),
-                            ccre_promoter: bool_col_val(batch.column(12).as_ref(), row),
-                            ccre_enhancer: bool_col_val(batch.column(13).as_ref(), row),
+                            cage_promoter: bool_col_val(batch.column(9).as_ref(), row),
+                            cage_enhancer: bool_col_val(batch.column(10).as_ref(), row),
+                            ccre_promoter: bool_col_val(batch.column(11).as_ref(), row),
+                            ccre_enhancer: bool_col_val(batch.column(12).as_ref(), row),
                         },
                         weights: AnnotationWeights(weights),
                     },

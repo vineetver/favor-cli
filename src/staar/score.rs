@@ -25,7 +25,7 @@ pub struct StaarResult {
 
     /// Per-annotation p-values: [channel][test_index]
     /// test_index: 0=Burden(1,25) 1=Burden(1,1) 2=SKAT(1,25) 3=SKAT(1,1) 4=ACAT-V(1,25) 5=ACAT-V(1,1)
-    /// channel order matches AnnotationWeights::DISPLAY_NAMES
+    /// channel order matches `STAAR_PHRED_CHANNELS` in `column.rs`
     pub per_annotation: Vec<[f64; 6]>,
 
     /// Per-test omnibus: Cauchy across all annotation channels for one test type

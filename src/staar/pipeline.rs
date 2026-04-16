@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use faer::Mat;
 
-use crate::column::STAAR_WEIGHTS;
+use crate::column::STAAR_PHRED_CHANNELS;
 use crate::error::CohortError;
 use crate::ingest::ColumnContract;
 use crate::output::{bail_if_cancelled, Output};
@@ -451,7 +451,7 @@ impl<'a> StaarPipeline<'a> {
         // the parquet actually has each column by name — catches partial
         // writes and out-of-band regeneration the tier metadata misses.
         let ann_vs = VariantSet::open(annotations)?;
-        let weight_cols: Vec<crate::column::Col> = STAAR_WEIGHTS.to_vec();
+        let weight_cols: Vec<crate::column::Col> = STAAR_PHRED_CHANNELS.to_vec();
         ann_vs.supports(&weight_cols)?;
         ann_vs.require_staar_weight_catalog()?;
 

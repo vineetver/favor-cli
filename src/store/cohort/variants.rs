@@ -154,10 +154,24 @@ pub(super) fn col_by_name<'a, T: arrow::array::Array + 'static>(
         })
 }
 
-fn load_variant_entries(reader: BoxedBatchReader) -> Result<Vec<VariantIndexEntry>, CohortError> {
-    use arrow::array::{BooleanArray, Float64Array, Int32Array, StringArray};
+/// PHRED -> probability mapping applied once per variant per channel at
+/// load time. STAARpipeline defines the weight as `1 - 10^(-phred/10)`;
+/// the kernel then parametrises tests in that probability. Null or
+/// non-positive PHRED collapses to 0 so the kernel's masking/weighting
+/// degenerates to "this channel carries no signal for this variant".
+#[inline]
+fn phred_to_weight(phred: f64) -> f64 {
+    if phred.is_finite() && phred > 0.0 {
+        1.0 - 10f64.powf(-phred / 10.0)
+    } else {
+        0.0
+    }
+}
 
-    use crate::column::{Col, STAAR_WEIGHTS};
+fn load_variant_entries(reader: BoxedBatchReader) -> Result<Vec<VariantIndexEntry>, CohortError> {
+    use arrow::array::{Array, BooleanArray, Float64Array, Int32Array, StringArray};
+
+    use crate::column::{Col, STAAR_PHRED_CHANNELS};
 
     let mut entries = Vec::new();
 
@@ -173,24 +187,30 @@ fn load_variant_entries(reader: BoxedBatchReader) -> Result<Vec<VariantIndexEntr
         let maf_arr = col_by_name::<Float64Array>(&batch, Col::Maf.as_str())?;
         let rt_arr = col_by_name::<StringArray>(&batch, Col::RegionType.as_str())?;
         let csq_arr = col_by_name::<StringArray>(&batch, Col::Consequence.as_str())?;
-        let cadd_arr = col_by_name::<Float64Array>(&batch, Col::CaddPhred.as_str())?;
         let revel_arr = col_by_name::<Float64Array>(&batch, Col::Revel.as_str())?;
         let cp_arr = col_by_name::<BooleanArray>(&batch, Col::IsCagePromoter.as_str())?;
         let ce_arr = col_by_name::<BooleanArray>(&batch, Col::IsCageEnhancer.as_str())?;
         let crp_arr = col_by_name::<BooleanArray>(&batch, Col::IsCcrePromoter.as_str())?;
         let cre_arr = col_by_name::<BooleanArray>(&batch, Col::IsCcreEnhancer.as_str())?;
 
-        let w_arrs: Vec<&Float64Array> = STAAR_WEIGHTS
+        let phred_arrs: Vec<&Float64Array> = STAAR_PHRED_CHANNELS
             .iter()
             .map(|c| col_by_name::<Float64Array>(&batch, c.as_str()))
             .collect::<Result<Vec<_>, _>>()?;
 
         for i in 0..n {
             let mut weights = [0.0f64; 11];
-            for (ch, wa) in w_arrs.iter().enumerate() {
-                let w = wa.value(i);
-                weights[ch] = if w.is_finite() { w } else { 0.0 };
+            for (ch, pa) in phred_arrs.iter().enumerate() {
+                let phred = if pa.is_null(i) { 0.0 } else { pa.value(i) };
+                weights[ch] = phred_to_weight(phred);
             }
+            // cadd_phred is channel 0; keep the raw PHRED around for
+            // masks/reports that compare against numeric CADD cutoffs.
+            let cadd_phred = if phred_arrs[0].is_null(i) {
+                0.0
+            } else {
+                phred_arrs[0].value(i)
+            };
 
             entries.push(VariantIndexEntry {
                 position: pos_arr.value(i) as u32,
@@ -201,7 +221,7 @@ fn load_variant_entries(reader: BoxedBatchReader) -> Result<Vec<VariantIndexEntr
                 maf: maf_arr.value(i),
                 region_type: RegionType::from_str_lossy(rt_arr.value(i)),
                 consequence: Consequence::from_str_lossy(csq_arr.value(i)),
-                cadd_phred: cadd_arr.value(i),
+                cadd_phred,
                 revel: revel_arr.value(i),
                 regulatory: RegulatoryFlags {
                     cage_promoter: cp_arr.value(i),
@@ -428,7 +448,7 @@ mod tests {
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
 
-        use crate::column::{Col, STAAR_WEIGHTS};
+        use crate::column::{Col, STAAR_PHRED_CHANNELS};
 
         let mut fields = vec![
             Field::new(Col::VariantVcf.as_str(), DataType::UInt32, false),
@@ -440,17 +460,21 @@ mod tests {
             Field::new(Col::Maf.as_str(), DataType::Float64, false),
             Field::new(Col::RegionType.as_str(), DataType::Utf8, false),
             Field::new(Col::Consequence.as_str(), DataType::Utf8, false),
-            Field::new(Col::CaddPhred.as_str(), DataType::Float64, false),
             Field::new(Col::Revel.as_str(), DataType::Float64, false),
             Field::new(Col::IsCagePromoter.as_str(), DataType::Boolean, false),
             Field::new(Col::IsCageEnhancer.as_str(), DataType::Boolean, false),
             Field::new(Col::IsCcrePromoter.as_str(), DataType::Boolean, false),
             Field::new(Col::IsCcreEnhancer.as_str(), DataType::Boolean, false),
         ];
-        for col in &STAAR_WEIGHTS {
+        for col in &STAAR_PHRED_CHANNELS {
             fields.push(Field::new(col.as_str(), DataType::Float64, false));
         }
         let schema = Arc::new(Schema::new(fields));
+
+        // Channel 0 is cadd_phred. Use 25.0 so the transform yields a
+        // well-known weight (1 - 10^-2.5).
+        let phred_ch0 = 25.0f64;
+        let phred_other_base = 10.0f64;
 
         let mut columns: Vec<arrow::array::ArrayRef> = vec![
             Arc::new(UInt32Array::from(vec![0u32, 1u32])),
@@ -462,7 +486,6 @@ mod tests {
             Arc::new(Float64Array::from(vec![0.001, 0.005])),
             Arc::new(StringArray::from(vec!["exonic", "intronic"])),
             Arc::new(StringArray::from(vec!["missense_variant", ""])),
-            Arc::new(Float64Array::from(vec![25.0, 5.0])),
             Arc::new(Float64Array::from(vec![0.8, 0.1])),
             Arc::new(BooleanArray::from(vec![false, false])),
             Arc::new(BooleanArray::from(vec![false, true])),
@@ -470,8 +493,12 @@ mod tests {
             Arc::new(BooleanArray::from(vec![false, false])),
         ];
         for ch in 0..11 {
-            let v0 = 0.10 + 0.01 * ch as f64;
-            let v1 = 0.50 + 0.01 * ch as f64;
+            let v0 = if ch == 0 {
+                phred_ch0
+            } else {
+                phred_other_base + ch as f64
+            };
+            let v1 = if ch == 0 { 5.0 } else { 2.0 + ch as f64 };
             columns.push(Arc::new(Float64Array::from(vec![v0, v1])));
         }
 
@@ -489,11 +516,16 @@ mod tests {
         assert_eq!(entries[0].maf, 0.001);
         assert_eq!(entries[0].region_type, RegionType::Exonic);
         assert_eq!(entries[0].consequence, Consequence::MissenseVariant);
-        assert_eq!(entries[0].cadd_phred, 25.0);
+        // Raw PHRED propagated to cadd_phred, transformed value in weights[0].
+        assert_eq!(entries[0].cadd_phred, phred_ch0);
         assert!(entries[0].regulatory.ccre_promoter);
         assert!(!entries[0].regulatory.cage_enhancer);
-        for ch in 0..11 {
-            assert!((entries[0].weights.0[ch] - (0.10 + 0.01 * ch as f64)).abs() < 1e-12);
+        let expected_w0 = 1.0 - 10f64.powf(-phred_ch0 / 10.0);
+        assert!((entries[0].weights.0[0] - expected_w0).abs() < 1e-12);
+        for ch in 1..11 {
+            let phred = phred_other_base + ch as f64;
+            let expected = 1.0 - 10f64.powf(-phred / 10.0);
+            assert!((entries[0].weights.0[ch] - expected).abs() < 1e-12);
         }
 
         assert_eq!(entries[1].position, 200);

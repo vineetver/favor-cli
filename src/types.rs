@@ -177,38 +177,6 @@ impl Default for AnnotationWeights {
     }
 }
 
-impl AnnotationWeights {
-    #[cfg(test)]
-    pub const NAMES: [&str; 11] = [
-        "w_cadd",
-        "w_linsight",
-        "w_fathmm_xf",
-        "w_apc_epi_active",
-        "w_apc_epi_repressed",
-        "w_apc_epi_transcription",
-        "w_apc_conservation",
-        "w_apc_protein_function",
-        "w_apc_local_nd",
-        "w_apc_mutation_density",
-        "w_apc_tf",
-    ];
-
-    #[cfg(test)]
-    pub const DISPLAY_NAMES: [&str; 11] = [
-        "cadd_phred",
-        "linsight",
-        "fathmm_xf",
-        "apc_epigenetics_active",
-        "apc_epigenetics_repressed",
-        "apc_epigenetics_transcription",
-        "apc_conservation",
-        "apc_protein_function",
-        "apc_local_nucleotide_diversity",
-        "apc_mutation_density",
-        "apc_transcription_factor",
-    ];
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RegionType {
@@ -654,30 +622,5 @@ mod tests {
         assert!("0-5".parse::<ChromosomeSet>().is_err());
         assert!("20-25".parse::<ChromosomeSet>().is_err());
         assert!("99".parse::<ChromosomeSet>().is_err());
-    }
-
-    #[test]
-    fn channel_counts() {
-        assert_eq!(AnnotationWeights::NAMES.len(), 11);
-        assert_eq!(AnnotationWeights::DISPLAY_NAMES.len(), 11);
-    }
-
-    #[test]
-    fn display_names_match_annotation_channels() {
-        // These must stay in sync with weights.rs::ANNOTATION_CHANNELS
-        let expected = [
-            "cadd_phred",
-            "linsight",
-            "fathmm_xf",
-            "apc_epigenetics_active",
-            "apc_epigenetics_repressed",
-            "apc_epigenetics_transcription",
-            "apc_conservation",
-            "apc_protein_function",
-            "apc_local_nucleotide_diversity",
-            "apc_mutation_density",
-            "apc_transcription_factor",
-        ];
-        assert_eq!(AnnotationWeights::DISPLAY_NAMES, expected);
     }
 }

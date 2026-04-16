@@ -103,13 +103,15 @@ impl VariantSet {
         for &col in required {
             if !tier.has(col) {
                 return Err(CohortError::Input(format!(
-                    "Column '{}' requires {} tier but '{}' was annotated \
-                     with {} tier.\nRe-annotate with: cohort annotate {} --full",
-                    col.as_str(),
-                    Tier::required_for(&[col]),
-                    self.root.display(),
-                    tier,
-                    self.root.display(),
+                    "Column '{col_name}' requires {req_tier} tier but '{path}' was annotated \
+                     with {tier} tier. STAAR reads FAVOR-native PHRED channels \
+                     (cadd_phred, linsight, fathmm_xf, apc_*) directly from \
+                     this set; rebuild with `favor ingest --annotations <full-tier>` \
+                     to repopulate them.",
+                    col_name = col.as_str(),
+                    req_tier = Tier::required_for(&[col]),
+                    path = self.root.display(),
+                    tier = tier,
                 )));
             }
         }
@@ -122,7 +124,7 @@ impl VariantSet {
     /// Catches partial writes, renamed columns, or out-of-band regeneration.
     pub fn require_staar_weight_catalog(&self) -> Result<(), CohortError> {
         let have = self.columns();
-        let missing: Vec<&str> = crate::column::STAAR_WEIGHTS
+        let missing: Vec<&str> = crate::column::STAAR_PHRED_CHANNELS
             .iter()
             .map(|c| c.as_str())
             .filter(|name| !have.iter().any(|h| h == name))
@@ -131,9 +133,9 @@ impl VariantSet {
             return Ok(());
         }
         Err(CohortError::DataMissing(format!(
-            "Annotation set at {} is missing {} of the 11 STAAR weight channels:\n  {}\n\
-             The channel catalog is fixed — all 11 must be present for STAAR-O to match R.\n\
-             Re-run: `favor annotate --full` against a full-tier FAVOR source.",
+            "Cohort store at {} is missing {} of the 11 FAVOR PHRED channels:\n  {}\n\
+             The channel catalog is fixed; all 11 must be present for STAAR-O to match R.\n\
+             Rebuild the cohort: `favor ingest <vcf> --annotations <annotated-set> --cohort-id <id>`.",
             self.root.display(),
             missing.len(),
             missing.join(", "),
@@ -364,7 +366,7 @@ mod tests {
 
     #[test]
     fn catalog_passes_when_all_11_weights_present() {
-        let cols: Vec<String> = crate::column::STAAR_WEIGHTS
+        let cols: Vec<String> = crate::column::STAAR_PHRED_CHANNELS
             .iter()
             .map(|c| c.as_str().to_string())
             .collect();
@@ -375,7 +377,7 @@ mod tests {
     #[test]
     fn catalog_errors_on_missing_channel() {
         // Drop one weight and a non-weight column; only the weight should be flagged.
-        let cols: Vec<String> = crate::column::STAAR_WEIGHTS
+        let cols: Vec<String> = crate::column::STAAR_PHRED_CHANNELS
             .iter()
             .skip(1)
             .map(|c| c.as_str().to_string())
@@ -383,7 +385,7 @@ mod tests {
             .collect();
         let err = vs_with_columns(cols).require_staar_weight_catalog().unwrap_err();
         let msg = err.to_string();
-        let missing_name = crate::column::STAAR_WEIGHTS[0].as_str();
+        let missing_name = crate::column::STAAR_PHRED_CHANNELS[0].as_str();
         assert!(msg.contains(missing_name), "missing name should appear: {msg}");
     }
 
@@ -391,11 +393,11 @@ mod tests {
     fn catalog_accepts_extras() {
         // Extras beyond the 11 weights are allowed — downstream reads by name,
         // so ordering or extras don't shift anything.
-        let mut cols: Vec<String> = crate::column::STAAR_WEIGHTS
+        let mut cols: Vec<String> = crate::column::STAAR_PHRED_CHANNELS
             .iter()
             .map(|c| c.as_str().to_string())
             .collect();
-        cols.push("w_future_channel".into());
+        cols.push("future_channel".into());
         assert!(vs_with_columns(cols).require_staar_weight_catalog().is_ok());
     }
 }

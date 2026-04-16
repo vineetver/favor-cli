@@ -105,9 +105,12 @@ impl<'a> CohortHandle<'a> {
                 manifest_path.display()
             ))
         })?;
-        if manifest.version != 4 {
+        if manifest.version != 5 {
             return Err(CohortError::DataMissing(format!(
-                "Cohort '{}' is on schema v{}, this build expects v4. Re-run \
+                "Cohort '{}' is on schema v{}, this build expects v5. \
+                 STAAR now reads FAVOR-native PHRED columns (cadd_phred, linsight, \
+                 apc_*, fathmm_xf) from variants.parquet directly; the old w_* \
+                 layout is gone. Re-run \
                  `favoringest <vcf> --annotations <set> --cohort-id {} --rebuild`.",
                 self.id.as_str(),
                 manifest.version,

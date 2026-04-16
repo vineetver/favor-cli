@@ -36,7 +36,7 @@ pub struct MetaGeneResult {
     /// SE of β̂: sqrt(1 / 1ᵀK1).
     pub burden_se: f64,
 }
-use crate::column::{Col, STAAR_WEIGHTS};
+use crate::column::{Col, STAAR_PHRED_CHANNELS};
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::ingest::{ColumnContract, ColumnRequirement};
@@ -365,12 +365,12 @@ pub fn merge_chromosome(
     ))?;
 
     // Weight columns: first_value(w_col) AS w_col for each weight
-    let weight_aggs: String = STAAR_WEIGHTS
+    let weight_aggs: String = STAAR_PHRED_CHANNELS
         .iter()
         .map(|c| format!("first_value({col}) AS {col}", col = c.as_str()))
         .collect::<Vec<_>>()
         .join(", ");
-    let weight_select: String = STAAR_WEIGHTS
+    let weight_select: String = STAAR_PHRED_CHANNELS
         .iter()
         .map(|c| c.as_str())
         .collect::<Vec<_>>()
@@ -381,6 +381,10 @@ pub fn merge_chromosome(
     // alt-allele dosage, so flipping ref↔alt flips the sign of `u_stat`.
     // The covariance K is invariant under that flip and stays put — the
     // segment-cache lookup canonicalises on its own side.
+    // `cadd_phred_raw` carries the numeric PHRED used by mask predicates;
+    // the transformed [0,1] `cadd_phred` weight arrives via {weight_aggs}
+    // as channel 0. Keeping them under distinct names avoids a duplicate
+    // column error from DuckDB.
     engine.execute(&format!(
         "CREATE OR REPLACE TABLE _meta_variants AS \
          SELECT \
@@ -393,7 +397,7 @@ pub fn merge_chromosome(
              first_value({gene}) FILTER (WHERE {gene} != '') AS {gene}, \
              first_value({region}) FILTER (WHERE {region} != '') AS {region}, \
              first_value({csq}) FILTER (WHERE {csq} != '') AS {csq}, \
-             first_value({cadd}) AS {cadd}, \
+             first_value(cadd_phred_raw) AS cadd_phred_raw, \
              first_value({revel}) AS {revel}, \
              bool_or({cage_p}) AS {cage_p}, \
              bool_or({cage_e}) AS {cage_e}, \
@@ -410,7 +414,7 @@ pub fn merge_chromosome(
         pos = Col::Position, ref_a = Col::RefAllele, alt_a = Col::AltAllele,
         maf = Col::Maf,
         gene = Col::GeneName, region = Col::RegionType, csq = Col::Consequence,
-        cadd = Col::CaddPhred, revel = Col::Revel,
+        revel = Col::Revel,
         cage_p = Col::IsCagePromoter, cage_e = Col::IsCageEnhancer,
         ccre_p = Col::IsCcrePromoter, ccre_e = Col::IsCcreEnhancer,
     ))?;
@@ -418,7 +422,7 @@ pub fn merge_chromosome(
     let batches = engine.collect(&format!(
         "SELECT {pos}, {ref_a}, {alt_a}, u_meta, \
          mac_total, n_total, {gene}, {region}, {csq}, \
-         {cadd}, {revel}, \
+         cadd_phred_raw, {revel}, \
          {cage_p}, {cage_e}, {ccre_p}, {ccre_e}, \
          {weight_select}, \
          study_segs \
@@ -429,7 +433,6 @@ pub fn merge_chromosome(
         gene = Col::GeneName,
         region = Col::RegionType,
         csq = Col::Consequence,
-        cadd = Col::CaddPhred,
         revel = Col::Revel,
         cage_p = Col::IsCagePromoter,
         cage_e = Col::IsCageEnhancer,
@@ -487,13 +490,16 @@ pub fn merge_chromosome(
         let gene_arr = str_col(6)?;
         let rt_arr = str_col(7)?;
         let csq_arr = str_col(8)?;
-        let cadd_arr = f64_col(9)?;
+        let cadd_raw_arr = f64_col(9)?;
         let revel_arr = f64_col(10)?;
         let cp_arr = bool_col(11)?;
         let ce_arr = bool_col(12)?;
         let crp_arr = bool_col(13)?;
         let cre_arr = bool_col(14)?;
 
+        // Sumstats parquet stores transformed [0,1] weights under the
+        // FAVOR-native channel names; pass them through so the
+        // PHRED -> probability transform is not applied a second time.
         let mut w_arrs: Vec<&Float64Array> = Vec::with_capacity(11);
         for i in 0..11 {
             w_arrs.push(f64_col(15 + i)?);
@@ -505,6 +511,7 @@ pub fn merge_chromosome(
             for (ch, wa) in w_arrs.iter().enumerate() {
                 weights[ch] = f64_or(wa, i, 0.0);
             }
+            let cadd_phred = f64_or(cadd_raw_arr, i, 0.0);
 
             let study_segments = parse_study_segments(str_or(segs_arr, i, ""));
 
@@ -528,7 +535,7 @@ pub fn merge_chromosome(
                     annotation: FunctionalAnnotation {
                         region_type: RegionType::from_str_lossy(str_or(rt_arr, i, "")),
                         consequence: Consequence::from_str_lossy(str_or(csq_arr, i, "")),
-                        cadd_phred: f64_or(cadd_arr, i, 0.0),
+                        cadd_phred,
                         revel: f64_or(revel_arr, i, 0.0),
                         regulatory: RegulatoryFlags {
                             cage_promoter: bool_or(cp_arr, i, false),
@@ -873,6 +880,10 @@ fn emit_chromosome_sparse(
 }
 
 fn variant_schema() -> Schema {
+    // `cadd_phred_raw` holds the numeric PHRED used by mask predicates
+    // (MissenseDS, SpliceDS). The 11 channel columns — including one
+    // named `cadd_phred` — carry the transformed [0,1] STAAR weights.
+    // Two columns with distinct semantics, so distinct names.
     let mut fields = vec![
         Field::new(Col::Position.as_str(), DataType::Int32, false),
         Field::new(Col::RefAllele.as_str(), DataType::Utf8, false),
@@ -886,14 +897,14 @@ fn variant_schema() -> Schema {
         Field::new(Col::GeneName.as_str(), DataType::Utf8, false),
         Field::new(Col::RegionType.as_str(), DataType::Utf8, false),
         Field::new(Col::Consequence.as_str(), DataType::Utf8, false),
-        Field::new(Col::CaddPhred.as_str(), DataType::Float64, false),
+        Field::new("cadd_phred_raw", DataType::Float64, false),
         Field::new(Col::Revel.as_str(), DataType::Float64, false),
         Field::new(Col::IsCagePromoter.as_str(), DataType::Boolean, false),
         Field::new(Col::IsCageEnhancer.as_str(), DataType::Boolean, false),
         Field::new(Col::IsCcrePromoter.as_str(), DataType::Boolean, false),
         Field::new(Col::IsCcreEnhancer.as_str(), DataType::Boolean, false),
     ];
-    for col in &STAAR_WEIGHTS {
+    for col in &STAAR_PHRED_CHANNELS {
         fields.push(Field::new(col.as_str(), DataType::Float64, false));
     }
     Schema::new(fields)

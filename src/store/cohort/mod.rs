@@ -150,10 +150,10 @@ pub fn probe(store_dir: &Path, vcf_paths: &[PathBuf], annotations_path: &Path) -
         return miss(ProbeReason::FingerprintFailed);
     };
 
-    if manifest.version != 4 {
+    if manifest.version != 5 {
         return miss(ProbeReason::SchemaVersionMismatch {
             found: manifest.version,
-            expected: 4,
+            expected: 5,
         });
     }
     if manifest.key != key {
@@ -378,7 +378,7 @@ pub fn build(
     }
 
     let manifest = CohortManifest {
-        version: 4,
+        version: 5,
         key,
         n_samples,
         n_variants: total_variants,

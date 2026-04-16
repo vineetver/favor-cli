@@ -11,7 +11,7 @@ use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
 use serde_json::json;
 
-use crate::column::{Col, STAAR_WEIGHTS};
+use crate::column::{Col, STAAR_PHRED_CHANNELS};
 use crate::commands::MetaStaarConfig;
 use crate::engine::DfEngine;
 use crate::error::CohortError;
@@ -406,10 +406,7 @@ fn write_meta_results(
     out: &dyn Output,
 ) -> Result<(), CohortError> {
     out.status("Writing MetaSTAAR results...");
-    let channels: Vec<&str> = STAAR_WEIGHTS
-        .iter()
-        .map(|c| c.weight_display_name().expect("STAAR_WEIGHTS entries have display names"))
-        .collect();
+    let channels: Vec<&str> = STAAR_PHRED_CHANNELS.iter().map(|c| c.as_str()).collect();
 
     for (mask_type, results) in all_mask_results {
         if results.is_empty() {
