@@ -315,6 +315,35 @@ pub enum Command {
         output: Option<PathBuf>,
     },
 
+    /// Compute a sparse GRM and PCA scores from a cohort + KING .seg output.
+    /// Outputs are cached under `.cohort/cache/grm/<cohort>/` and consumed
+    /// by `favor staar --kinship <grm.tsv> --pca-covariates <pca_scores.tsv>`.
+    Grm {
+        /// Pre-built cohort id (under the store root).
+        #[arg(long)]
+        cohort: String,
+
+        /// KING .seg IBD output file (external tool, not reimplemented).
+        #[arg(long)]
+        king_seg: PathBuf,
+
+        /// Maximum relatedness degree (default 4 = up to 3rd cousins).
+        #[arg(long, default_value = "4")]
+        degree: u8,
+
+        /// Number of PCA components (default 20).
+        #[arg(long, default_value = "20")]
+        n_pcs: usize,
+
+        /// SNP block size for memory control (default 5000).
+        #[arg(long, default_value = "5000")]
+        block_size: usize,
+
+        /// Output directory (default: cohort GRM cache path)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
     /// Forward-selection LD pruning on conditional score-test p-values
     #[command(name = "ld-prune")]
     LdPrune {

@@ -199,6 +199,29 @@ fn run(
                 dry_run,
             )
         }
+        Command::Grm {
+            cohort,
+            king_seg,
+            degree,
+            n_pcs,
+            block_size,
+            output: output_path,
+        } => {
+            let engine = runtime::Engine::open(store_path)?;
+            commands::grm::run(
+                &engine,
+                commands::grm::GrmArgs {
+                    cohort,
+                    king_seg,
+                    degree,
+                    n_pcs,
+                    block_size,
+                    output: output_path,
+                },
+                out,
+                dry_run,
+            )
+        }
         Command::LdPrune {
             cohort,
             phenotype,

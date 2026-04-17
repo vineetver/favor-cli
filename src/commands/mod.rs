@@ -1,6 +1,7 @@
 pub mod annotate;
 pub mod annotation;
 pub mod enrich;
+pub mod grm;
 pub mod ingest;
 pub mod inspect;
 pub mod interpret;

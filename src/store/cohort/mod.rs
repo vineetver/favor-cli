@@ -44,7 +44,13 @@ pub struct ChromInfo {
 }
 
 /// Content-based fingerprint so cache keys survive path renames.
-fn file_content_fingerprint(path: &Path) -> Result<Vec<u8>, CohortError> {
+pub(crate) fn sha256_str(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+pub(crate) fn file_content_fingerprint(path: &Path) -> Result<Vec<u8>, CohortError> {
     use std::io::{Read as IoRead, Seek, SeekFrom};
     const CHUNK: u64 = 1024 * 1024;
 

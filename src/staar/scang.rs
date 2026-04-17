@@ -22,10 +22,10 @@ use crate::staar::model::NullModel;
 /// xorshift64* PRNG. Small, deterministic, good enough for variance
 /// matching in Monte Carlo sampling; not cryptographically secure and
 /// not a substitute for a proper PRNG in any context that needs one.
-struct Xorshift64(u64);
+pub(crate) struct Xorshift64(u64);
 
 impl Xorshift64 {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         // Avoid the zero state; xorshift64 converges to 0 there.
         Self(if seed == 0 { 0x9E3779B97F4A7C15 } else { seed })
     }
@@ -37,7 +37,7 @@ impl Xorshift64 {
         self.0 = x;
         x.wrapping_mul(0x2545F4914F6CDD1D)
     }
-    fn uniform_01(&mut self) -> f64 {
+    pub(crate) fn uniform_01(&mut self) -> f64 {
         // 53-bit mantissa fills the [0, 1) range uniformly.
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
@@ -142,7 +142,7 @@ fn sample_unrelated(null: &NullModel, times: u32, seed: u64) -> Mat<f64> {
 /// dropped so state is a single u64, trivially clonable for a later
 /// parallel extension.
 #[inline]
-fn standard_normal(rng: &mut Xorshift64) -> f64 {
+pub(crate) fn standard_normal(rng: &mut Xorshift64) -> f64 {
     let u1 = rng.uniform_01().max(f64::MIN_POSITIVE);
     let u2 = rng.uniform_01();
     (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()

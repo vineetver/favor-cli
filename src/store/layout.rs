@@ -53,6 +53,13 @@ impl Layout {
             .join(key.as_str())
     }
 
+    pub fn grm_cache_dir(&self, cohort: &CohortId, key: &CacheKey) -> PathBuf {
+        self.cache_root()
+            .join("grm")
+            .join(cohort.as_str())
+            .join(key.as_str())
+    }
+
     /// Subdirectories that `Store::open` materializes lazily.
     pub(super) fn known_subdirs(&self) -> [PathBuf; 4] {
         [

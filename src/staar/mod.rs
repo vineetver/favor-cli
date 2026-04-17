@@ -1,6 +1,7 @@
 pub mod ancestry;
 pub mod carrier;
 pub mod genotype;
+pub mod grm;
 #[cfg(test)]
 mod ground_truth_test;
 #[cfg(test)]
