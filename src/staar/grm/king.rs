@@ -129,7 +129,7 @@ pub fn map_to_cohort_indices(
             pairs.push((lo, hi, e.prop_ibd));
         }
     }
-    pairs.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    pairs.sort_unstable_by_key(|a| (a.0, a.1));
     pairs.dedup_by_key(|p| (p.0, p.1));
     (pairs, id_to_idx)
 }
