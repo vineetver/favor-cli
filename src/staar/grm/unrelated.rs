@@ -47,10 +47,10 @@ pub fn select_unrelated(
             .max_by(|&a, &b| {
                 n_rel[a]
                     .cmp(&n_rel[b])
-                    .then_with(|| divergence[a].cmp(&divergence[b]))
+                    .then_with(|| divergence[b].cmp(&divergence[a]))
                     .then_with(|| {
-                        total_kin[a]
-                            .partial_cmp(&total_kin[b])
+                        total_kin[b]
+                            .partial_cmp(&total_kin[a])
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
             });

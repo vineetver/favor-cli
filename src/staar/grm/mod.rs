@@ -10,3 +10,6 @@ pub mod king;
 pub mod pca;
 pub mod types;
 pub mod unrelated;
+
+#[cfg(test)]
+mod ground_truth_test;

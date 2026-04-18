@@ -107,38 +107,7 @@ pub fn postmultiply_chrom(
         }
         let carriers = view.sparse_g()?.load_variant(vi as u32);
 
-        let mut carrier_sum = vec![0.0f64; l];
-        let mut missing_sum = vec![0.0f64; l];
-        for &CarrierEntry { sample_idx, dosage } in &carriers.entries {
-            let si = sample_idx as usize;
-            if si >= sample_set.len() || !sample_set[si] {
-                continue;
-            }
-            if dosage == 255 {
-                for c in 0..l {
-                    missing_sum[c] += v[(si, c)];
-                }
-                continue;
-            }
-            let d = dosage as f64;
-            for c in 0..l {
-                carrier_sum[c] += d * v[(si, c)];
-            }
-        }
-
-        for c in 0..l {
-            let non_carrier_sum = col_sums[c] - carrier_sum[c] / 1.0
-                - missing_sum[c]; // actually: carrier_v_sum includes dosage*v, not just v
-            // Correct formula: non-carrier contribution = -2*mu * (sum_v - missing_v_sum - carrier_v_sum_unweighted)
-            // But carrier_sum above is dosage-weighted. We need unweighted sum of v for carriers too.
-            // Let me redo this properly.
-            let _ = non_carrier_sum; // discard, recompute below
-        }
-
-        // Proper accounting: separate carrier v-sums (unweighted) for the
-        // -2*mu shift, and dosage-weighted sums for the genotype signal.
         let mut dosage_v_sum = vec![0.0f64; l];
-        let mut carrier_v_unweighted = vec![0.0f64; l];
         let mut missing_v_sum = vec![0.0f64; l];
 
         for &CarrierEntry { sample_idx, dosage } in &carriers.entries {
@@ -153,9 +122,7 @@ pub fn postmultiply_chrom(
                 continue;
             }
             for c in 0..l {
-                let vi_val = v[(si, c)];
-                dosage_v_sum[c] += dosage as f64 * vi_val;
-                carrier_v_unweighted[c] += vi_val;
+                dosage_v_sum[c] += dosage as f64 * v[(si, c)];
             }
         }
 
@@ -243,21 +210,21 @@ pub fn premultiply_chrom(
 
 /// Full randomized PCA across all chromosomes.
 ///
-/// Mirrors runPCA.R:drpca (lines 2-78). Power iteration with per-chrom
-/// accumulation so peak memory is one chromosome at a time.
+/// Block Krylov iteration matching runPCA.R:drpca (lines 2-78).
+/// Each iteration accumulates G*h into a SNP-space Krylov matrix H,
+/// then the SVD of H gives a high-quality eigenspace approximation.
+/// Per-chromosome accumulation keeps peak memory to one chromosome.
 pub fn randomized_pca(
     cohort: &CohortHandle<'_>,
     manifest: &CohortManifest,
     unrelated_mask: &[bool],
-    all_sample_mask: &[bool],
+    _all_sample_mask: &[bool],
     n_pcs: usize,
     n_iter: usize,
 ) -> Result<PcaScores, CohortError> {
     let n_unrel: usize = unrelated_mask.iter().filter(|&&b| b).count();
-    let _n_all: usize = all_sample_mask.iter().filter(|&&b| b).count();
     let l = 2 * n_pcs;
 
-    // Per-chromosome stats (allele freqs from unrelated subset).
     let mut chrom_stats: Vec<(Chromosome, VariantStats)> = Vec::new();
     for ci in &manifest.chromosomes {
         let chrom: Chromosome = ci.name.parse().map_err(|e: String| CohortError::Input(e))?;
@@ -268,13 +235,11 @@ pub fn randomized_pca(
 
     let total_variants: usize = chrom_stats.iter().map(|(_, s)| s.mu.len()).sum();
 
-    // Deterministic initialization via xorshift.
     let mut rng = super::super::scang::Xorshift64::new(42);
     let mut h = Mat::<f64>::from_fn(n_unrel, l, |_, _| {
         super::super::scang::standard_normal(&mut rng)
     });
 
-    // Remap: unrelated_mask → compact index.
     let unrel_compact: Vec<Option<usize>> = {
         let mut map = Vec::with_capacity(unrelated_mask.len());
         let mut next = 0usize;
@@ -289,11 +254,12 @@ pub fn randomized_pca(
         map
     };
 
-    // Power iteration.
-    for _iter in 0..n_iter {
-        // x = G * h (postmultiply): accumulate across chromosomes.
-        // h is (n_unrel_compact, l); we need to expand it to (n_samples, l)
-        // sample-indexed for the carrier walk.
+    // Krylov accumulation: H = [x_1 | x_2 | … | x_{n_iter}] where
+    // x_k = G * h_k (SNP-space). Matches drpca line 33: H<-cbind(H,x).
+    let krylov_cols = n_iter * l;
+    let mut krylov = Mat::<f64>::zeros(total_variants, krylov_cols);
+
+    for iter in 0..n_iter {
         let h_full = expand_compact(&h, unrelated_mask, &unrel_compact);
         let mut x = Mat::<f64>::zeros(total_variants, l);
         let mut offset = 0usize;
@@ -309,7 +275,13 @@ pub fn randomized_pca(
             offset += p;
         }
 
-        // h_new = G' * x (premultiply): accumulate across chromosomes.
+        let col_base = iter * l;
+        for vi in 0..total_variants {
+            for c in 0..l {
+                krylov[(vi, col_base + c)] = x[(vi, c)];
+            }
+        }
+
         let mut h_new_full = Mat::<f64>::zeros(unrelated_mask.len(), l);
         offset = 0;
         for (chrom, stats) in &chrom_stats {
@@ -320,10 +292,8 @@ pub fn randomized_pca(
             offset += p;
         }
 
-        // Compact back to n_unrel.
         h = compact_rows(&h_new_full, unrelated_mask, &unrel_compact);
 
-        // Column-normalize.
         for c in 0..l {
             let mut norm = 0.0f64;
             for i in 0..n_unrel {
@@ -336,25 +306,24 @@ pub fn randomized_pca(
         }
     }
 
-    // SVD of accumulated subspace.
-    let svd_h = h.thin_svd().map_err(|e| {
-        CohortError::Analysis(format!("PCA subspace SVD failed: {e:?}"))
+    // SVD of accumulated Krylov matrix (SNP-space). Matches drpca
+    // line 42: init<-svd(H,nv=0)$u.
+    let svd_k = krylov.thin_svd().map_err(|e| {
+        CohortError::Analysis(format!("PCA Krylov SVD failed: {e:?}"))
     })?;
-    let u_sub = svd_h.U();
-    let nd = n_pcs.min(u_sub.ncols());
+    let u_snp = svd_k.U();
+    let n_krylov_cols = u_snp.ncols();
 
-    // T = G' * U_sub (premultiply on unrelated).
-    let u_full = expand_compact(
-        &Mat::from_fn(n_unrel, nd, |i, c| u_sub[(i, c)]),
-        unrelated_mask,
-        &unrel_compact,
-    );
-    let mut t_mat = Mat::<f64>::zeros(unrelated_mask.len(), nd);
+    // T = G' * U_snp using ALL Krylov columns, then truncate via SVD.
+    // Matches drpca lines 44-46: T<-premultiply(init,...); svd(T,nu=nd).
+    let mut t_mat = Mat::<f64>::zeros(unrelated_mask.len(), n_krylov_cols);
+    let mut offset = 0usize;
     for (chrom, stats) in &chrom_stats {
         let view = cohort.chromosome(chrom)?;
-        // For premultiply we need v as (p, nd). We compute G_chrom * u_full first.
-        let g_u = postmultiply_chrom(&view, &u_full, unrelated_mask, stats)?;
-        premultiply_chrom(&view, &g_u, unrelated_mask, stats, &mut t_mat)?;
+        let p = stats.mu.len();
+        let u_chrom = Mat::from_fn(p, n_krylov_cols, |i, c| u_snp[(offset + i, c)]);
+        premultiply_chrom(&view, &u_chrom, unrelated_mask, stats, &mut t_mat)?;
+        offset += p;
     }
     let t_compact = compact_rows(&t_mat, unrelated_mask, &unrel_compact);
 
@@ -363,29 +332,60 @@ pub fn randomized_pca(
     })?;
     let u_final = svd_t.U();
     let s_diag = svd_t.S();
+    let s_col = s_diag.column_vector();
+    let nd = n_pcs.min(u_final.ncols());
 
-    let mut scores = Mat::<f64>::zeros(unrelated_mask.len(), nd);
-    for i in 0..n_unrel {
-        for c in 0..nd {
-            if let Some(compact_i) = unrel_compact.iter().enumerate().find(|(_, o)| **o == Some(i)).map(|(g, _)| g) {
-                scores[(compact_i, c)] = u_final[(i, c)];
+    // Singular values of T = G' * U_snp ≈ Σ_G. Eigenvalues = Σ_G².
+    let eigenvalues: Vec<f64> = (0..nd).map(|c| s_col[c] * s_col[c]).collect();
+
+    let mut unrel_to_global = vec![0usize; n_unrel];
+    {
+        let mut ci = 0usize;
+        for (gi, &b) in unrelated_mask.iter().enumerate() {
+            if b {
+                unrel_to_global[ci] = gi;
+                ci += 1;
             }
         }
     }
 
-    // Project related samples: scores_related = G_related' * V / d.
-    // V = eigenvectors in SNP space. We approximate via T * U / d.
-    // For simplicity in v1: all samples get scores from the premultiply path.
-    // TODO: project related samples via G_related' * eigenvectors for exact projection.
+    let n_full = unrelated_mask.len();
+    let mut scores = Mat::<f64>::zeros(n_full, nd);
+    for ci in 0..n_unrel {
+        let gi = unrel_to_global[ci];
+        for c in 0..nd {
+            scores[(gi, c)] = u_final[(ci, c)];
+        }
+    }
 
-    let s_col = s_diag.column_vector();
-    let eigenvalues: Vec<f64> = (0..nd).map(|c| {
-        let s = s_col[c];
-        s * s
-    }).collect();
+    // Related projection: v_res = G * u_final / d, then
+    // scores_rel = G_rel' * v_res / d = G_rel' * G * u_final / d².
+    let related_mask: Vec<bool> = unrelated_mask.iter().map(|&b| !b).collect();
+    let n_related: usize = related_mask.iter().filter(|&&b| b).count();
+    if n_related > 0 {
+        let u_final_full = expand_compact(
+            &Mat::from_fn(n_unrel, nd, |i, c| u_final[(i, c)]),
+            unrelated_mask,
+            &unrel_compact,
+        );
+        let mut rel_accum = Mat::<f64>::zeros(n_full, nd);
+        for (chrom, stats) in &chrom_stats {
+            let view = cohort.chromosome(chrom)?;
+            let g_u = postmultiply_chrom(&view, &u_final_full, unrelated_mask, stats)?;
+            premultiply_chrom(&view, &g_u, &related_mask, stats, &mut rel_accum)?;
+        }
+        for (gi, &is_rel) in related_mask.iter().enumerate() {
+            if is_rel {
+                for c in 0..nd {
+                    let d = s_col[c];
+                    if d.abs() > 1e-12 {
+                        scores[(gi, c)] = rel_accum[(gi, c)] / (d * d);
+                    }
+                }
+            }
+        }
+    }
 
-    // Expand scores to full sample set (related get 0 for now — follow-up
-    // will project them via the eigenvector path).
     Ok(PcaScores { scores, eigenvalues })
 }
 
