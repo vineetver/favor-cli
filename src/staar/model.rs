@@ -121,7 +121,7 @@ pub(crate) fn arrow_str(col: &dyn Array, row: usize) -> String {
 }
 
 /// Extract a f64 from any Arrow numeric column (handles Float64, Int64, etc.).
-fn arrow_f64(col: &dyn Array, row: usize) -> f64 {
+pub(crate) fn arrow_f64(col: &dyn Array, row: usize) -> f64 {
     if col.is_null(row) { return f64::NAN; }
     if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
         return a.value(row);
@@ -177,10 +177,12 @@ pub fn load_phenotype(
         resolved_covs.push(resolved);
     }
 
-    // Trait type detection runs against the first resolved column. Joint
-    // multi-trait STAAR is unrelated continuous only, so a binary first
-    // trait is a hard error in multi mode; single-trait keeps the existing
-    // continuous-vs-binary dispatch.
+    // Trait type detection runs against the first resolved column and
+    // applies to the entire joint multi-trait run. Multi-trait joint STAAR
+    // now supports all-binary traits via per-trait logistic IRLS +
+    // cross-trait residual correlation (see `multi::MultiNull::fit_binary`);
+    // we enforce that every trait in a multi-trait run shares the same
+    // detected family, since the joint null cannot mix gaussian and binomial.
     let primary_trait = &trait_cols[0];
     let distinct_count = engine.query_scalar(&format!(
         "SELECT COUNT(DISTINCT \"{primary_trait}\") FROM _pheno"
@@ -191,12 +193,25 @@ pub fn load_phenotype(
         staar::TraitType::Continuous
     };
     out.status(&format!("  Trait '{primary_trait}' -> {:?}", trait_type));
-    if k_traits > 1 && trait_type == staar::TraitType::Binary {
-        return Err(CohortError::Input(format!(
-            "Multi-trait joint STAAR requires continuous traits, but trait \
-             '{primary_trait}' has only {distinct_count} distinct values. \
-             Run each trait separately or drop the binary trait."
-        )));
+    if k_traits > 1 {
+        for extra in &trait_cols[1..] {
+            let dc = engine.query_scalar(&format!(
+                "SELECT COUNT(DISTINCT \"{extra}\") FROM _pheno"
+            ))?;
+            let tt = if dc <= 2 {
+                staar::TraitType::Binary
+            } else {
+                staar::TraitType::Continuous
+            };
+            if tt != trait_type {
+                return Err(CohortError::Input(format!(
+                    "Multi-trait joint STAAR requires every --trait-name to \
+                     share the same family, but '{primary_trait}' is {:?} \
+                     and '{extra}' is {:?}. Run each family separately.",
+                    trait_type, tt,
+                )));
+            }
+        }
     }
 
     let id_col = resolve_id_column(&pheno_cols, column_map);
@@ -911,13 +926,12 @@ mod tests {
         }
     }
 
-    /// Joint multi-trait STAAR is unrelated continuous only. If the first
-    /// resolved trait is detected as Binary (<= 2 distinct values) the
-    /// loader must reject with an Input error naming the offending column.
+    /// Joint multi-trait STAAR requires every --trait-name to share the
+    /// same family. Mixing a binary trait and a continuous trait in the
+    /// same run must reject with an Input error naming both columns.
     #[test]
-    fn load_phenotype_rejects_binary_trait_in_multi_mode() {
+    fn load_phenotype_rejects_mixed_family_in_multi_mode() {
         let dir = tempfile::tempdir().unwrap();
-        // BMI here is coerced to {0.0, 1.0} so distinct_count == 2.
         let rows: Vec<Vec<String>> = (1..=12)
             .map(|i| {
                 let id = format!("s{i}");
@@ -964,15 +978,77 @@ mod tests {
             &SilentOut,
         );
         match result {
-            Ok(_) => panic!("binary first trait + k>1 must be rejected"),
+            Ok(_) => panic!("mixed binary + continuous family must be rejected"),
             Err(CohortError::Input(msg)) => {
-                assert!(msg.contains("BMI"), "error must name the binary column: {msg}");
+                assert!(msg.contains("BMI"), "error must name BMI: {msg}");
+                assert!(msg.contains("HEIGHT"), "error must name HEIGHT: {msg}");
                 assert!(
-                    msg.contains("continuous"),
-                    "error must explain the continuous-only constraint: {msg}"
+                    msg.contains("family"),
+                    "error must explain the shared-family rule: {msg}"
                 );
             }
             Err(other) => panic!("expected Input error, got {other:?}"),
+        }
+    }
+
+    /// Multi-trait all-binary must now load successfully and produce a
+    /// `(n, k)` y matrix with binary-coded phenotypes.
+    #[test]
+    fn load_phenotype_accepts_all_binary_multi() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two binary traits: case1 and case2, each balanced 0/1.
+        let rows: Vec<Vec<String>> = (1..=12)
+            .map(|i| {
+                let id = format!("s{i}");
+                let case1 = (i % 2) as f64;
+                let case2 = ((i + 1) % 2) as f64;
+                let age = 30.0 + i as f64;
+                let sex = (i % 2) as f64;
+                vec![
+                    id,
+                    format!("{case1}"),
+                    format!("{case2}"),
+                    format!("{age}"),
+                    format!("{sex}"),
+                ]
+            })
+            .collect();
+        let row_refs: Vec<Vec<&str>> = rows
+            .iter()
+            .map(|r| r.iter().map(|s| s.as_str()).collect())
+            .collect();
+        let pheno_path = write_pheno_tsv(
+            &dir,
+            &["IID", "case1", "case2", "age", "sex"],
+            &row_refs,
+        );
+        let sample_ids: Vec<String> = (1..=12).map(|i| format!("s{i}")).collect();
+        let geno = fake_geno(
+            &sample_ids
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+        );
+
+        let pheno = load_phenotype(
+            &test_engine(),
+            &pheno_path,
+            &["age".into(), "sex".into()],
+            &geno,
+            &["case1".into(), "case2".into()],
+            None,
+            5,
+            42,
+            &HashMap::new(),
+            &SilentOut,
+        )
+        .expect("all-binary multi must load");
+        assert_eq!(pheno.trait_type, staar::TraitType::Binary);
+        assert_eq!(pheno.y.ncols(), 2);
+        assert_eq!(pheno.y.nrows(), 12);
+        for i in 0..12 {
+            assert!(pheno.y[(i, 0)] == 0.0 || pheno.y[(i, 0)] == 1.0);
+            assert!(pheno.y[(i, 1)] == 0.0 || pheno.y[(i, 1)] == 1.0);
         }
     }
 

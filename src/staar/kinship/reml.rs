@@ -51,7 +51,8 @@ use crate::staar::kinship::sparse;
 use crate::staar::kinship::sparse::takahashi::TakahashiNumeric;
 use crate::staar::kinship::sparse::SparseFactor;
 use crate::staar::kinship::types::{
-    GroupPartition, KinshipInverse, KinshipMatrix, KinshipState, VarianceComponents,
+    CovarianceIdx, GroupPartition, KinshipInverse, KinshipMatrix, KinshipState,
+    VarianceComponents,
 };
 
 /// REML convergence tolerance. Upstream `glmmkin.R:122` `tol = 1e-5`.
@@ -583,7 +584,13 @@ fn solve_dtau(ai: &Mat<f64>, score: &[f64], fixtau: &[bool]) -> Vec<f64> {
 /// Inner AI-REML iteration loop. Runs `ai_step` until the convergence
 /// criterion is met or `REML_MAX_ITER` is exhausted. Step-halving is
 /// applied per upstream `glmmkin.R:362-366` whenever the Newton step
-/// would push a free τ negative.
+/// would push a free τ negative (or, for random.slope covariance slots,
+/// outside the PSD box `τ_cov² ≤ τ_int · τ_slope`).
+///
+/// `triples` holds covariance-index triples for the random-slope path
+/// (GMMAT `glmmkin.R:175-183`). An empty slice means "no covariance
+/// slots" — the feasibility check reduces to `all τ ≥ 0` and behavior
+/// is bit-identical to the pre-random-slope loop.
 #[allow(clippy::too_many_arguments)]
 fn converge<B: SolverBuilder>(
     y: &Mat<f64>,
@@ -593,6 +600,7 @@ fn converge<B: SolverBuilder>(
     weights: &[f64],
     init_tau: VarianceComponents,
     fixtau: &[bool],
+    triples: &[CovarianceIdx],
     builder: &B,
 ) -> Result<KinshipState, CohortError> {
     let n = y.nrows();
@@ -603,6 +611,32 @@ fn converge<B: SolverBuilder>(
     debug_assert_eq!(init_tau.n_total(), n_comp);
     debug_assert_eq!(fixtau.len(), n_comp);
     let _ = n;
+
+    let mut cov_slot = vec![false; n_comp];
+    for t in triples {
+        debug_assert!(t.cov_idx < n_comp);
+        debug_assert!(t.var_int_idx < n_comp);
+        debug_assert!(t.var_slope_idx < n_comp);
+        cov_slot[t.cov_idx] = true;
+    }
+    let is_feasible = |tau: &[f64]| -> bool {
+        for (i, &t) in tau.iter().enumerate() {
+            if !cov_slot[i] && t < 0.0 {
+                return false;
+            }
+        }
+        for tri in triples {
+            let v1 = tau[tri.var_int_idx];
+            let v2 = tau[tri.var_slope_idx];
+            if v1 < 0.0 || v2 < 0.0 {
+                return false;
+            }
+            if tau[tri.cov_idx].abs() > (v1 * v2).sqrt() {
+                return false;
+            }
+        }
+        true
+    };
 
     let mut tau = init_tau;
     let mut alpha_prev = Mat::<f64>::zeros(k, 1);
@@ -616,8 +650,9 @@ fn converge<B: SolverBuilder>(
         let step_out =
             ai_step(y, x, kinships, groups, weights, &tau, fixtau, solver)?;
 
-        // Newton step + step-halving on negative τ. Matches upstream
-        // `glmmkin.R:357-367`. Free components update; fixed stay put.
+        // Newton step + step-halving on non-feasible τ. Matches upstream
+        // `glmmkin.R:357-367` (plain) and `:377-389` (covariance-constrained).
+        // Free components update; fixed stay put.
         let mut step = step_out.d_tau.clone();
         let mut try_count = 0;
         loop {
@@ -626,13 +661,19 @@ fn converge<B: SolverBuilder>(
                     tau.as_slice_mut()[i] = tau0.as_slice()[i] + step[i];
                 }
             }
-            for i in 0..n_comp {
+            // Clip non-covariance slots that are near zero on both
+            // sides of the step down to zero (matches upstream's
+            // `tau[tau < tol & tau0 < tol] <- 0`).
+            for (i, &is_cov) in cov_slot.iter().enumerate() {
+                if is_cov {
+                    continue;
+                }
                 let v = tau.as_slice()[i];
                 if v < REML_TOL && tau0.as_slice()[i] < REML_TOL {
                     tau.as_slice_mut()[i] = 0.0;
                 }
             }
-            if tau.as_slice().iter().all(|&t| t >= 0.0) {
+            if is_feasible(tau.as_slice()) {
                 break;
             }
             for s in step.iter_mut() {
@@ -645,9 +686,25 @@ fn converge<B: SolverBuilder>(
                 )));
             }
         }
-        for v in tau.as_slice_mut().iter_mut() {
-            if *v < REML_TOL {
-                *v = 0.0;
+        for (i, &is_cov) in cov_slot.iter().enumerate() {
+            if is_cov {
+                continue;
+            }
+            if tau.as_slice()[i] < REML_TOL {
+                tau.as_slice_mut()[i] = 0.0;
+            }
+        }
+        // Snap covariance slots onto the PSD edge if they've drifted up
+        // against it — avoids oscillation right at the boundary.
+        // Mirrors `glmmkin.R:388-389`.
+        for tri in triples {
+            let v1 = tau.as_slice()[tri.var_int_idx].max(0.0);
+            let v2 = tau.as_slice()[tri.var_slope_idx].max(0.0);
+            let edge = (1.0 - 1.01 * REML_TOL) * (v1 * v2).sqrt();
+            let c = tau.as_slice()[tri.cov_idx];
+            if c.abs() > edge {
+                tau.as_slice_mut()[tri.cov_idx] =
+                    if c >= 0.0 { edge } else { -edge };
             }
         }
 
@@ -730,9 +787,82 @@ pub fn run_reml<B: SolverBuilder>(
     init_tau: VarianceComponents,
     builder: &B,
 ) -> Result<KinshipState, CohortError> {
+    run_reml_constrained_inner(
+        y,
+        x,
+        kinships,
+        groups,
+        weights,
+        init_tau,
+        &[],
+        builder,
+    )
+}
+
+/// Variant of [`run_reml`] that accepts covariance-index triples for
+/// the random-slope path (`glmmkin.R:175-183`). Every τ_cov stays
+/// inside the PSD box `|τ_cov| ≤ √(τ_int · τ_slope)`.
+///
+/// This is the top-level entry point the `kinship::fit_reml_random_slope`
+/// wrapper calls. Callers that do not need the random-slope constraint
+/// should use [`run_reml`] — passing an empty triples slice here is
+/// bit-identical but more code.
+#[allow(clippy::too_many_arguments)]
+pub fn run_reml_constrained(
+    y: &Mat<f64>,
+    x: &Mat<f64>,
+    kinships: &[KinshipMatrix],
+    groups: &GroupPartition,
+    weights: &[f64],
+    init_tau: VarianceComponents,
+    triples: &[CovarianceIdx],
+    budget_bytes: u64,
+) -> Result<KinshipState, CohortError> {
+    // Random-slope currently only supports the dense backend. Sparse
+    // multi-trait fits end-to-end through `run_reml`, but the
+    // covariance-box step-halving isn't yet exercised via sparse, so
+    // the top-level wrapper routes explicitly to dense here.
+    let n = y.nrows();
+    let builder = crate::staar::kinship::dense::DenseBuilder {
+        n,
+        kinships,
+        groups,
+        weights,
+    };
+    let mut state = run_reml_constrained_inner(
+        y,
+        x,
+        kinships,
+        groups,
+        weights,
+        init_tau,
+        triples,
+        &builder,
+    )?;
+    state.budget_bytes = budget_bytes;
+    Ok(state)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_reml_constrained_inner<B: SolverBuilder>(
+    y: &Mat<f64>,
+    x: &Mat<f64>,
+    kinships: &[KinshipMatrix],
+    groups: &GroupPartition,
+    weights: &[f64],
+    init_tau: VarianceComponents,
+    triples: &[CovarianceIdx],
+    builder: &B,
+) -> Result<KinshipState, CohortError> {
     let l = kinships.len();
     let g = groups.n_groups();
     let n_comp = l + g;
+
+    let mut cov_slot = vec![false; n_comp];
+    for t in triples {
+        debug_assert!(t.cov_idx < n_comp);
+        cov_slot[t.cov_idx] = true;
+    }
 
     let mut fixtau = vec![false; n_comp];
     let mut state = converge(
@@ -743,13 +873,20 @@ pub fn run_reml<B: SolverBuilder>(
         weights,
         init_tau,
         &fixtau,
+        triples,
         builder,
     )?;
 
     for refit_iter in 0..REML_MAX_OUTER_REFITS {
         let mut changed = false;
         for (i, fixed) in fixtau.iter_mut().enumerate().take(n_comp) {
-            if !*fixed && state.tau.as_slice()[i] < BOUNDARY_FACTOR * REML_TOL {
+            if *fixed || cov_slot[i] {
+                // Never fix-at-boundary for covariance slots — they can
+                // legitimately sit near zero on the way to a larger
+                // estimate and the PSD box handles their boundary.
+                continue;
+            }
+            if state.tau.as_slice()[i] < BOUNDARY_FACTOR * REML_TOL {
                 *fixed = true;
                 changed = true;
             }
@@ -772,6 +909,7 @@ pub fn run_reml<B: SolverBuilder>(
             weights,
             tau_refit,
             &fixtau,
+            triples,
             builder,
         )?;
         state.outer_refits = refit_iter + 1;

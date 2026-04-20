@@ -20,7 +20,7 @@ use crate::output::Output;
 use crate::staar::carrier::sparse_score::{self, carriers_to_dense_compact};
 use crate::staar::carrier::AnalysisVectors;
 use crate::staar::masks::{self, MaskGroup};
-use crate::staar::multi::{self, MultiNullContinuous};
+use crate::staar::multi::{self, MultiNull};
 use crate::staar::score;
 use crate::staar::{self, GeneResult, MaskCategory, MaskType, ScoringMode};
 use crate::store::cache::score_cache::{self, ChromScoreCache, GeneKBlock};
@@ -929,7 +929,7 @@ pub fn run_multi_score_tests(
     cohort: &CohortHandle<'_>,
     manifest: &CohortManifest,
     request: &MultiScoringRequest<'_>,
-    null: &MultiNullContinuous,
+    null: &MultiNull,
     pheno_mask: &[bool],
     out: &dyn Output,
 ) -> Result<ResultSet, CohortError> {
@@ -1009,7 +1009,7 @@ fn score_chrom_genes_multi(
     view: &ChromosomeView<'_>,
     vcf_to_pheno: &[Option<u32>],
     n_pheno: usize,
-    null: &MultiNullContinuous,
+    null: &MultiNull,
     mask_predicates: &[(MaskType, MaskPredicate)],
     maf_cutoff: f64,
     chrom: Chromosome,
@@ -1129,7 +1129,7 @@ fn score_chrom_windows_multi(
     view: &ChromosomeView<'_>,
     vcf_to_pheno: &[Option<u32>],
     n_pheno: usize,
-    null: &MultiNullContinuous,
+    null: &MultiNull,
     request: &MultiScoringRequest<'_>,
     chrom: Chromosome,
     plan: &mut MaskPlan,
@@ -1210,7 +1210,7 @@ fn score_one_window_multi(
     view: &ChromosomeView<'_>,
     vcf_to_pheno: &[Option<u32>],
     n_pheno: usize,
-    null: &MultiNullContinuous,
+    null: &MultiNull,
     n_vcf: usize,
 ) -> Option<GeneResult> {
     let m = group.variant_indices.len();

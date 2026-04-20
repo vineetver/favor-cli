@@ -23,7 +23,7 @@ use crate::column::{Col, STAAR_PHRED_CHANNELS};
 use crate::error::CohortError;
 use crate::output::Output;
 use crate::store::manifest::{fsync_parent, tmp_path, write_atomic};
-use super::multi::MultiNullContinuous;
+use super::multi::MultiNull;
 use super::{GeneResult, MaskType, TraitType};
 
 /// Null-model summary fields embedded in `staar.meta.json`. Single-trait
@@ -32,7 +32,7 @@ use super::{GeneResult, MaskType, TraitType};
 /// since there is no single `σ²` scalar in that parametrisation.
 pub enum NullMeta<'a> {
     Single { sigma2: f64 },
-    Multi(&'a MultiNullContinuous),
+    Multi(&'a MultiNull),
 }
 
 impl<'a> NullMeta<'a> {

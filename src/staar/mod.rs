@@ -12,6 +12,7 @@ pub mod masks;
 pub mod meta;
 pub mod model;
 pub mod multi;
+pub mod multi_kinship;
 pub mod output;
 pub mod pipeline;
 pub mod run_manifest;
@@ -37,10 +38,13 @@ pub enum RunMode {
     Analyze,
     /// Stop after the null model and dump per-variant U/K for MetaSTAAR.
     EmitSumstats,
-    /// Joint multi-trait STAAR for unrelated continuous traits with shared
-    /// covariates. Activated when `--trait-name` carries more than one name.
-    /// Rejects `--spa`, `--ancestry-col`, `--kinship`, and `--emit-sumstats`
-    /// at config build time; kinship-aware joint nulls are a separate track.
+    /// Joint multi-trait STAAR for unrelated traits with shared
+    /// covariates. Gaussian uses the MultiSTAAR Kronecker null; binomial
+    /// uses the lift of single-trait logistic + MultiSTAAR Kronecker
+    /// (`MultiNull::fit_binary`). Activated when `--trait-name` carries
+    /// more than one name. Rejects `--spa`, `--ancestry-col`, `--kinship`,
+    /// and `--emit-sumstats` at config build time; kinship-aware joint
+    /// nulls are a separate track.
     MultiTrait,
 }
 

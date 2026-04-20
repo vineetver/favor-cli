@@ -54,10 +54,11 @@ pub mod types;
 pub use budget::{check_memory_budget, dense_path_fits};
 #[cfg(test)]
 pub use budget::DEFAULT_KINSHIP_MEM_BYTES;
-pub use load::{load_groups, load_kinship};
+pub use load::{load_groups, load_kinship, load_random_slope};
 pub use pql::fit_pql_glmm;
 pub use types::{
-    GroupPartition, KinshipInverse, KinshipMatrix, KinshipState, VarianceComponents,
+    CovarianceIdx, GroupPartition, KinshipInverse, KinshipMatrix, KinshipState,
+    VarianceComponents,
 };
 
 use faer::Mat;
@@ -190,6 +191,210 @@ pub fn fit_reml(
 
     check_memory_budget(n, budget_bytes)?;
     dense::fit_reml_dense(y, x, kinships, groups, &w_vec, init_tau, budget_bytes)
+}
+
+/// Expand an input kinship list for random-slope longitudinal LMM.
+///
+/// Ports `GMMAT::glmmkin.R:174-183`. For each input `Φ_l` and a
+/// per-sample time vector `t`, emit three entries:
+///
+/// * intercept variance `Φ_l` — left in place (same matrix as input).
+/// * intercept-slope covariance `Φ_l · diag(t) + diag(t) · Φ_l`.
+/// * slope variance `Φ_l .* (t · tᵀ)` — element-wise product of `Φ_l`
+///   with the outer product of `t` with itself.
+///
+/// Output order is `[int_1..int_L, cov_1..cov_L, slope_1..slope_L]`, so
+/// a caller building the `VarianceComponents` layout gets the natural
+/// (kinship-major, purpose-minor) ordering. This matches GMMAT's
+/// `kins`/`kins[[q+i]]`/`kins[[2*q+i]]` indexing at upstream
+/// `glmmkin.R:176-178`.
+///
+/// Both input variants (Dense / Sparse) are handled; output is always
+/// a dense matrix since the column-scaled Kronecker structure destroys
+/// the input sparsity pattern (the scaled matrix has `2·nnz(Φ)` non-
+/// zeros at most, but the structure changes per entry).
+pub fn expand_for_random_slope(
+    kinships: &[KinshipMatrix],
+    time_var: &[f64],
+) -> Result<Vec<KinshipMatrix>, CohortError> {
+    let l = kinships.len();
+    if l == 0 {
+        return Err(CohortError::Input(
+            "random.slope requires at least one kinship matrix — GMMAT `glmmkin.R:64` \
+             drops the argument when kinship is NULL and samples are unrelated"
+                .into(),
+        ));
+    }
+    let n = time_var.len();
+    for k in kinships {
+        if k.n() != n {
+            return Err(CohortError::Input(format!(
+                "random.slope time vector has length {} but kinship '{}' has n={}",
+                n,
+                k.label(),
+                k.n(),
+            )));
+        }
+    }
+
+    let to_dense = |k: &KinshipMatrix| -> Mat<f64> {
+        match k {
+            KinshipMatrix::Dense { matrix, .. } => matrix.clone(),
+            KinshipMatrix::Sparse { matrix, .. } => {
+                let mut d = Mat::<f64>::zeros(n, n);
+                let cp = matrix.symbolic().col_ptr();
+                let ri = matrix.symbolic().row_idx();
+                let val = matrix.val();
+                for c in 0..n {
+                    let s = cp[c] as usize;
+                    let e = cp[c + 1] as usize;
+                    for kk in s..e {
+                        let r = ri[kk] as usize;
+                        d[(r, c)] = val[kk];
+                    }
+                }
+                d
+            }
+        }
+    };
+
+    let mut intercepts = Vec::with_capacity(l);
+    let mut covariances = Vec::with_capacity(l);
+    let mut slopes = Vec::with_capacity(l);
+
+    for (li, kin) in kinships.iter().enumerate() {
+        let k_dense = to_dense(kin);
+        let label = kin.label().to_string();
+        intercepts.push(KinshipMatrix::Dense {
+            matrix: k_dense.clone(),
+            label: format!("{label}_int_{li}"),
+        });
+
+        // cov = Φ · diag(t) + diag(t) · Φ
+        //      (i, j)  = Φ[i, j] · (t_i + t_j)
+        let mut cov = Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            for j in 0..n {
+                cov[(i, j)] = k_dense[(i, j)] * (time_var[i] + time_var[j]);
+            }
+        }
+        covariances.push(KinshipMatrix::Dense {
+            matrix: cov,
+            label: format!("{label}_cov_{li}"),
+        });
+
+        // slope = Φ .* (t · tᵀ)
+        //        (i, j) = Φ[i, j] · t_i · t_j
+        let mut slope = Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            for j in 0..n {
+                slope[(i, j)] = k_dense[(i, j)] * time_var[i] * time_var[j];
+            }
+        }
+        slopes.push(KinshipMatrix::Dense {
+            matrix: slope,
+            label: format!("{label}_slope_{li}"),
+        });
+    }
+
+    let mut out = Vec::with_capacity(3 * l);
+    out.extend(intercepts);
+    out.extend(covariances);
+    out.extend(slopes);
+    Ok(out)
+}
+
+/// Fit AI-REML with random slopes on the time variable. See
+/// [`expand_for_random_slope`] for the variance-component structure.
+///
+/// Input layout (caller-supplied):
+/// * `kinships` — `L` original kinship matrices `Φ_1..Φ_L`.
+/// * `groups` — residual group partition (pass `GroupPartition::single`
+///   if no per-group heteroscedasticity is wanted).
+/// * `time_var` — per-sample time values. GMMAT's semantic is "time
+///   since baseline at the measurement"; any numeric column works.
+///
+/// Output layout (on the returned `KinshipState.tau`):
+/// * indices `0..L` — `τ` for the intercept variance of each input `Φ`.
+/// * indices `L..2L` — `τ` for the intercept-slope covariance of each `Φ`.
+/// * indices `2L..3L` — `τ` for the slope variance of each `Φ`.
+/// * indices `3L..3L+G` — per-group residual variances (standard groups).
+///
+/// The heritability field `state.h2` holds per-input-`Φ` *intercept*
+/// heritability (`τ[int_l] / Σ τ`) — it is not meaningful for the cov
+/// or slope components, which are not standalone variance fractions.
+/// Cross-check: at `time_var = 0`, this function reduces to `fit_reml`
+/// with the input kinship list (the cov and slope entries collapse to
+/// zero matrices and AI-REML pins their `τ` at zero via boundary refit).
+pub fn fit_reml_random_slope(
+    y: &Mat<f64>,
+    x: &Mat<f64>,
+    kinships: &[KinshipMatrix],
+    groups: &GroupPartition,
+    time_var: &[f64],
+    budget_bytes: u64,
+) -> Result<KinshipState, CohortError> {
+    if kinships.is_empty() {
+        return Err(CohortError::Input(
+            "random.slope requires at least one kinship matrix".into(),
+        ));
+    }
+    let n = y.nrows();
+    if time_var.len() != n {
+        return Err(CohortError::Input(format!(
+            "random.slope time vector length {} does not match phenotype n={n}",
+            time_var.len(),
+        )));
+    }
+    if groups.n_samples() != n {
+        return Err(CohortError::Input(format!(
+            "group partition covers {} samples but y has {n} rows",
+            groups.n_samples()
+        )));
+    }
+
+    let expanded = expand_for_random_slope(kinships, time_var)?;
+    let l = kinships.len();
+    let g = groups.n_groups();
+    let triples: Vec<CovarianceIdx> = (0..l)
+        .map(|li| CovarianceIdx {
+            cov_idx: l + li,
+            var_int_idx: li,
+            var_slope_idx: 2 * l + li,
+        })
+        .collect();
+
+    // Warm start: variance entries at var(Y)/(3L+G), covariance entries
+    // at 0 (per `glmmkin.R:446-447` which sets diagonal of the
+    // Kronecker-flattened (k×k) to var/q and off-diagonal to 0).
+    let y_mean: f64 = (0..n).map(|i| y[(i, 0)]).sum::<f64>() / n as f64;
+    let y_var: f64 = (0..n).map(|i| (y[(i, 0)] - y_mean).powi(2)).sum::<f64>()
+        / (n as f64 - 1.0).max(1.0);
+    let n_comp = 3 * l + g;
+    let warm = (y_var / n_comp as f64).max(1e-6);
+    let mut init_tau = VarianceComponents::zeros(3 * l, g);
+    for (li, kin) in kinships.iter().enumerate() {
+        let mean_diag = kin.mean_diagonal().max(1e-6);
+        init_tau.set_kinship(li, warm / mean_diag); // intercept
+        init_tau.set_kinship(l + li, 0.0); // covariance
+        init_tau.set_kinship(2 * l + li, warm / mean_diag); // slope
+    }
+    for gi in 0..g {
+        init_tau.set_group(gi, warm);
+    }
+
+    let weights = vec![1.0; n];
+    let state = reml::run_reml_constrained(
+        y,
+        x,
+        &expanded,
+        groups,
+        &weights,
+        init_tau,
+        &triples,
+        budget_bytes,
+    )?;
+    Ok(state)
 }
 
 #[cfg(test)]
@@ -330,6 +535,138 @@ mod tests {
             Err(other) => panic!("expected Input, got {other:?}"),
             Ok(_) => panic!("expected Input error, got Ok"),
         }
+    }
+
+    #[test]
+    fn expand_for_random_slope_shapes_and_symmetries() {
+        let n = 4;
+        let kin = {
+            let mut m = Mat::<f64>::zeros(n, n);
+            for i in 0..n {
+                m[(i, i)] = 1.0;
+            }
+            m[(0, 1)] = 0.5;
+            m[(1, 0)] = 0.5;
+            KinshipMatrix::Dense {
+                matrix: m,
+                label: "k".into(),
+            }
+        };
+        let t = vec![1.0, 2.0, 3.0, 4.0];
+        let expanded = expand_for_random_slope(std::slice::from_ref(&kin), &t).unwrap();
+        // 3L = 3 entries (intercept, cov, slope) for one input kinship.
+        assert_eq!(expanded.len(), 3);
+
+        // Intercept is the input kinship untouched.
+        let int_mat = expanded[0].as_dense().unwrap();
+        assert!((int_mat[(0, 0)] - 1.0).abs() < 1e-12);
+        assert!((int_mat[(0, 1)] - 0.5).abs() < 1e-12);
+
+        // Covariance at (0,1) is K[0,1] · (t_0 + t_1) = 0.5 · 3 = 1.5.
+        let cov_mat = expanded[1].as_dense().unwrap();
+        assert!((cov_mat[(0, 1)] - 1.5).abs() < 1e-12);
+        // Symmetric: cov[1,0] = cov[0,1].
+        assert!((cov_mat[(1, 0)] - 1.5).abs() < 1e-12);
+
+        // Slope at (0,1) is K[0,1] · t_0 · t_1 = 0.5 · 2 = 1.0.
+        let slope_mat = expanded[2].as_dense().unwrap();
+        assert!((slope_mat[(0, 1)] - 1.0).abs() < 1e-12);
+        // Diagonal slope[i,i] = K[i,i] · t_i² = 1 · t_i².
+        for i in 0..n {
+            assert!((slope_mat[(i, i)] - t[i].powi(2)).abs() < 1e-12);
+        }
+    }
+
+    /// Random-slope convergence smoke: repeated-measures data with a
+    /// within-subject time trend should fit to convergence and return
+    /// a PSD random-effects matrix. No upstream fixture yet — this is
+    /// a feasibility + structural check, not a numerical parity check.
+    #[test]
+    fn fit_reml_random_slope_converges_on_longitudinal_data() {
+        // 10 subjects × 3 repeated measurements each = n=30.
+        let n_subj = 10;
+        let reps = 3;
+        let n = n_subj * reps;
+        // Subject-level kinship: identity at the row level is the
+        // "repeated-measures" kinship that GMMAT adds when duplicated
+        // ids are detected (see `glmmkin.R:55-62`). For our smoke test
+        // we use a block-diagonal kinship where within-subject blocks
+        // are 1 and between-subject off-diagonal is 0 — i.e., repeated
+        // measurements share the same random intercept.
+        let mut k = Mat::<f64>::zeros(n, n);
+        for s in 0..n_subj {
+            for r1 in 0..reps {
+                for r2 in 0..reps {
+                    k[(s * reps + r1, s * reps + r2)] = 1.0;
+                }
+            }
+        }
+        let kin = KinshipMatrix::Dense {
+            matrix: k,
+            label: "subject".into(),
+        };
+
+        // Time values cycle 0, 1, 2 per subject.
+        let time_var: Vec<f64> = (0..n).map(|i| (i % reps) as f64).collect();
+
+        // Deterministic phenotype with per-subject random intercept and
+        // slope plus residual noise.
+        let mut state: u64 = 9999;
+        let mut u01 = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut subj_int = vec![0.0; n_subj];
+        let mut subj_slope = vec![0.0; n_subj];
+        for s in 0..n_subj {
+            subj_int[s] = 2.0 * u01() - 1.0;
+            subj_slope[s] = (2.0 * u01() - 1.0) * 0.3;
+        }
+        let mut y = Mat::<f64>::zeros(n, 1);
+        let mut x = Mat::<f64>::zeros(n, 1);
+        for i in 0..n {
+            let s = i / reps;
+            let t = time_var[i];
+            let noise = (2.0 * u01() - 1.0) * 0.5;
+            y[(i, 0)] = 1.0 + subj_int[s] + subj_slope[s] * t + noise;
+            x[(i, 0)] = 1.0;
+        }
+
+        let groups = GroupPartition::single(n);
+        let state = fit_reml_random_slope(
+            &y,
+            &x,
+            std::slice::from_ref(&kin),
+            &groups,
+            &time_var,
+            1 << 30,
+        )
+        .expect("random.slope should converge on this longitudinal fixture");
+
+        // τ layout: [var_int, var_cov, var_slope, var_group].
+        assert_eq!(state.tau.n_total(), 4);
+        let var_int = state.tau.as_slice()[0];
+        let var_cov = state.tau.as_slice()[1];
+        let var_slope = state.tau.as_slice()[2];
+        let var_res = state.tau.as_slice()[3];
+
+        assert!(var_int.is_finite() && var_int >= 0.0, "var_int: {var_int}");
+        assert!(
+            var_slope.is_finite() && var_slope >= 0.0,
+            "var_slope: {var_slope}",
+        );
+        assert!(var_res.is_finite() && var_res >= 0.0, "var_res: {var_res}");
+        assert!(var_cov.is_finite(), "var_cov: {var_cov}");
+        // PSD invariant: |cov| ≤ √(var_int · var_slope).
+        let psd_limit = (var_int * var_slope).sqrt();
+        assert!(
+            var_cov.abs() <= psd_limit * (1.0 + 1e-6),
+            "PSD violated: |cov|={} > √(var_int · var_slope)={}",
+            var_cov.abs(),
+            psd_limit,
+        );
     }
 
     #[test]

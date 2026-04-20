@@ -37,6 +37,7 @@ pub struct StaarArgs {
     pub scang_step: usize,
     pub kinship: Vec<PathBuf>,
     pub kinship_groups: Option<String>,
+    pub random_slope: Option<String>,
     pub known_loci: Option<PathBuf>,
     pub null_model: Option<PathBuf>,
     pub emit_sumstats: bool,
@@ -78,11 +79,12 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
         ));
     }
 
-    // Multi-trait dispatch. Joint MultiSTAAR covers unrelated continuous
-    // traits with a shared covariate matrix; everything else (kinship-aware
-    // joint null, SPA for binary, AI-STAAR ancestry weighting, sumstats
-    // dump) is a separate track. Reject the combinations at config-build
-    // time so the pipeline never sees an invalid state.
+    // Multi-trait dispatch. Joint MultiSTAAR covers unrelated traits
+    // (gaussian or binomial) with a shared covariate matrix; kinship-aware
+    // joint null, single-trait SPA calibration, AI-STAAR ancestry
+    // weighting, and MetaSTAAR sumstats stay on their own tracks for now.
+    // Reject the combinations at config-build time so the pipeline never
+    // sees an invalid state.
     let multi_trait = args.trait_names.len() > 1;
     if multi_trait {
         let n_traits = args.trait_names.len();
@@ -95,7 +97,9 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
         if args.spa {
             return Err(reject(
                 "--spa",
-                "SPA applies to binary traits; joint MultiSTAAR is unrelated continuous only",
+                "SPA is a single-trait tail-calibration path; joint MultiSTAAR \
+                 routes every per-variant common test through the joint χ²(k) \
+                 kernel instead",
             ));
         }
         if blank_to_none(args.ancestry_col.clone()).is_some() {
@@ -104,23 +108,45 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
                 "AI-STAAR ancestry weighting has not been composed with the joint multi-trait kernel",
             ));
         }
-        if !args.kinship.is_empty() {
-            return Err(reject(
-                "--kinship",
-                "kinship-aware joint null (fit_null_glmmkin_multi) is not yet implemented; \
-                 the current path assumes unrelated samples",
-            ));
-        }
-        if blank_to_none(args.kinship_groups.clone()).is_some() {
-            return Err(reject(
-                "--kinship-groups",
-                "kinship-aware joint null is not yet implemented",
-            ));
-        }
+        // Multi-trait kinship + `--kinship-groups` are supported via
+        // `MultiNull::fit_with_kinship` (port of GMMAT's
+        // `fit_null_glmmkin_multi`, dense-backend first cut). The
+        // `--ancestry-col` reject above already covers the AI-STAAR
+        // combination which has not been composed with the kinship
+        // kernel yet.
         if args.emit_sumstats {
             return Err(reject(
                 "--emit-sumstats",
                 "MetaSTAAR sumstats are single-trait; run each trait separately to dump U/K",
+            ));
+        }
+        if blank_to_none(args.random_slope.clone()).is_some() {
+            return Err(reject(
+                "--random-slope",
+                "GMMAT `glmmkin.R:50` rejects multi-pheno + duplicated ids; the joint \
+                 multi-trait null does not compose with random slopes",
+            ));
+        }
+    }
+
+    // `--random-slope` requires kinship and gaussian family (single-trait
+    // binary runs through PQL which doesn't implement the random-slope
+    // expansion; GMMAT `glmmkin.R:30` enforces `method.optim == "AI"` for
+    // random.slope which is what our `fit_reml_random_slope` uses).
+    if blank_to_none(args.random_slope.clone()).is_some() {
+        if args.kinship.is_empty() {
+            return Err(CohortError::Input(
+                "--random-slope requires at least one --kinship matrix. GMMAT \
+                 `glmmkin.R:64` warns and drops random.slope when samples are unrelated \
+                 and there is no kinship."
+                    .into(),
+            ));
+        }
+        if args.spa {
+            return Err(CohortError::Input(
+                "--random-slope is gaussian-only. --spa applies to binary traits and is \
+                 not compatible with the random-slope LMM."
+                    .into(),
             ));
         }
     }
@@ -232,6 +258,7 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
         },
         kinship: args.kinship,
         kinship_groups: blank_to_none(args.kinship_groups),
+        random_slope: blank_to_none(args.random_slope),
         known_loci: args.known_loci,
         null_model_path: args.null_model,
         run_mode: if multi_trait {
@@ -563,6 +590,7 @@ mod tests {
             scang_step: 10,
             kinship: Vec::new(),
             kinship_groups: None,
+            random_slope: None,
             known_loci: None,
             null_model: None,
             emit_sumstats: false,
@@ -619,22 +647,6 @@ mod tests {
         let mut args = multi_trait_args(pheno.path().to_path_buf(), &["BMI", "HEIGHT"]);
         args.ancestry_col = Some("super_population".into());
         assert_input_error_mentions(build_config(args), "--ancestry-col");
-    }
-
-    #[test]
-    fn multi_trait_rejects_kinship() {
-        let pheno = pheno_file();
-        let mut args = multi_trait_args(pheno.path().to_path_buf(), &["BMI", "HEIGHT"]);
-        args.kinship = vec![PathBuf::from("/no/such/kin.tsv")];
-        assert_input_error_mentions(build_config(args), "--kinship");
-    }
-
-    #[test]
-    fn multi_trait_rejects_kinship_groups() {
-        let pheno = pheno_file();
-        let mut args = multi_trait_args(pheno.path().to_path_buf(), &["BMI", "HEIGHT"]);
-        args.kinship_groups = Some("ancestry".into());
-        assert_input_error_mentions(build_config(args), "--kinship-groups");
     }
 
     #[test]

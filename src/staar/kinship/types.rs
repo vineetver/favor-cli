@@ -223,6 +223,17 @@ impl GroupPartition {
         }
     }
 
+    /// No per-group residual variance. Used by the multi-trait kinship path
+    /// (GMMAT `glmmkin.R:424-536::glmmkin.multi.ai`) where every variance
+    /// component lives in the expanded kinship list as `E_jk ⊗ V` blocks
+    /// and the residual term is itself one of those kinship entries.
+    pub fn empty(n: usize) -> Self {
+        Self {
+            groups: Vec::new(),
+            n,
+        }
+    }
+
     /// Build from a per-sample group-index assignment plus the group label
     /// table. Errors on out-of-range indices, empty groups, or zero samples.
     /// Labels are consumed for validation messages but not retained.
@@ -273,6 +284,19 @@ impl GroupPartition {
     pub fn group(&self, g: usize) -> &[u32] {
         &self.groups[g]
     }
+}
+
+/// PSD-box constraint for random-slope longitudinal LMM. Ports
+/// `covariance.idx` from `GMMAT/R/glmmkin.R:175-183`. Indices are into
+/// the flat `τ` layout used by `fit_reml_random_slope`
+/// (kinship slots 0..3L, group slots 3L..3L+G). The covariance-slope
+/// matrix `D = [[τ_int, τ_cov], [τ_cov, τ_slope]]` is PSD iff
+/// `τ_cov² ≤ τ_int · τ_slope`.
+#[derive(Clone, Copy, Debug)]
+pub struct CovarianceIdx {
+    pub cov_idx: usize,
+    pub var_int_idx: usize,
+    pub var_slope_idx: usize,
 }
 
 /// Variance components for AI-REML, laid out `[τ_kinship_1..τ_kinship_L,

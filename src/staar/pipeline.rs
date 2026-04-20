@@ -13,7 +13,7 @@ use crate::runtime::Engine;
 use crate::staar::carrier::AnalysisVectors;
 use crate::staar::masks::ScangParams;
 use crate::staar::model::{augment_covariates, load_known_loci, load_phenotype, NullModel};
-use crate::staar::multi::MultiNullContinuous;
+use crate::staar::multi::MultiNull;
 use crate::staar::output::{write_individual_results, write_results, NullMeta};
 use crate::staar::run_manifest::{
     self, ArtifactKind, CacheDecision, CacheOutcome, ConfigHashInputs, ResumeDecision,
@@ -54,6 +54,11 @@ pub struct StaarConfig {
     pub scang_params: ScangParams,
     pub kinship: Vec<PathBuf>,
     pub kinship_groups: Option<String>,
+    /// Per-sample time values column for the longitudinal random-slope
+    /// LMM. `Some(col)` selects
+    /// [`crate::staar::kinship::fit_reml_random_slope`] instead of the
+    /// plain `fit_reml`; `None` leaves the fit on the standard path.
+    pub random_slope: Option<String>,
     pub known_loci: Option<PathBuf>,
     pub null_model_path: Option<PathBuf>,
     pub run_mode: RunMode,
@@ -371,12 +376,12 @@ impl<'a> StaarPipeline<'a> {
         store: &GenoStoreResult,
         pheno: &PhenoStageOut,
     ) -> Result<(), CohortError> {
-        // Multi-trait joint STAAR is unrelated continuous only; the
-        // binary reject fires inside `load_phenotype` via the trait-type
-        // detection, so by the time we reach this method `pheno.y` is an
-        // `(n, k)` continuous matrix with `k >= 2`. Fit the joint null
-        // directly from the multi module.
-        let null = self.stage(Stage::FitNullModel, |p| p.stage_fit_multi_null(pheno))?;
+        // `load_phenotype` enforces a uniform family across all k traits;
+        // `stage_fit_multi_null` dispatches to gaussian vs binomial and
+        // further to the kinship-aware null (GMMAT `fit_null_glmmkin_multi`
+        // port) when `--kinship` is set.
+        let null =
+            self.stage(Stage::FitNullModel, |p| p.stage_fit_multi_null(pheno, store))?;
 
         let scoring = self.stage(Stage::RunScoring, |p| {
             p.stage_run_multi_scoring(store, &null, pheno)
@@ -387,7 +392,14 @@ impl<'a> StaarPipeline<'a> {
         let n_rare = variants.len() as i64;
 
         self.stage(Stage::WriteResults, |p| {
-            p.stage_write_multi_results(&scoring, &variants, &null, pheno.n, n_rare)
+            p.stage_write_multi_results(
+                &scoring,
+                &variants,
+                &null,
+                pheno.trait_type,
+                pheno.n,
+                n_rare,
+            )
         })?;
         self.manifest.outputs.results_dir = Some(self.config.results_dir());
         self.manifest.write(&self.config.output_dir)?;
@@ -742,11 +754,33 @@ impl<'a> StaarPipeline<'a> {
         };
 
         let budget = self.engine.resources().kinship_budget_bytes;
-        let state = match kind {
-            NullModelKind::KinshipReml => {
+        let state = match (kind, self.config.random_slope.as_deref()) {
+            (NullModelKind::KinshipReml, Some(rs_col)) => {
+                // Random-slope longitudinal LMM. `load_random_slope` emits
+                // time values in pheno-compacted order (same alignment
+                // `load_phenotype` uses for `y` / `x`).
+                let time_var = staar::kinship::load_random_slope(
+                    self.engine.df(),
+                    &self.config.phenotype,
+                    rs_col,
+                    &store.geno,
+                    &pheno.pheno_mask,
+                    &self.config.column_map,
+                    self.out,
+                )?;
+                staar::kinship::fit_reml_random_slope(
+                    &pheno.y,
+                    &pheno.x,
+                    &kinships,
+                    &groups,
+                    &time_var,
+                    budget,
+                )?
+            }
+            (NullModelKind::KinshipReml, None) => {
                 staar::kinship::fit_reml(&pheno.y, &pheno.x, &kinships, &groups, None, budget)?
             }
-            NullModelKind::KinshipPql => staar::kinship::fit_pql_glmm(
+            (NullModelKind::KinshipPql, _) => staar::kinship::fit_pql_glmm(
                 &pheno.y, &pheno.x, &kinships, &groups, self.out, budget,
             )?,
             _ => unreachable!("fit_kinship_null_model called with non-kinship kind"),
@@ -774,19 +808,68 @@ impl<'a> StaarPipeline<'a> {
         })
     }
 
-    /// Fit the joint multi-trait null model. Unrelated continuous only;
-    /// the binary and kinship combinations are rejected at config build
-    /// time, and the binary-first-trait reject fires inside
-    /// `load_phenotype` before this stage ever runs.
+    /// Fit the joint multi-trait null model. Family dispatch (gaussian
+    /// vs binomial) reads `pheno.trait_type`, which `load_phenotype`
+    /// enforces to be uniform across all traits in a multi-trait run.
+    /// When `--kinship` is set, the continuous path routes to
+    /// `MultiNull::fit_with_kinship` (port of GMMAT's
+    /// `fit_null_glmmkin_multi`). Binary + kinship in multi-trait is
+    /// not yet supported — the binary IRLS lift does not compose with
+    /// the Kronecker-expanded kinship list.
     fn stage_fit_multi_null(
         &mut self,
         pheno: &PhenoStageOut,
-    ) -> Result<MultiNullContinuous, CohortError> {
-        self.out.status("Fitting joint multi-trait null model...");
-        let null = MultiNullContinuous::fit(&pheno.y, &pheno.x);
+        store: &GenoStoreResult,
+    ) -> Result<MultiNull, CohortError> {
+        let has_kinship = !self.config.kinship.is_empty();
+        let null = match (pheno.trait_type, has_kinship) {
+            (TraitType::Continuous, false) => {
+                self.out.status("Fitting joint multi-trait null model (gaussian)...");
+                MultiNull::fit(&pheno.y, &pheno.x)
+            }
+            (TraitType::Binary, false) => {
+                self.out.status("Fitting joint multi-trait null model (binomial)...");
+                MultiNull::fit_binary(&pheno.y, &pheno.x, 25)
+            }
+            (TraitType::Continuous, true) => {
+                self.out.status("Fitting joint multi-trait null model (gaussian + kinship)...");
+                let kinships = staar::kinship::load_kinship(
+                    &self.config.kinship,
+                    &pheno.compact_samples,
+                    self.out,
+                )?;
+                let groups = match self.config.kinship_groups.as_deref() {
+                    Some(col) => staar::kinship::load_groups(
+                        self.engine.df(),
+                        &self.config.phenotype,
+                        col,
+                        &store.geno,
+                        &pheno.pheno_mask,
+                        &self.config.column_map,
+                        self.out,
+                    )?,
+                    None => staar::kinship::GroupPartition::single(pheno.n),
+                };
+                MultiNull::fit_with_kinship(&pheno.y, &pheno.x, &kinships, &groups)?
+            }
+            (TraitType::Binary, true) => {
+                return Err(CohortError::Input(
+                    "Multi-trait binary + kinship is not supported yet. Run each binary trait \
+                     separately on the single-trait PQL-GLMM path, or drop --kinship for joint \
+                     binary multi-trait."
+                        .into(),
+                ));
+            }
+        };
         self.out.status(&format!(
-            "  k = {} traits, n = {} samples, Σ_res fitted",
-            null.n_pheno, null.n_samples,
+            "  k = {} traits, n = {} samples{}",
+            null.n_pheno,
+            null.n_samples,
+            if null.kinship.is_some() {
+                ", kinship-aware null fitted"
+            } else {
+                ", Σ_res fitted"
+            },
         ));
         Ok(null)
     }
@@ -794,7 +877,7 @@ impl<'a> StaarPipeline<'a> {
     fn stage_run_multi_scoring(
         &mut self,
         store: &GenoStoreResult,
-        null: &MultiNullContinuous,
+        null: &MultiNull,
         pheno: &PhenoStageOut,
     ) -> Result<ScoringOutput, CohortError> {
         let request = MultiScoringRequest {
@@ -821,7 +904,8 @@ impl<'a> StaarPipeline<'a> {
         &mut self,
         scoring: &ScoringOutput,
         _variants: &[AnnotatedVariant],
-        null: &MultiNullContinuous,
+        null: &MultiNull,
+        trait_type: TraitType,
         n: usize,
         n_rare: i64,
     ) -> Result<(), CohortError> {
@@ -843,7 +927,7 @@ impl<'a> StaarPipeline<'a> {
             self.config.maf_cutoff,
             &results_dir,
             NullMeta::Multi(null),
-            TraitType::Continuous,
+            trait_type,
             n,
             n_rare,
             self.config.known_loci.is_some(),
@@ -1127,6 +1211,7 @@ mod tests {
             },
             kinship: Vec::new(),
             kinship_groups: None,
+            random_slope: None,
             known_loci: None,
             null_model_path: None,
             run_mode: RunMode::Analyze,

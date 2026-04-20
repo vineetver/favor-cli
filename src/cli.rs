@@ -275,6 +275,14 @@ pub enum Command {
         #[arg(long)]
         kinship_groups: Option<String>,
 
+        /// Phenotype column carrying per-sample time values for the
+        /// longitudinal random-slope LMM (GMMAT `glmmkin.R:174-183`).
+        /// Each input --kinship matrix expands into three variance
+        /// components (intercept, intercept-slope covariance, slope).
+        /// Requires --kinship; gaussian family only; single-trait only.
+        #[arg(long)]
+        random_slope: Option<String>,
+
         /// Known loci file for conditional analysis (one chr:pos:ref:alt per line)
         #[arg(long)]
         known_loci: Option<PathBuf>,

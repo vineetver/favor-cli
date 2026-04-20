@@ -244,6 +244,76 @@ pub fn load_groups(
     Ok(partition)
 }
 
+/// Load the per-sample time vector for the random-slope LMM. Ports the
+/// `time.var <- data[idx, random.slope]` extraction at upstream
+/// `GMMAT/R/glmmkin.R:113`. Rows are returned in the same compacted
+/// order `load_phenotype` produces (i.e., filtered by `pheno_mask` and
+/// aligned with `geno.sample_names`), so `time_var[i]` aligns with the
+/// i-th row of `y` / `x`.
+pub fn load_random_slope(
+    engine: &DfEngine,
+    phenotype: &Path,
+    time_col: &str,
+    geno: &GenotypeResult,
+    pheno_mask: &[bool],
+    column_map: &HashMap<String, String>,
+    out: &dyn Output,
+) -> Result<Vec<f64>, CohortError> {
+    engine.register_csv("_pheno_rs", phenotype, b'\t')?;
+    let cols = engine.table_columns("_pheno_rs")?;
+
+    let resolved =
+        crate::staar::model::resolve_column(time_col, &cols, column_map, "RandomSlope")?;
+    let id_col = crate::staar::model::resolve_id_column(&cols, column_map);
+    let sample_list = geno
+        .sample_names
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let sql = format!(
+        "SELECT \"{id_col}\", CAST(\"{resolved}\" AS DOUBLE) \
+         FROM _pheno_rs \
+         WHERE \"{id_col}\" IN ({sample_list}) AND \"{resolved}\" IS NOT NULL"
+    );
+    let batches = engine.collect(&sql)?;
+
+    let mut id_to_value: HashMap<String, f64> = HashMap::new();
+    for batch in &batches {
+        for row in 0..batch.num_rows() {
+            let id = crate::staar::model::arrow_str(batch.column(0).as_ref(), row);
+            let v = crate::staar::model::arrow_f64(batch.column(1).as_ref(), row);
+            if !v.is_finite() {
+                return Err(CohortError::Input(format!(
+                    "random.slope column '{resolved}' has non-finite value for sample '{id}'"
+                )));
+            }
+            id_to_value.insert(id, v);
+        }
+    }
+
+    let mut out_vec: Vec<f64> = Vec::new();
+    for (vcf_idx, name) in geno.sample_names.iter().enumerate() {
+        if !pheno_mask[vcf_idx] {
+            continue;
+        }
+        let v = *id_to_value.get(name).ok_or_else(|| {
+            CohortError::Input(format!(
+                "Sample '{name}' has no value in random.slope column '{resolved}'"
+            ))
+        })?;
+        out_vec.push(v);
+    }
+    out.status(&format!(
+        "  Random-slope time values: n = {}, range = [{}, {}]",
+        out_vec.len(),
+        out_vec.iter().cloned().fold(f64::INFINITY, f64::min),
+        out_vec.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+    ));
+    Ok(out_vec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
