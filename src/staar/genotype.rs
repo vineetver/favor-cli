@@ -198,8 +198,20 @@ impl GenotypeWriter {
         let mut ac: f64 = 0.0;
         let mut an: f64 = 0.0;
 
-        if !samples_str.is_empty() && samples_str != "." {
-            let bytes = samples_str.as_bytes();
+        // noodles exposes `Samples` as everything after INFO, which in VCF
+        // includes the FORMAT column (e.g. "GT" or "GT:AD:DP"). Skip past
+        // the first tab so the memchr loop sees only per-sample fields.
+        let body = if samples_str.is_empty() || samples_str == "." {
+            ""
+        } else {
+            match memchr::memchr(b'\t', samples_str.as_bytes()) {
+                Some(tab) => &samples_str[tab + 1..],
+                None => "",
+            }
+        };
+
+        if !body.is_empty() {
+            let bytes = body.as_bytes();
             let n = self.n_samples;
             let mut sample_idx: usize = 0;
             let mut start: usize = 0;
@@ -608,8 +620,7 @@ mod tests {
         let out = SilentOutput;
         let caught = panic::catch_unwind(AssertUnwindSafe(|| {
             let mut gw = GenotypeWriter::new(2, tmp.path(), 64 << 20).unwrap();
-            // One biallelic SNV, two samples. GT field = "0/0\t0/1".
-            gw.push("22", 15_000_000, "A", "G", "0/0\t0/1", 1, &out).unwrap();
+            gw.push("22", 15_000_000, "A", "G", "GT\t0/0\t0/1", 1, &out).unwrap();
             panic!("simulated worker panic before flush_all");
         }));
         assert!(caught.is_err(), "expected panic to propagate");
@@ -619,5 +630,48 @@ mod tests {
         let f = std::fs::File::open(&parquet_path).unwrap();
         let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(f);
         assert!(reader.is_ok(), "parquet footer missing: {:?}", reader.err());
+    }
+
+    /// noodles hands us raw samples text that starts with the FORMAT column
+    /// ("GT" or "GT:AD:DP"). `push` must strip it before parsing per-sample
+    /// genotypes; otherwise sample[0]'s slot gets the FORMAT bytes, everything
+    /// shifts by one, and the last sample is dropped.
+    #[test]
+    fn push_strips_format_before_mapping_samples() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = SilentOutput;
+        let mut gw = GenotypeWriter::new(3, tmp.path(), 64 << 20).unwrap();
+        gw.push("22", 100, "A", "G", "GT\t0/0\t0/1\t1/1", 1, &out)
+            .unwrap();
+        assert_eq!(gw.dosages, vec![0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn push_handles_multi_field_format() {
+        // FORMAT="GT:AD:DP" is one tab-delimited field; sample values carry
+        // their own colon separators inside each tab cell.
+        let tmp = tempfile::tempdir().unwrap();
+        let out = SilentOutput;
+        let mut gw = GenotypeWriter::new(2, tmp.path(), 64 << 20).unwrap();
+        gw.push(
+            "22",
+            200,
+            "A",
+            "G",
+            "GT:AD:DP\t0/1:12,3:15\t1/1:0,20:20",
+            1,
+            &out,
+        )
+        .unwrap();
+        assert_eq!(gw.dosages, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn push_treats_missing_samples_field_as_all_nan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = SilentOutput;
+        let mut gw = GenotypeWriter::new(2, tmp.path(), 64 << 20).unwrap();
+        gw.push("22", 300, "A", "G", ".", 1, &out).unwrap();
+        assert!(gw.dosages.iter().all(|d| d.is_nan()));
     }
 }
