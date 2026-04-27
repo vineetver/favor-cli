@@ -1,9 +1,11 @@
 // Compiles the vendored CoreArray GDS C++ library plus a thin C shim
 // (`cpp/shim.cpp`) that exposes a flat `extern "C"` surface to Rust.
 //
-// XZ (LZMA) is not built. SeqArray .gds files in normal use are LZ4- or
-// ZLIB-compressed; LZMA-compressed datasets will fail at read time with a
-// clear codec error rather than a link error.
+// LZMA support is compiled out via `COREARRAY_NO_LZMA`, which gates lines
+// 2164..2784 of dStream.cpp so no liblzma symbols are referenced. SeqArray
+// defaults to LZ4_RA / ZIP_RA for genotype storage, so this is the common
+// case. LZMA-compressed datasets will fail at read time with a CoreArray
+// codec error.
 
 use std::path::PathBuf;
 
@@ -63,6 +65,7 @@ fn main() {
         .include(&include)
         .include(&core)
         .include(&geno)
+        .define("COREARRAY_NO_LZMA", None)
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-unused-variable")
         .flag_if_supported("-Wno-unused-function")

@@ -1,6 +1,7 @@
 #include "shim.h"
 #include "../vendor/src/CoreArray/CoreArray.h"
 
+#include <mutex>
 #include <new>
 #include <string>
 #include <vector>
@@ -15,7 +16,10 @@ struct CaFile {
 namespace {
 
 CdAllocArray *resolve_array(CaFile *f, const char *path) {
-    CdGDSObj *obj = f->gds.Root().Path(UTF8String(path));
+    // PathEx returns null on not-found instead of throwing. Path() throws
+    // ErrGDSObj which our trap would translate, but the upstream message
+    // is less actionable than ours.
+    CdGDSObj *obj = f->gds.Root().PathEx(UTF8String(path));
     if (!obj) {
         f->err = std::string("path not found: ") + path;
         return nullptr;
@@ -46,11 +50,8 @@ int trap(CaFile *f, Fn &&body) {
 extern "C" {
 
 CaFile *corearray_open(const char *path) {
-    static bool registered = false;
-    if (!registered) {
-        RegisterClass();
-        registered = true;
-    }
+    static std::once_flag s_register_once;
+    std::call_once(s_register_once, []() { RegisterClass(); });
     CaFile *f = new (std::nothrow) CaFile;
     if (!f) return nullptr;
     try {
