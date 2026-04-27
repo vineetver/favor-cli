@@ -1,0 +1,15 @@
+[package]
+name = "corearray-sys"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "FFI bindings to the CoreArray GDS C++ library"
+license = "LGPL-3.0"
+links = "corearray"
+publish = false
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"
+

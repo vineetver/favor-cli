@@ -18,7 +18,7 @@ pub fn generate_select(analysis: &Analysis) -> String {
     match analysis.format {
         InputFormat::Tabular => write_tabular_select(&mut sql, analysis),
         InputFormat::Parquet => write_parquet_select(&mut sql, analysis),
-        InputFormat::Vcf => write_vcf_stub(&mut sql),
+        InputFormat::Vcf | InputFormat::Gds => write_vcf_stub(&mut sql),
     }
 
     sql
@@ -48,14 +48,14 @@ pub fn generate_script(analysis: &Analysis, input_path: &Path, output_path: &Pat
                 "-- (programmatic: engine.register_parquet(\"_ingest_input\", path))"
             );
         }
-        InputFormat::Vcf => {}
+        InputFormat::Vcf | InputFormat::Gds => {}
     }
     let _ = writeln!(script);
     let _ = writeln!(script, "-- Transformation query:");
     let _ = writeln!(script, "{select}");
     let _ = writeln!(script);
 
-    if analysis.format != InputFormat::Vcf {
+    if !matches!(analysis.format, InputFormat::Vcf | InputFormat::Gds) {
         let _ = writeln!(script, "-- Execute as:");
         let _ = writeln!(script, "-- COPY (<above query>)");
         let _ = writeln!(script, "--   TO '{}/'", output_path.display());

@@ -208,6 +208,50 @@ impl FormatHandler for TsvHandler {
     }
 }
 
+pub struct GdsHandler;
+
+impl FormatHandler for GdsHandler {
+    fn name(&self) -> &'static str {
+        "GDS"
+    }
+
+    fn detect(&self, path: &Path, header: &[u8]) -> DetectResult {
+        if path_lower(path).ends_with(".gds") {
+            return DetectResult::Yes(0.95);
+        }
+        // CoreArray GDS magic: first 8 bytes are "COREARRA" (followed by Yx00).
+        if header.starts_with(b"COREARRA") {
+            return DetectResult::Yes(1.0);
+        }
+        DetectResult::No
+    }
+
+    fn schema(&self, _path: &Path) -> Result<Schema, CohortError> {
+        Ok(Schema::new(vec![
+            Field::new("chromosome", DataType::Utf8, false),
+            Field::new("position", DataType::Int32, false),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+        ]))
+    }
+
+    fn input_format(&self) -> InputFormat {
+        InputFormat::Gds
+    }
+
+    fn delimiter(&self, _path: &Path) -> Option<Delimiter> {
+        None
+    }
+
+    fn open_reader(
+        &self,
+        path: &Path,
+        _threads: usize,
+    ) -> Result<Box<dyn VariantReader>, CohortError> {
+        Ok(Box::new(super::gds::GdsVariantReader::open(path)?))
+    }
+}
+
 pub struct CsvHandler;
 
 impl FormatHandler for CsvHandler {
@@ -257,6 +301,7 @@ impl FormatRegistry {
         Self {
             handlers: vec![
                 Box::new(VcfHandler),
+                Box::new(GdsHandler),
                 Box::new(ParquetHandler),
                 Box::new(TsvHandler),
                 Box::new(CsvHandler),

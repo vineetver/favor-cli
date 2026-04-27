@@ -129,6 +129,15 @@ pub fn run_ingest(
         }
         return ingest_vcf(engine, config, n_samples, out);
     }
+    if analysis.format == InputFormat::Gds {
+        return Err(CohortError::Input(
+            "GDS reader is registered and usable programmatically \
+             (FormatRegistry::detect + FormatHandler::open_reader), but the \
+             cohort-build CLI dispatch has not yet been generalized off the \
+             VCF-specific ingest_vcfs path. Convert the .gds to VCF for now."
+                .into(),
+        ));
+    }
     if config.emit_sql || analysis.needs_intervention() {
         return emit_sql_script(config, &analysis, out);
     }
@@ -571,7 +580,7 @@ fn register_tabular_inputs(
                 ))?;
             }
         }
-        InputFormat::Vcf => unreachable!(),
+        InputFormat::Vcf | InputFormat::Gds => unreachable!(),
     }
     Ok(())
 }
@@ -594,7 +603,9 @@ fn apply_build_override(
         }
         // Pre-setup ingest is a first-class path: skip build detection when
         // no configured engine is available.
-        None if analysis.format != InputFormat::Vcf && engine.config_opt().is_some() => {
+        None if !matches!(analysis.format, InputFormat::Vcf | InputFormat::Gds)
+            && engine.config_opt().is_some() =>
+        {
             let _ = ingest::detect::detect_build_and_coords(engine, analysis, first);
         }
         None => {}

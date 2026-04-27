@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/corearray-sys"]
+resolver = "2"
+
 [package]
 name = "favor"
 version = "0.1.0"
@@ -28,6 +32,9 @@ statrs = "0.18"
 rayon = "1.10"
 walkdir = "2"
 memchr = "2"
+
+# GDS (SeqArray) ingest: FFI to vendored CoreArray C++ library
+corearray-sys = { path = "crates/corearray-sys" }
 
 # VCF → parquet: streaming parser + columnar writer
 noodles-vcf = "0.73"

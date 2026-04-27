@@ -2,6 +2,7 @@
 
 pub mod detect;
 pub mod format;
+pub mod gds;
 pub mod reader;
 pub mod sql;
 pub mod vcf;
@@ -21,6 +22,7 @@ pub enum InputFormat {
     Vcf,
     Tabular,
     Parquet,
+    Gds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -143,6 +145,10 @@ pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), Co
 
     if name.ends_with(".parquet") {
         return Ok((InputFormat::Parquet, None));
+    }
+
+    if name.ends_with(".gds") {
+        return Ok((InputFormat::Gds, None));
     }
 
     if name.ends_with(".tsv")
@@ -313,6 +319,36 @@ pub fn analyze(path: &Path) -> Result<Analysis, CohortError> {
                 rsid_col: None,
             })
         }
+
+        InputFormat::Gds => Ok(Analysis {
+            format,
+            delimiter: None,
+            raw_columns: vec![
+                "chromosome".into(),
+                "position".into(),
+                "allele".into(),
+            ],
+            columns: vec![
+                ColumnMapping {
+                    input_name: "chromosome".into(),
+                    canonical: "chromosome",
+                },
+                ColumnMapping {
+                    input_name: "position".into(),
+                    canonical: "position",
+                },
+            ],
+            ambiguous: vec![],
+            unmapped: vec![],
+            join_key: JoinKey::ChromPosRefAlt,
+            build_guess: BuildGuess::Unknown,
+            coord_base: CoordBase::OneBased,
+            chr_col: Some("chromosome".into()),
+            pos_col: Some("position".into()),
+            ref_col: None,
+            alt_col: None,
+            rsid_col: None,
+        }),
 
         InputFormat::Tabular => {
             let delim = delimiter.unwrap_or(Delimiter::Tab);
