@@ -216,7 +216,12 @@ impl FormatHandler for GdsHandler {
     }
 
     fn detect(&self, path: &Path, header: &[u8]) -> DetectResult {
-        if path_lower(path).ends_with(".gds") {
+        // .agds is the STAARpipeline convention for annotated GDS. We treat
+        // it as plain GDS — read genotypes only, skip /annotation/info/...
+        // channels. Annotations come from `favor annotate` against fresh
+        // FAVOR parquet, so we sidestep any staleness in the embedded copy.
+        let name = path_lower(path);
+        if name.ends_with(".gds") || name.ends_with(".agds") {
             return DetectResult::Yes(0.95);
         }
         // CoreArray GDS magic: first 8 bytes are "COREARRA" (followed by Yx00).

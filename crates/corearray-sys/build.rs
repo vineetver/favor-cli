@@ -1,11 +1,12 @@
 // Compiles the vendored CoreArray GDS C++ library plus a thin C shim
 // (`cpp/shim.cpp`) that exposes a flat `extern "C"` surface to Rust.
 //
-// LZMA support is compiled out via `COREARRAY_NO_LZMA`, which gates lines
-// 2164..2784 of dStream.cpp so no liblzma symbols are referenced. SeqArray
-// defaults to LZ4_RA / ZIP_RA for genotype storage, so this is the common
-// case. LZMA-compressed datasets will fail at read time with a CoreArray
-// codec error.
+// LZMA support uses the system liblzma instead of the bundled XZ tarball
+// (avoiding the upstream Makefile's tar/configure/make dance). The
+// `COREARRAY_USE_LZMA_EXT` define switches dStream.h's include from
+// `../XZ/api/lzma.h` to `<lzma.h>`. The link flag below pulls liblzma.so
+// in. Production aGDS files (e.g. CCDG WGS) use the LZMA_ra coder, so
+// LZMA cannot be dropped.
 
 use std::path::PathBuf;
 
@@ -65,7 +66,7 @@ fn main() {
         .include(&include)
         .include(&core)
         .include(&geno)
-        .define("COREARRAY_NO_LZMA", None)
+        .define("COREARRAY_USE_LZMA_EXT", None)
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-unused-variable")
         .flag_if_supported("-Wno-unused-function")
@@ -96,6 +97,8 @@ fn main() {
         c_lib.file(zlib.join(f));
     }
     c_lib.compile("corearray_c");
+
+    println!("cargo:rustc-link-lib=lzma");
 
     println!("cargo:rerun-if-changed=cpp/shim.cpp");
     println!("cargo:rerun-if-changed=cpp/shim.h");

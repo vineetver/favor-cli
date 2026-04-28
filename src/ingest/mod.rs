@@ -147,7 +147,9 @@ pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), Co
         return Ok((InputFormat::Parquet, None));
     }
 
-    if name.ends_with(".gds") {
+    // .agds (STAARpipeline annotated GDS) is treated as plain GDS:
+    // genotypes are read, embedded /annotation/info channels are skipped.
+    if name.ends_with(".gds") || name.ends_with(".agds") {
         return Ok((InputFormat::Gds, None));
     }
 

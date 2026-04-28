@@ -5,11 +5,17 @@
 //! slice into a per-variant samples_text buffer that mirrors the VCF reader's
 //! contract (FORMAT-prefixed, tab-separated, "GT" column only).
 //!
-//! /genotype/data is a 3-d int8 array with axes (ploidy, sample, variant).
-//! Per-allele codes are 0=ref, 1..k=alt_k, anything < 0 is missing
-//! (CoreArray emits the bit-pattern's signed extension; we treat any negative
-//! value as missing). Diploid GT is built as "a/b" using these codes; "." for
-//! missing alleles.
+//! /genotype/data is a 3-d int8 array with axes (variant, sample, ploidy)
+//! — verified against the production CCDG 136k aGDS where `dims =
+//! [n_variants, n_samples, 2]`. Per-allele codes are 0=ref, 1..k=alt_k,
+//! anything < 0 is missing (CoreArray emits the bit-pattern's signed
+//! extension; we treat any negative value as missing). Diploid GT is built
+//! as "a/b" using these codes; "." for missing alleles.
+//!
+//! Embedded /annotation/info channels are intentionally skipped. Annotations
+//! come from `favor annotate` against fresh FAVOR parquet, so .agds files
+//! are treated as plain GDS for ingest. This sidesteps any staleness in the
+//! annotations baked into a given .agds at the time it was built.
 
 #![allow(dead_code)] // GdsVariantReader is wired via FormatHandler trait object
 
@@ -54,9 +60,10 @@ impl GdsVariantReader {
         let sample_count = file.array_dim(PATH_SAMPLE_ID, 0)? as i32;
         let variant_count = file.array_dim(PATH_POSITION, 0)? as i32;
 
+        // SeqArray stores /genotype/data as (variant, sample, ploidy).
+        // Verified on CCDG 136k aGDS: dims = [n_variants, n_samples, 2].
         let geno_dims = file.array_dims(PATH_GENOTYPE_DATA, 3)?;
-        let ploidy = geno_dims[0] as i32;
-        if geno_dims[1] as i32 != sample_count || geno_dims[2] as i32 != variant_count {
+        if geno_dims[0] as i32 != variant_count || geno_dims[1] as i32 != sample_count {
             return Err(CohortError::Input(format!(
                 "GDS '{}': /genotype/data dims {:?} disagree with sample_count={} variant_count={}",
                 path.display(),
@@ -65,12 +72,13 @@ impl GdsVariantReader {
                 variant_count
             )));
         }
+        let ploidy = geno_dims[2] as i32;
 
         let chromosome = file.read_string_array_1d(PATH_CHROMOSOME, 0, variant_count)?;
         let position = file.read_int32_array_1d(PATH_POSITION, 0, variant_count)?;
         let allele = file.read_string_array_1d(PATH_ALLELE, 0, variant_count)?;
 
-        let geno_buf = vec![0i8; (ploidy as usize) * (sample_count as usize)];
+        let geno_buf = vec![0i8; (sample_count as usize) * (ploidy as usize)];
         let samples_text =
             String::with_capacity(2 + (sample_count as usize) * (ploidy as usize * 2 + 1));
 
@@ -102,9 +110,13 @@ impl VariantReader for GdsVariantReader {
         &mut self,
         f: &mut dyn for<'a> FnMut(RawRecord<'a>) -> Result<(), CohortError>,
     ) -> Result<(), CohortError> {
+        let ploidy_us = self.ploidy as usize;
         for v in 0..self.variant_count {
-            let start = [0i32, 0, v];
-            let length = [self.ploidy, self.sample_count, 1];
+            // (variant, sample, ploidy) layout: pin axis 0 to v, take all
+            // samples and ploidies. Output buffer is laid out (sample, ploidy)
+            // row-major: index [s * ploidy + p].
+            let start = [v, 0i32, 0];
+            let length = [1, self.sample_count, self.ploidy];
             self.file
                 .read_int8_slice(PATH_GENOTYPE_DATA, &start, &length, &mut self.geno_buf)?;
 
@@ -112,11 +124,11 @@ impl VariantReader for GdsVariantReader {
             self.samples_text.push_str("GT");
             for s in 0..(self.sample_count as usize) {
                 self.samples_text.push('\t');
-                for p in 0..(self.ploidy as usize) {
+                for p in 0..ploidy_us {
                     if p > 0 {
                         self.samples_text.push('/');
                     }
-                    let code = self.geno_buf[p * (self.sample_count as usize) + s];
+                    let code = self.geno_buf[s * ploidy_us + p];
                     if code < 0 {
                         self.samples_text.push('.');
                     } else {
