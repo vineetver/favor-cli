@@ -1,0 +1,3 @@
+[submodule "crates/corearray-sys/vendor"]
+	path = crates/corearray-sys/vendor
+	url = https://github.com/CoreArray/GDSFormat.git
