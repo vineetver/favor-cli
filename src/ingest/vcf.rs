@@ -287,6 +287,14 @@ impl VcfVariantReader {
 }
 
 impl VariantReader for VcfVariantReader {
+    fn sample_names(&mut self) -> Result<Vec<String>, CohortError> {
+        // Re-reads the header from disk. Acceptable because the trait's
+        // sample_names() is called at most a handful of times per file
+        // (cohort-build sample lookup, sidecar write, header-consistency check)
+        // and the current open Reader has already advanced past the header.
+        crate::staar::genotype::read_sample_names(&self.path)
+    }
+
     fn for_each(
         &mut self,
         f: &mut dyn for<'a> FnMut(RawRecord<'a>) -> Result<(), CohortError>,
@@ -699,6 +707,7 @@ impl<'a> RecordContext<'a> {
     fn ingest_files(
         &mut self,
         files: &[impl AsRef<Path>],
+        handler: &dyn super::format::FormatHandler,
         threads: usize,
         output: &dyn Output,
     ) -> Result<(), CohortError> {
@@ -712,12 +721,12 @@ impl<'a> RecordContext<'a> {
                     input_path.file_name().unwrap_or_default().to_string_lossy()
                 ));
             }
-            let mut reader = VcfVariantReader::open(input_path, threads)?;
+            let mut reader = handler.open_reader(input_path, threads)?;
             let label = format!(
                 "ingesting {}",
                 input_path.file_name().unwrap_or_default().to_string_lossy()
             );
-            self.drive(&mut reader, &label, output)?;
+            self.drive(reader.as_mut(), &label, output)?;
             self.finish_file();
         }
         Ok(())
@@ -728,7 +737,8 @@ impl<'a> RecordContext<'a> {
 /// is written — this is the standalone extraction path used by the cohort
 /// store when variants have already been ingested separately.
 pub fn stream_genotypes(
-    vcf_paths: &[PathBuf],
+    paths: &[PathBuf],
+    handler: &(dyn super::format::FormatHandler + Send + Sync),
     gw: &mut GenotypeWriter,
     memory_budget: u64,
     threads: usize,
@@ -736,13 +746,15 @@ pub fn stream_genotypes(
     output: &dyn Output,
 ) -> Result<(), CohortError> {
     let mut ctx = RecordContext::new_genotype_only(gw, memory_budget, geno_dir, None);
-    ctx.ingest_files(vcf_paths, threads, output)
+    ctx.ingest_files(paths, handler, threads, output)
 }
 
-/// Stream one or more VCF files to per-chromosome parquet files (sequential).
+/// Stream one or more variant files to per-chromosome parquet (sequential).
+/// Format-agnostic: caller picks the handler (VCF, GDS, ...).
 #[allow(clippy::too_many_arguments)]
 pub fn ingest_vcfs(
     input_paths: &[PathBuf],
+    handler: &(dyn super::format::FormatHandler + Send + Sync),
     vs_writer: &mut VariantSetWriter,
     geno_writer: Option<&mut GenotypeWriter>,
     memory_budget: u64,
@@ -761,14 +773,16 @@ pub fn ingest_vcfs(
         memory_budget as f64 / (1024.0 * 1024.0 * 1024.0)
     ));
 
-    ctx.ingest_files(input_paths, threads, output)?;
+    ctx.ingest_files(input_paths, handler, threads, output)?;
     ctx.flush_into_vs(vs_writer)
 }
 
-/// Validate all VCF files have identical sample lists. Reads headers in
-/// parallel via rayon. Returns the shared sample names on success.
-fn validate_headers_parallel(
+/// Validate that all input files report identical sample lists. Routes
+/// through the format handler so this works for VCF (header parse) and
+/// GDS (FFI read of /sample.id) alike.
+fn validate_sample_consistency(
     paths: &[PathBuf],
+    handler: &(dyn super::format::FormatHandler + Send + Sync),
     n_samples: usize,
 ) -> Result<(), CohortError> {
     use rayon::prelude::*;
@@ -777,9 +791,9 @@ fn validate_headers_parallel(
         return Ok(());
     }
 
-    let first_samples = crate::staar::genotype::read_sample_names(&paths[0])?;
+    let first_samples = handler.open_reader(&paths[0], 1)?.sample_names()?;
     paths[1..].par_iter().try_for_each(|p| {
-        let samples = crate::staar::genotype::read_sample_names(p)?;
+        let samples = handler.open_reader(p, 1)?.sample_names()?;
         if samples.len() != first_samples.len() {
             return Err(CohortError::Input(format!(
                 "Sample count mismatch: '{}' has {} samples but '{}' has {}",
@@ -790,7 +804,7 @@ fn validate_headers_parallel(
         if samples != first_samples {
             return Err(CohortError::Input(format!(
                 "Sample order mismatch between '{}' and '{}'. \
-                 All VCF files must have identical samples in the same order.",
+                 All input files must have identical samples in the same order.",
                 paths[0].display(), p.display(),
             )));
         }
@@ -798,12 +812,15 @@ fn validate_headers_parallel(
     })
 }
 
-/// Parallel multi-file VCF ingest. Files are chunked across N workers,
-/// each worker processes its chunk sequentially with a single RecordContext.
-/// N is bounded by thread count. Validates headers before spawning.
+/// Parallel multi-file ingest. Files are chunked across N workers, each
+/// worker processes its chunk sequentially with a single RecordContext.
+/// N is bounded by thread count. Validates sample consistency before
+/// spawning. The handler is passed to each worker so this works for any
+/// VariantReader-backed format (VCF, GDS, ...).
 #[allow(clippy::too_many_arguments)]
 pub fn ingest_vcfs_parallel(
     input_paths: &[PathBuf],
+    handler: &(dyn super::format::FormatHandler + Send + Sync),
     output_dir: &Path,
     geno_dir: Option<&Path>,
     n_samples: usize,
@@ -821,7 +838,7 @@ pub fn ingest_vcfs_parallel(
 
     if n_samples > 0 {
         output.status("  Validating sample consistency across files...");
-        validate_headers_parallel(input_paths, n_samples)?;
+        validate_sample_consistency(input_paths, handler, n_samples)?;
     }
 
     let n_workers = input_paths.len().min(threads);
@@ -851,7 +868,7 @@ pub fn ingest_vcfs_parallel(
         .enumerate()
         .map(|(worker_id, file_chunk)| {
             run_worker(
-                worker_id, &file_chunk, output_dir, geno_dir,
+                worker_id, &file_chunk, handler, output_dir, geno_dir,
                 n_samples, memory_per_worker,
                 chromosome_filter.cloned(),
                 output,
@@ -886,6 +903,7 @@ pub fn ingest_vcfs_parallel(
 fn run_worker(
     worker_id: usize,
     file_chunk: &[&PathBuf],
+    handler: &(dyn super::format::FormatHandler + Send + Sync),
     output_dir: &Path,
     geno_dir: Option<&Path>,
     n_samples: usize,
@@ -904,7 +922,7 @@ fn run_worker(
         output_dir.to_path_buf(), Some(worker_id),
         chromosome_filter,
     );
-    ctx.ingest_files(file_chunk, 1, output)?;
+    ctx.ingest_files(file_chunk, handler, 1, output)?;
     let result = ctx.flush()?;
     if let Some(mut g) = gw {
         g.flush_all()?;

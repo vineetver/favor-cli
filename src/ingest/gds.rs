@@ -98,14 +98,14 @@ impl GdsVariantReader {
     pub fn sample_count(&self) -> i32 {
         self.sample_count
     }
-
-    pub fn sample_names(&self) -> Result<Vec<String>, CohortError> {
-        self.file
-            .read_string_array_1d(PATH_SAMPLE_ID, 0, self.sample_count)
-    }
 }
 
 impl VariantReader for GdsVariantReader {
+    fn sample_names(&mut self) -> Result<Vec<String>, CohortError> {
+        self.file
+            .read_string_array_1d(PATH_SAMPLE_ID, 0, self.sample_count)
+    }
+
     fn for_each(
         &mut self,
         f: &mut dyn for<'a> FnMut(RawRecord<'a>) -> Result<(), CohortError>,

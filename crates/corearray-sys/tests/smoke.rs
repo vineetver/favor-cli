@@ -155,11 +155,11 @@ fn probe_real_agds_from_env() {
         // dims = [n_variants, n_samples, 2]. Read one variant: pin axis 0
         // to 0, take all samples and ploidies. 2-d fallback (sample, variant).
         let (geno_count, gs, gl): (usize, Vec<i32>, Vec<i32>) = if nd == 3 {
-            let nsamp = gd[1] as i64;
-            let ploidy = gd[2] as i64;
+            let nsamp = gd[1];
+            let ploidy = gd[2];
             ((nsamp * ploidy) as usize, vec![0, 0, 0], vec![1, nsamp as i32, ploidy as i32])
         } else {
-            let nsamp = gd[0] as i64;
+            let nsamp = gd[0];
             (nsamp as usize, vec![0, 0], vec![nsamp as i32, 1])
         };
         let mut buf = vec![0i8; geno_count];

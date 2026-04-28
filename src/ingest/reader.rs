@@ -36,6 +36,11 @@ pub trait VariantReader: Send {
         &mut self,
         f: &mut dyn for<'a> FnMut(RawRecord<'a>) -> Result<(), CohortError>,
     ) -> Result<(), CohortError>;
+
+    /// Sample names in the order they appear in the per-record `samples_text`.
+    /// Reading is allowed to do work (header parse, FFI call), so callers
+    /// should cache the result if they need it more than once.
+    fn sample_names(&mut self) -> Result<Vec<String>, CohortError>;
 }
 
 #[cfg(test)]

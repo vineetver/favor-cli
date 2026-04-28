@@ -578,9 +578,11 @@ impl<'a> StaarPipeline<'a> {
         };
 
         let geno_staging_dir = self.config.output_dir.join(".geno_staging");
+        let (genotype_format, _) = crate::ingest::detect_format(&genotypes[0])?;
         self.cohort().build_or_load(
             crate::store::cohort::CohortSources {
                 genotypes: &genotypes,
+                genotype_format,
                 annotations: &annotations,
             },
             crate::store::cohort::BuildOpts {

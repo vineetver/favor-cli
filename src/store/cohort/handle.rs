@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 
 use crate::column;
 use crate::error::CohortError;
+use crate::ingest::format::handler_for_format;
 use crate::output::Output;
 use crate::runtime::Engine;
 use crate::store::Store;
@@ -26,6 +27,10 @@ use super::{
 
 pub struct CohortSources<'a> {
     pub genotypes: &'a [PathBuf],
+    /// Genotype-side input format. Caller has already detected this via
+    /// `FormatRegistry::detect`. The cohort builder uses it to pick the
+    /// right `FormatHandler` for sample-name reads and per-variant streaming.
+    pub genotype_format: crate::ingest::InputFormat,
     pub annotations: &'a Path,
 }
 
@@ -154,7 +159,11 @@ impl<'a> CohortHandle<'a> {
             })?;
         }
 
-        let CohortSources { genotypes, annotations } = sources;
+        let CohortSources {
+            genotypes,
+            genotype_format,
+            annotations,
+        } = sources;
         let BuildOpts { staging_dir, rebuild, probe: probe_result } = opts;
         let res = engine.resources();
 
@@ -188,8 +197,10 @@ impl<'a> CohortHandle<'a> {
             "  Extracting genotypes from {} VCF file(s)...",
             genotypes.len()
         ));
+        let handler = handler_for_format(genotype_format)?;
         let geno = crate::staar::genotype::extract_genotypes(
             genotypes,
+            handler.as_ref(),
             staging_dir,
             res.memory_bytes,
             res.threads,

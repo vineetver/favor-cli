@@ -353,3 +353,20 @@ impl FormatRegistry {
         self.handlers.push(handler);
     }
 }
+
+/// Build a fresh handler instance for a given format. Used by the
+/// ingest dispatch path where the format has already been detected and
+/// the caller wants a `Box<dyn FormatHandler>` it can hand into the
+/// streaming path. Tabular formats return an error because they don't
+/// expose `open_reader`.
+pub fn handler_for_format(
+    format: InputFormat,
+) -> Result<Box<dyn FormatHandler + Send + Sync>, CohortError> {
+    match format {
+        InputFormat::Vcf => Ok(Box::new(VcfHandler)),
+        InputFormat::Gds => Ok(Box::new(GdsHandler)),
+        InputFormat::Parquet | InputFormat::Tabular => Err(CohortError::Input(format!(
+            "format {format:?} does not support variant streaming"
+        ))),
+    }
+}

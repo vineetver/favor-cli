@@ -39,33 +39,36 @@ pub struct GenotypeResult {
 }
 
 pub fn extract_genotypes(
-    vcf_paths: &[PathBuf],
+    genotype_paths: &[PathBuf],
+    handler: &(dyn crate::ingest::format::FormatHandler + Send + Sync),
     output_dir: &Path,
     available_memory: u64,
     threads: usize,
     output: &dyn Output,
 ) -> Result<GenotypeResult, CohortError> {
-    if vcf_paths.is_empty() {
-        return Err(CohortError::Input("No VCF files provided.".into()));
+    if genotype_paths.is_empty() {
+        return Err(CohortError::Input("No genotype files provided.".into()));
     }
 
-    let sample_names = read_sample_names(&vcf_paths[0])?;
+    let sample_names = handler
+        .open_reader(&genotype_paths[0], threads)?
+        .sample_names()?;
     let n_samples = sample_names.len();
     if n_samples == 0 {
         return Err(CohortError::Input(
-            "VCF has no samples. STAAR requires a multi-sample VCF.".into(),
+            "Input has no samples. STAAR requires a multi-sample input.".into(),
         ));
     }
 
-    for vcf_path in &vcf_paths[1..] {
-        let file_samples = read_sample_names(vcf_path)?;
+    for path in &genotype_paths[1..] {
+        let file_samples = handler.open_reader(path, threads)?.sample_names()?;
         if file_samples != sample_names {
             return Err(CohortError::Input(format!(
                 "Sample mismatch: '{}' has {} samples but '{}' has {}. \
-                 All VCF files must have identical samples in the same order.",
-                vcf_paths[0].display(),
+                 All input files must have identical samples in the same order.",
+                genotype_paths[0].display(),
                 sample_names.len(),
-                vcf_path.display(),
+                path.display(),
                 file_samples.len()
             )));
         }
@@ -74,7 +77,7 @@ pub fn extract_genotypes(
     output.status(&format!(
         "Extracting genotypes: {} samples, {} file(s), {} threads, {:.1}G memory",
         n_samples,
-        vcf_paths.len(),
+        genotype_paths.len(),
         threads,
         available_memory as f64 / (1024.0 * 1024.0 * 1024.0)
     ));
@@ -83,7 +86,8 @@ pub fn extract_genotypes(
     let mut gw = GenotypeWriter::new(n_samples, &geno_dir, available_memory)?;
 
     crate::ingest::vcf::stream_genotypes(
-        vcf_paths,
+        genotype_paths,
+        handler,
         &mut gw,
         available_memory,
         threads,
@@ -92,12 +96,15 @@ pub fn extract_genotypes(
     )?;
 
     let total_variants = gw.variant_count();
-    let source_vcfs = vcf_paths.iter().map(|p| p.display().to_string()).collect();
-    let result = gw.finish(&sample_names, source_vcfs)?;
+    let source_paths = genotype_paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    let result = gw.finish(&sample_names, source_paths)?;
 
     output.success(&format!(
         "Extracted {total_variants} variants × {n_samples} samples from {} file(s)",
-        vcf_paths.len(),
+        genotype_paths.len(),
     ));
 
     Ok(result)

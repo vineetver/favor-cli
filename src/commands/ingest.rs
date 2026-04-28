@@ -10,7 +10,6 @@ use crate::ingest::format::FormatRegistry;
 use crate::ingest::{self, BuildGuess, InputFormat};
 use crate::output::{bail_if_cancelled, Output};
 use crate::runtime::Engine;
-use crate::staar::genotype::read_sample_names;
 use crate::store::cohort::{BuildOpts, CohortId, CohortSources, ProbeReason, StoreProbe};
 use crate::store::list::{VariantSet, VariantSetKind, VariantSetWriter};
 
@@ -122,21 +121,16 @@ pub fn run_ingest(
         return run_ingest_dry(config, &analysis, out);
     }
 
-    if analysis.format == InputFormat::Vcf {
-        let n_samples = read_sample_names(first)?.len();
+    if matches!(analysis.format, InputFormat::Vcf | InputFormat::Gds) {
+        let handler = ingest::format::handler_for_format(analysis.format)?;
+        let n_samples = handler
+            .open_reader(first, engine.resources().threads)?
+            .sample_names()?
+            .len();
         if config.annotations.is_some() && n_samples > 0 {
-            return run_cohort_build(engine, config, n_samples, out);
+            return run_cohort_build(engine, config, analysis.format, n_samples, out);
         }
-        return ingest_vcf(engine, config, n_samples, out);
-    }
-    if analysis.format == InputFormat::Gds {
-        return Err(CohortError::Input(
-            "GDS reader is registered and usable programmatically \
-             (FormatRegistry::detect + FormatHandler::open_reader), but the \
-             cohort-build CLI dispatch has not yet been generalized off the \
-             VCF-specific ingest_vcfs path. Convert the .gds to VCF for now."
-                .into(),
-        ));
+        return ingest_vcf(engine, config, analysis.format, n_samples, out);
     }
     if config.emit_sql || analysis.needs_intervention() {
         return emit_sql_script(config, &analysis, out);
@@ -147,6 +141,7 @@ pub fn run_ingest(
 fn run_cohort_build(
     engine: &Engine,
     config: &IngestConfig,
+    genotype_format: InputFormat,
     n_samples: usize,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
@@ -223,6 +218,7 @@ fn run_cohort_build(
     let result = cohort.build_or_load(
         CohortSources {
             genotypes: &config.inputs,
+            genotype_format,
             annotations: annotations_path,
         },
         BuildOpts {
@@ -307,10 +303,12 @@ fn validate_all_same_format(
 fn ingest_vcf(
     engine: &Engine,
     config: &IngestConfig,
+    genotype_format: InputFormat,
     n_samples: usize,
     out: &dyn Output,
 ) -> Result<(), CohortError> {
     let first = &config.inputs[0];
+    let handler = ingest::format::handler_for_format(genotype_format)?;
 
     if config.emit_sql {
         let analysis = ingest::analyze(first)?;
@@ -319,7 +317,7 @@ fn ingest_vcf(
         std::fs::write(&script_path, &script).map_err(|e| {
             CohortError::Resource(format!("Cannot write '{}': {e}", script_path.display()))
         })?;
-        out.status(&format!("VCF hint script: {}", script_path.display()));
+        out.status(&format!("SQL hint script: {}", script_path.display()));
         return Ok(());
     }
 
@@ -328,16 +326,18 @@ fn ingest_vcf(
 
     if dual_write {
         out.status(&format!(
-            "Ingesting {} VCF file(s) + extracting genotypes ({} samples, {}, {} threads)",
+            "Ingesting {} {} file(s) + extracting genotypes ({} samples, {}, {} threads)",
             config.inputs.len(),
+            handler.name(),
             n_samples,
             resources.memory_human(),
             resources.threads
         ));
     } else {
         out.status(&format!(
-            "Ingesting {} VCF file(s) ({}, {} threads)",
+            "Ingesting {} {} file(s) ({}, {} threads)",
             config.inputs.len(),
+            handler.name(),
             resources.memory_human(),
             resources.threads
         ));
@@ -351,6 +351,7 @@ fn ingest_vcf(
         // Parallel path: each file gets its own worker.
         let result = ingest::vcf::ingest_vcfs_parallel(
             &config.inputs,
+            handler.as_ref(),
             &config.output,
             if dual_write { Some(geno_dir.as_path()) } else { None },
             n_samples,
@@ -368,13 +369,15 @@ fn ingest_vcf(
         let vs = vs_writer.finish()?;
 
         if dual_write {
-            let sample_names = read_sample_names(first)?;
-            let source_vcfs: Vec<String> = config.inputs.iter().map(|p| p.display().to_string()).collect();
+            let sample_names = handler
+                .open_reader(first, resources.threads)?
+                .sample_names()?;
+            let source_paths: Vec<String> = config.inputs.iter().map(|p| p.display().to_string()).collect();
             let meta = crate::staar::genotype::GenotypeMeta {
                 version: 1,
                 n_samples,
                 chromosomes: vs.chromosomes().iter().map(|c| c.to_string()).collect(),
-                source_vcfs,
+                source_vcfs: source_paths,
             };
             let meta_path = geno_dir.join("genotypes.json");
             std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)
@@ -407,6 +410,7 @@ fn ingest_vcf(
 
         let result = ingest::vcf::ingest_vcfs(
             &config.inputs,
+            handler.as_ref(),
             &mut vs_writer,
             geno_writer.as_mut(),
             resources.memory_bytes,
@@ -417,9 +421,11 @@ fn ingest_vcf(
         let vs = vs_writer.finish()?;
 
         if let Some(gw) = geno_writer {
-            let sample_names = read_sample_names(first)?;
-            let source_vcfs = config.inputs.iter().map(|p| p.display().to_string()).collect();
-            let geno_result = gw.finish(&sample_names, source_vcfs)?;
+            let sample_names = handler
+                .open_reader(first, resources.threads)?
+                .sample_names()?;
+            let source_paths = config.inputs.iter().map(|p| p.display().to_string()).collect();
+            let geno_result = gw.finish(&sample_names, source_paths)?;
             out.success(&format!(
                 "  Genotypes: {} variants x {} samples -> {}",
                 result.genotype_variants, n_samples, geno_result.output_dir.display()
