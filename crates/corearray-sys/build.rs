@@ -1,12 +1,15 @@
 // Compiles the vendored CoreArray GDS C++ library plus a thin C shim
 // (`cpp/shim.cpp`) that exposes a flat `extern "C"` surface to Rust.
 //
-// LZMA support uses the system liblzma instead of the bundled XZ tarball
-// (avoiding the upstream Makefile's tar/configure/make dance). The
+// LZMA support comes from `liblzma-sys` (vendored static build, portable
+// across linux/macos/windows), avoiding both the upstream Makefile's
+// tar/configure/make dance and any system-package requirement. The
 // `COREARRAY_USE_LZMA_EXT` define switches dStream.h's include from
-// `../XZ/api/lzma.h` to `<lzma.h>`. The link flag below pulls liblzma.so
-// in. Production aGDS files (e.g. CCDG WGS) use the LZMA_ra coder, so
-// LZMA cannot be dropped.
+// `../XZ/api/lzma.h` to `<lzma.h>`; we feed the include path from
+// `DEP_LZMA_INCLUDE` (set by cargo because liblzma-sys has links="lzma").
+// liblzma-sys handles the link side, so we don't emit our own -llzma.
+// Production aGDS files (e.g. CCDG WGS) use the LZMA_ra coder, so LZMA
+// cannot be dropped.
 
 use std::path::PathBuf;
 
@@ -19,6 +22,9 @@ fn main() {
     let zlib = vendor.join("src/ZLIB");
     let include = vendor.join("include");
     let shim = manifest.join("cpp");
+
+    let lzma_include = std::env::var("DEP_LZMA_INCLUDE")
+        .expect("DEP_LZMA_INCLUDE not set — liblzma-sys must be a direct dependency");
 
     if !vendor.join("src/CoreArray/CoreArray.cpp").exists() {
         panic!(
@@ -66,6 +72,7 @@ fn main() {
         .include(&include)
         .include(&core)
         .include(&geno)
+        .include(&lzma_include)
         .define("COREARRAY_USE_LZMA_EXT", None)
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-unused-variable")
@@ -97,8 +104,6 @@ fn main() {
         c_lib.file(zlib.join(f));
     }
     c_lib.compile("corearray_c");
-
-    println!("cargo:rustc-link-lib=lzma");
 
     println!("cargo:rerun-if-changed=cpp/shim.cpp");
     println!("cargo:rerun-if-changed=cpp/shim.h");
