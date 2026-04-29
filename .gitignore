@@ -12,7 +12,7 @@
 CLAUDE.md
 testdata/
 !src/staar/grm/testdata/
-doc/tui-backlog.md
+doc/
 docs/storage-engine-design.md
 bench/
 .cohort/
